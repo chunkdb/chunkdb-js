@@ -2,6 +2,14 @@
 
 Official Node.js and TypeScript client for `chunkdb`.
 
+This package is intentionally small:
+
+- one client = one socket
+- sequential request/response flow
+- no pooling
+- no retries or reconnect
+- no browser transport
+
 ## Features
 
 - `chunk://` and `chunks://` URI support
@@ -61,6 +69,23 @@ Methods:
 - `chunk(cx, cy)`
 - `chunkbin(cx, cy)`
 
+## Examples
+
+```ts
+import { connect } from "@chunkdb/client";
+
+const client = await connect({
+  host: "127.0.0.1",
+  port: 4242,
+  token: "chunk-token",
+});
+
+await client.set(0, 0, "1011001110110011");
+console.log(await client.get(0, 0));
+console.log(await client.chunkbin(0, 0));
+await client.close();
+```
+
 ## Errors
 
 - `ChunkConnectionError`
@@ -78,6 +103,7 @@ Server `-ERR ...` responses are surfaced as typed errors.
 npm install
 npm run build
 npm test
+npm pack --dry-run
 ```
 
 Integration tests expect a sibling `chunkdb` repository with built server binaries at:

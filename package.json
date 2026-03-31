@@ -2,11 +2,29 @@
   "name": "@chunkdb/client",
   "version": "0.1.0",
   "description": "Official Node.js and TypeScript client for chunkdb.",
+  "keywords": [
+    "chunkdb",
+    "database",
+    "client",
+    "typescript",
+    "nodejs",
+    "tcp",
+    "tls"
+  ],
   "license": "MIT",
   "type": "module",
+  "sideEffects": false,
   "main": "./dist/cjs/index.cjs",
   "module": "./dist/esm/index.js",
   "types": "./dist/index.d.ts",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chunkdb/chunkdb-node-client.git"
+  },
+  "homepage": "https://github.com/chunkdb/chunkdb-node-client#readme",
+  "bugs": {
+    "url": "https://github.com/chunkdb/chunkdb-node-client/issues"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -21,6 +39,10 @@
   ],
   "engines": {
     "node": ">=20"
+  },
+  "packageManager": "npm@11.6.2",
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "clean": "rm -rf dist",
