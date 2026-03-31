@@ -1,0 +1,38 @@
+{
+  "name": "@chunkdb/client",
+  "version": "0.1.0",
+  "description": "Official Node.js and TypeScript client for chunkdb.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/cjs/index.cjs",
+  "module": "./dist/esm/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/esm/index.js",
+      "require": "./dist/cjs/index.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "clean": "rm -rf dist",
+    "build": "npm run clean && tsc -p tsconfig.json --emitDeclarationOnly --outDir dist && tsup --config tsup.config.ts",
+    "test": "npm run test:unit && npm run test:integration",
+    "test:unit": "tsx --test test/uri.test.ts test/protocol.test.ts",
+    "test:integration": "tsx --test test/integration.test.ts test/tls.integration.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsup": "^8.5.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.8.0"
+  }
+}
