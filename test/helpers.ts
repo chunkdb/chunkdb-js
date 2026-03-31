@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import net from "node:net";
-import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -62,6 +62,10 @@ function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function tlsFixtureDir(): string {
+  return path.join(repoRoot(), "test/fixtures/tls");
+}
+
 async function waitForServer(host: string, port: number): Promise<void> {
   const deadline = Date.now() + 5000;
   while (Date.now() < deadline) {
@@ -82,29 +86,11 @@ async function waitForServer(host: string, port: number): Promise<void> {
   throw new Error(`server did not start on ${host}:${port}`);
 }
 
-function createTlsCredentials(baseDir: string): { cert: string; key: string } {
-  const cert = path.join(baseDir, "cert.pem");
-  const key = path.join(baseDir, "key.pem");
-  execFileSync(
-    "openssl",
-    [
-      "req",
-      "-x509",
-      "-newkey",
-      "rsa:2048",
-      "-sha256",
-      "-days",
-      "1",
-      "-nodes",
-      "-subj",
-      "/CN=127.0.0.1",
-      "-keyout",
-      key,
-      "-out",
-      cert,
-    ],
-    { stdio: "ignore" },
-  );
+function tlsFixtures(): { cert: string; key: string } {
+  const cert = path.join(tlsFixtureDir(), "cert.pem");
+  const key = path.join(tlsFixtureDir(), "key.pem");
+  assert.ok(fs.existsSync(cert), `TLS cert fixture not found: ${cert}`);
+  assert.ok(fs.existsSync(key), `TLS key fixture not found: ${key}`);
   return { cert, key };
 }
 
@@ -133,9 +119,7 @@ export async function startServer(options: { tls?: boolean; token?: string } = {
   ];
 
   if (tlsEnabled) {
-    const credsDir = path.join(dataDir, "tls");
-    fs.mkdirSync(credsDir, { recursive: true });
-    const { cert, key } = createTlsCredentials(credsDir);
+    const { cert, key } = tlsFixtures();
     args.push("--tls-cert", cert, "--tls-key", key);
   }
 
@@ -163,13 +147,4 @@ export async function startServer(options: { tls?: boolean; token?: string } = {
       fs.rmSync(dataDir, { recursive: true, force: true });
     },
   };
-}
-
-export function hasOpenSsl(): boolean {
-  try {
-    execFileSync("openssl", ["version"], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
 }

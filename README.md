@@ -49,6 +49,32 @@ console.log(await client.info());
 await client.close();
 ```
 
+## Timeout Options
+
+- `connectTimeoutMs`: maximum time to establish the socket and complete TLS setup
+- `commandTimeoutMs`: maximum time to wait for one command response
+
+```ts
+const client = await connectUri("chunk://chunk-token@127.0.0.1:4242/", {
+  connectTimeoutMs: 2000,
+  commandTimeoutMs: 3000,
+});
+```
+
+## TLS Options
+
+- `tls: true` or `chunks://...` to enable TLS
+- `tlsInsecure: true` to skip certificate verification for local testing only
+- `tlsServerName` to force SNI / hostname verification target
+- `ca`, `cert`, `key` for custom trust and client certificate material
+
+```ts
+const client = await connectUri("chunks://chunk-token@127.0.0.1:4242/", {
+  ca: process.env.CHUNKDB_CA_PEM,
+  tlsServerName: "chunkdb.local",
+});
+```
+
 ## API
 
 - `connect(options)`
@@ -68,6 +94,17 @@ Methods:
 - `set(x, y, bits)`
 - `chunk(cx, cy)`
 - `chunkbin(cx, cy)`
+
+`info()` returns:
+
+```ts
+type ChunkInfo = {
+  raw: string;
+  values: Record<string, string>;
+};
+```
+
+`values` contains the parsed `INFO` key/value pairs exactly as reported by the server.
 
 ## Examples
 
@@ -96,6 +133,23 @@ await client.close();
 - `ChunkTlsError`
 
 Server `-ERR ...` responses are surfaced as typed errors.
+
+```ts
+import { ChunkAuthError, ChunkServerError, connectUri } from "@chunkdb/client";
+
+try {
+  const client = await connectUri("chunk://wrong-token@127.0.0.1:4242/");
+  await client.ping();
+} catch (error) {
+  if (error instanceof ChunkAuthError) {
+    console.error("auth failed", error.serverCode, error.serverMessage);
+  } else if (error instanceof ChunkServerError) {
+    console.error("server error", error.serverCode, error.serverMessage);
+  } else {
+    throw error;
+  }
+}
+```
 
 ## Local Development
 

@@ -4,11 +4,9 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { connectUri } from "../src/index";
-import { chunkdbRepoRoot, hasOpenSsl, startServer } from "./helpers";
+import { chunkdbRepoRoot, startServer } from "./helpers";
 
-const canRunTls =
-  hasOpenSsl() &&
-  fs.existsSync(path.join(chunkdbRepoRoot(), "build-quick-tls/chunkdb_server"));
+const canRunTls = fs.existsSync(path.join(chunkdbRepoRoot(), "build-quick-tls/chunkdb_server"));
 
 test("tls ping and info", { skip: !canRunTls }, async () => {
   const server = await startServer({ tls: true });
