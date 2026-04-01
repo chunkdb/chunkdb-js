@@ -22,12 +22,22 @@ test("ping and close", async () => {
   }
 });
 
-test("auto auth and get/set", async () => {
+test("auto auth and get/set with explicit unset semantics", async () => {
   const server = await startServer();
   try {
     const client = await connectUri(server.uri);
+    assert.equal(await client.exists(0, 0), false);
     await client.set(0, 0, "1011001110110011");
+    assert.equal(await client.exists(0, 0), true);
     assert.equal(await client.get(0, 0), "1011001110110011");
+
+    await client.set(1, 0, "0000000000000000");
+    assert.equal(await client.exists(1, 0), true);
+    assert.equal(await client.get(1, 0), "0000000000000000");
+
+    await client.unset(1, 0);
+    assert.equal(await client.exists(1, 0), false);
+    assert.equal(await client.get(1, 0), "0000000000000000");
     await client.close();
   } finally {
     await server.stop();

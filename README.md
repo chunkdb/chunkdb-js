@@ -15,7 +15,7 @@ This package is intentionally small:
 - `chunk://` and `chunks://` URI support
 - Node core `net` / `tls` transport
 - `connect`, `connectUri`, and `ChunkClient`
-- `auth`, `ping`, `info`, `get`, `set`, `chunk`, `chunkbin`
+- `auth`, `ping`, `info`, `get`, `exists`, `set`, `unset`, `chunk`, `chunkbin`
 - typed error classes
 - configurable connect and command timeouts
 - dual ESM / CommonJS build output
@@ -91,9 +91,14 @@ Methods:
 - `ping()`
 - `info()`
 - `get(x, y)`
+- `exists(x, y)`
 - `set(x, y, bits)`
+- `unset(x, y)`
 - `chunk(cx, cy)`
 - `chunkbin(cx, cy)`
+
+`get(x, y)` returns the configured zero-bit payload when a block is unset.
+Use `exists(x, y)` to distinguish unset from an explicit all-zero value.
 
 `info()` returns:
 
@@ -119,6 +124,8 @@ const client = await connect({
 
 await client.set(0, 0, "1011001110110011");
 console.log(await client.get(0, 0));
+console.log(await client.exists(0, 0));
+await client.unset(0, 0);
 console.log(await client.chunkbin(0, 0));
 await client.close();
 ```

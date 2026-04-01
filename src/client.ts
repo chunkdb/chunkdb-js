@@ -202,6 +202,23 @@ export class ChunkClient {
     });
   }
 
+  exists(x: number, y: number): Promise<boolean> {
+    return this.enqueue(async () => {
+      const frame = await this.sendCommand("EXISTS", [x, y]);
+      const text = this.expectSimple(frame, "EXISTS");
+      if (text === "1") {
+        return true;
+      }
+      if (text === "0") {
+        return false;
+      }
+      throw new ChunkProtocolError(`unexpected EXISTS response: ${text}`, {
+        phase: "protocol",
+        command: "EXISTS",
+      });
+    });
+  }
+
   set(x: number, y: number, bits: string): Promise<void> {
     return this.enqueue(async () => {
       if (!/^[01]+$/.test(bits)) {
@@ -216,6 +233,19 @@ export class ChunkClient {
         throw new ChunkProtocolError(`unexpected SET response: ${text}`, {
           phase: "protocol",
           command: "SET",
+        });
+      }
+    });
+  }
+
+  unset(x: number, y: number): Promise<void> {
+    return this.enqueue(async () => {
+      const frame = await this.sendCommand("UNSET", [x, y]);
+      const text = this.expectSimple(frame, "UNSET");
+      if (text !== "OK") {
+        throw new ChunkProtocolError(`unexpected UNSET response: ${text}`, {
+          phase: "protocol",
+          command: "UNSET",
         });
       }
     });
