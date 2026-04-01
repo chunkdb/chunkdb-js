@@ -19,11 +19,11 @@
   "types": "./dist/index.d.ts",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/chunkdb/chunkdb-node-client.git"
+    "url": "git+https://github.com/chunkdb/chunkdb-js.git"
   },
-  "homepage": "https://github.com/chunkdb/chunkdb-node-client#readme",
+  "homepage": "https://github.com/chunkdb/chunkdb-js#readme",
   "bugs": {
-    "url": "https://github.com/chunkdb/chunkdb-node-client/issues"
+    "url": "https://github.com/chunkdb/chunkdb-js/issues"
   },
   "exports": {
     ".": {
