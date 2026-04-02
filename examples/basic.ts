@@ -5,5 +5,8 @@ await client.set(0, 0, "10110011");
 console.log(await client.readBlock(0, 0));
 await client.unset(0, 0);
 console.log(await client.readBlock(0, 0));
+const zeroChunk = await client.chunk(0, 0);
+await client.setChunk(0, 0, zeroChunk);
+console.log(await client.chunkExists(0, 0));
 console.log(await client.info());
 await client.close();

@@ -15,7 +15,7 @@ This package is intentionally small:
 - `chunk://` and `chunks://` URI support
 - Node core `net` / `tls` transport
 - `connect`, `connectUri`, and `ChunkClient`
-- `auth`, `ping`, `info`, `get`, `readBlock`, `exists`, `set`, `unset`, `chunk`, `chunkbin`
+- `auth`, `ping`, `info`, `get`, `readBlock`, `exists`, `set`, `unset`, `chunkExists`, `setChunk`, `chunk`, `chunkbin`
 - typed error classes
 - configurable connect and command timeouts
 - dual ESM / CommonJS build output
@@ -96,6 +96,8 @@ Methods:
 - `exists(x, y)`
 - `set(x, y, bits)`
 - `unset(x, y)`
+- `chunkExists(cx, cy)`
+- `setChunk(cx, cy, bits)`
 - `chunk(cx, cy)`
 - `chunkbin(cx, cy)`
 
@@ -112,6 +114,12 @@ type ChunkBlockState =
 
 `get(x, y)` is kept for backward-compatible low-level reads and still returns the configured zero-bit payload when a block is unset.
 Use `exists(x, y)` only when you specifically want the lower-level protocol-style check.
+
+Chunk-level presence uses the same pattern:
+
+- `chunkExists(cx, cy)` tells you whether the chunk is explicitly present
+- `chunk(cx, cy)` is kept for backward-compatible low-level chunk reads and still returns the configured zero-bit payload for an absent chunk
+- `setChunk(cx, cy, bits)` explicitly replaces the full chunk payload, including an all-zero chunk
 
 `info()` returns:
 
@@ -139,6 +147,9 @@ await client.set(0, 0, "1011001110110011");
 console.log(await client.readBlock(0, 0));
 await client.unset(0, 0);
 console.log(await client.readBlock(0, 0));
+const zeroChunk = await client.chunk(0, 0);
+await client.setChunk(0, 0, zeroChunk);
+console.log(await client.chunkExists(0, 0));
 console.log(await client.chunkbin(0, 0));
 await client.close();
 ```

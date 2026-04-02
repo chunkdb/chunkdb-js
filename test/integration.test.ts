@@ -82,6 +82,30 @@ test("info, chunk, and chunkbin", async () => {
   }
 });
 
+test("chunkExists and setChunk distinguish absent chunks from explicit zero chunks", async () => {
+  const server = await startServer();
+  try {
+    const client = await connectUri(server.uri);
+
+    assert.equal(await client.chunkExists(0, 0), false);
+    const zeroChunk = await client.chunk(0, 0);
+    assert.equal(/^[0]+$/.test(zeroChunk), true);
+
+    await client.setChunk(0, 0, zeroChunk);
+    assert.equal(await client.chunkExists(0, 0), true);
+    assert.equal(await client.chunk(0, 0), zeroChunk);
+
+    const oneChunk = `1${zeroChunk.slice(1)}`;
+    await client.setChunk(1, 0, oneChunk);
+    assert.equal(await client.chunkExists(1, 0), true);
+    assert.equal(await client.chunk(1, 0), oneChunk);
+
+    await client.close();
+  } finally {
+    await server.stop();
+  }
+});
+
 test("connectUri explicit overrides win over URI values", async () => {
   const server = await startServer();
   try {

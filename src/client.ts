@@ -273,6 +273,42 @@ export class ChunkClient {
     });
   }
 
+  chunkExists(cx: number, cy: number): Promise<boolean> {
+    return this.enqueue(async () => {
+      const frame = await this.sendCommand("CHUNKEXISTS", [cx, cy]);
+      const text = this.expectSimple(frame, "CHUNKEXISTS");
+      if (text === "1") {
+        return true;
+      }
+      if (text === "0") {
+        return false;
+      }
+      throw new ChunkProtocolError(`unexpected CHUNKEXISTS response: ${text}`, {
+        phase: "protocol",
+        command: "CHUNKEXISTS",
+      });
+    });
+  }
+
+  setChunk(cx: number, cy: number, bits: string): Promise<void> {
+    return this.enqueue(async () => {
+      if (!/^[01]+$/.test(bits)) {
+        throw new ChunkProtocolError("CHUNKSET bits must contain only 0 and 1", {
+          phase: "request",
+          command: "CHUNKSET",
+        });
+      }
+      const frame = await this.sendCommand("CHUNKSET", [cx, cy, bits]);
+      const text = this.expectSimple(frame, "CHUNKSET");
+      if (text !== "OK") {
+        throw new ChunkProtocolError(`unexpected CHUNKSET response: ${text}`, {
+          phase: "protocol",
+          command: "CHUNKSET",
+        });
+      }
+    });
+  }
+
   chunk(cx: number, cy: number): Promise<string> {
     return this.enqueue(async () => {
       const frame = await this.sendCommand("CHUNK", [cx, cy]);
