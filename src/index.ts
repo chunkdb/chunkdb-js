@@ -10,4 +10,4 @@ export {
 } from "./errors";
 export { parseFrame, parseInfoPayload, serializeCommand } from "./protocol";
 export { formatChunkUri, parseChunkUri } from "./uri";
-export type { ChunkClientOptions, ChunkErrorPhase, ChunkInfo, ParsedChunkUri } from "./types";
+export type { ChunkBlockState, ChunkClientOptions, ChunkErrorPhase, ChunkInfo, ParsedChunkUri } from "./types";

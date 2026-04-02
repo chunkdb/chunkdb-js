@@ -12,7 +12,7 @@ import {
 } from "./errors";
 import { parseFrame, parseInfoPayload, serializeCommand, type ChunkFrame } from "./protocol";
 import { formatChunkUri, parseChunkUri } from "./uri";
-import type { ChunkClientOptions, ChunkInfo, ParsedChunkUri } from "./types";
+import type { ChunkBlockState, ChunkClientOptions, ChunkInfo, ParsedChunkUri } from "./types";
 
 type TransportSocket = net.Socket | tls.TLSSocket;
 
@@ -199,6 +199,28 @@ export class ChunkClient {
     return this.enqueue(async () => {
       const frame = await this.sendCommand("GET", [x, y]);
       return this.expectBulk(frame, "GET").toString("utf8");
+    });
+  }
+
+  readBlock(x: number, y: number): Promise<ChunkBlockState> {
+    return this.enqueue(async () => {
+      const existsFrame = await this.sendCommand("EXISTS", [x, y]);
+      const existsText = this.expectSimple(existsFrame, "EXISTS");
+      if (existsText === "0") {
+        return { exists: false, bits: null };
+      }
+      if (existsText !== "1") {
+        throw new ChunkProtocolError(`unexpected EXISTS response: ${existsText}`, {
+          phase: "protocol",
+          command: "EXISTS",
+        });
+      }
+
+      const getFrame = await this.sendCommand("GET", [x, y]);
+      return {
+        exists: true,
+        bits: this.expectBulk(getFrame, "GET").toString("utf8"),
+      };
     });
   }
 

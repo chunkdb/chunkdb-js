@@ -30,6 +30,16 @@ export interface ChunkInfo {
   values: Record<string, string>;
 }
 
+export type ChunkBlockState =
+  | {
+      exists: false;
+      bits: null;
+    }
+  | {
+      exists: true;
+      bits: string;
+    };
+
 export type ChunkErrorPhase =
   | "connect"
   | "auth"

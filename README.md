@@ -15,7 +15,7 @@ This package is intentionally small:
 - `chunk://` and `chunks://` URI support
 - Node core `net` / `tls` transport
 - `connect`, `connectUri`, and `ChunkClient`
-- `auth`, `ping`, `info`, `get`, `exists`, `set`, `unset`, `chunk`, `chunkbin`
+- `auth`, `ping`, `info`, `get`, `readBlock`, `exists`, `set`, `unset`, `chunk`, `chunkbin`
 - typed error classes
 - configurable connect and command timeouts
 - dual ESM / CommonJS build output
@@ -33,6 +33,7 @@ import { connectUri } from "@chunkdb/client";
 
 const client = await connectUri("chunk://chunk-token@127.0.0.1:4242/");
 console.log(await client.ping());
+console.log(await client.readBlock(0, 0));
 await client.close();
 ```
 
@@ -91,14 +92,26 @@ Methods:
 - `ping()`
 - `info()`
 - `get(x, y)`
+- `readBlock(x, y)`
 - `exists(x, y)`
 - `set(x, y, bits)`
 - `unset(x, y)`
 - `chunk(cx, cy)`
 - `chunkbin(cx, cy)`
 
-`get(x, y)` returns the configured zero-bit payload when a block is unset.
-Use `exists(x, y)` to distinguish unset from an explicit all-zero value.
+`readBlock(x, y)` is the preferred high-level read API:
+
+```ts
+type ChunkBlockState =
+  | { exists: false; bits: null }
+  | { exists: true; bits: string };
+```
+
+- unset block -> `{ exists: false, bits: null }`
+- explicit zero block -> `{ exists: true, bits: "000...0" }`
+
+`get(x, y)` is kept for backward-compatible low-level reads and still returns the configured zero-bit payload when a block is unset.
+Use `exists(x, y)` only when you specifically want the lower-level protocol-style check.
 
 `info()` returns:
 
@@ -123,9 +136,9 @@ const client = await connect({
 });
 
 await client.set(0, 0, "1011001110110011");
-console.log(await client.get(0, 0));
-console.log(await client.exists(0, 0));
+console.log(await client.readBlock(0, 0));
 await client.unset(0, 0);
+console.log(await client.readBlock(0, 0));
 console.log(await client.chunkbin(0, 0));
 await client.close();
 ```
