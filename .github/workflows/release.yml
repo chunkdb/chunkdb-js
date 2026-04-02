@@ -1,0 +1,101 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out chunkdb-js
+        uses: actions/checkout@v4
+
+      - name: Check out chunkdb main
+        uses: actions/checkout@v4
+        with:
+          repository: chunkdb/chunkdb
+          ref: main
+          path: chunkdb
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Validate tag matches package version
+        run: |
+          node <<'EOF'
+          const fs = require("node:fs");
+          const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+          const expectedTag = `v${pkg.version}`;
+          const actualTag = process.env.GITHUB_REF_NAME;
+          if (actualTag !== expectedTag) {
+            console.error(`release tag mismatch: expected ${expectedTag}, got ${actualTag}`);
+            process.exit(1);
+          }
+          EOF
+
+      - name: Build chunkdb server binaries
+        run: |
+          cmake -S chunkdb -B chunkdb/build-quick -DCHUNKDB_WITH_TLS=OFF
+          cmake --build chunkdb/build-quick --target chunkdb_server --parallel
+          cmake -S chunkdb -B chunkdb/build-quick-tls -DCHUNKDB_WITH_TLS=ON
+          cmake --build chunkdb/build-quick-tls --target chunkdb_server --parallel
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build SDK
+        run: npm run build
+
+      - name: Run tests
+        env:
+          CHUNKDB_REPO_ROOT: ${{ github.workspace }}/chunkdb
+        run: npm test
+
+      - name: Pack release tarball
+        id: pack
+        run: |
+          npm pack --json > pack.json
+          TARFILE=$(node -e 'process.stdout.write(require("./pack.json")[0].filename)')
+          echo "tarball=${TARFILE}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload release tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-package
+          path: ${{ steps.pack.outputs.tarball }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish to npm
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release tarball
+        uses: actions/download-artifact@v4
+        with:
+          name: npm-package
+          path: release-tarball
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
+      - name: Publish package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish release-tarball/*.tgz --access public
