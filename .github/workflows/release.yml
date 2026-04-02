@@ -95,7 +95,18 @@ jobs:
           node-version: 20
           registry-url: https://registry.npmjs.org
 
+      - name: Resolve release tarball path
+        id: tarball
+        run: |
+          TARFILES=($(find release-tarball -maxdepth 1 -type f -name '*.tgz' | sort))
+          if [ "${#TARFILES[@]}" -ne 1 ]; then
+            echo "expected exactly one release tarball, found ${#TARFILES[@]}" >&2
+            find release-tarball -maxdepth 2 -type f | sort >&2
+            exit 1
+          fi
+          echo "path=${TARFILES[0]}" >> "${GITHUB_OUTPUT}"
+
       - name: Publish package
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish release-tarball/*.tgz --access public
+        run: npm publish "${{ steps.tarball.outputs.path }}" --access public
