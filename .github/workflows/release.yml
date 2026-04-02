@@ -104,7 +104,8 @@ jobs:
             find release-tarball -maxdepth 2 -type f | sort >&2
             exit 1
           fi
-          echo "path=${TARFILES[0]}" >> "${GITHUB_OUTPUT}"
+          TARFILE_ABS=$(python3 -c 'import os,sys; print(os.path.abspath(sys.argv[1]))' "${TARFILES[0]}")
+          echo "path=${TARFILE_ABS}" >> "${GITHUB_OUTPUT}"
 
       - name: Publish package
         env:
