@@ -68,6 +68,10 @@ test("info, chunk, and chunkbin", async () => {
     await client.set(0, 0, "1011001110110011");
     const info = await client.info();
     assert.equal(info.values.durability_mode, "relaxed");
+    const expectedPresenceBytes = Math.ceil(
+      (Number.parseInt(info.values.chunk_width_blocks, 10) *
+        Number.parseInt(info.values.chunk_height_blocks, 10)) / 8,
+    );
 
     const chunkBits = await client.chunk(0, 0);
     assert.equal(chunkBits.length > 0, true);
@@ -75,6 +79,9 @@ test("info, chunk, and chunkbin", async () => {
 
     const chunkBytes = await client.chunkbin(0, 0);
     assert.equal(chunkBytes.length > 0, true);
+
+    const chunkStateBytes = await client.chunkbinState(0, 0);
+    assert.equal(chunkStateBytes.length, chunkBytes.length + expectedPresenceBytes);
 
     await client.close();
   } finally {
@@ -99,6 +106,56 @@ test("chunkExists and setChunk distinguish absent chunks from explicit zero chun
     await client.setChunk(1, 0, oneChunk);
     assert.equal(await client.chunkExists(1, 0), true);
     assert.equal(await client.chunk(1, 0), oneChunk);
+
+    await client.close();
+  } finally {
+    await server.stop();
+  }
+});
+
+test("readChunk and setChunkState preserve per-block presence", async () => {
+  const server = await startServer();
+  try {
+    const client = await connectUri(server.uri);
+
+    const absent = await client.readChunk(0, 0);
+    assert.equal(absent.exists, false);
+    assert.equal(/^[0]+$/.test(absent.bits), true);
+    assert.equal(/^[0]+$/.test(absent.presence), true);
+    const blockBits = absent.bits.length / absent.presence.length;
+
+    const zeroChunk = await client.chunk(0, 0);
+    const fullPresence = "1".repeat(absent.presence.length);
+    await client.setChunkState(0, 0, {
+      bits: zeroChunk,
+      presence: fullPresence,
+    });
+    assert.deepEqual(await client.readChunk(0, 0), {
+      exists: true,
+      bits: zeroChunk,
+      presence: fullPresence,
+    });
+
+    const firstBlock = "1".repeat(blockBits);
+    const sparseBits = `${firstBlock}${"0".repeat(zeroChunk.length - (2 * blockBits))}${"0".repeat(blockBits)}`;
+    const sparsePresence = `1${"0".repeat(absent.presence.length - 2)}1`;
+    await client.setChunkState(1, 0, {
+      bits: sparseBits,
+      presence: sparsePresence,
+    });
+
+    assert.deepEqual(await client.readChunk(1, 0), {
+      exists: true,
+      bits: sparseBits,
+      presence: sparsePresence,
+    });
+    assert.equal(await client.chunk(1, 0), sparseBits);
+    assert.equal(await client.chunkExists(1, 0), true);
+    const chunkWidth = Number.parseInt((await client.info()).values.chunk_width_blocks, 10);
+    assert.equal(await client.exists(chunkWidth, 0), true);
+    assert.equal(await client.get(chunkWidth, 0), firstBlock);
+    assert.equal(await client.exists(chunkWidth + 1, 0), false);
+    assert.equal(await client.get(chunkWidth + 1, 0), "0".repeat(blockBits));
 
     await client.close();
   } finally {

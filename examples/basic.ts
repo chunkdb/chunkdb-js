@@ -8,5 +8,13 @@ console.log(await client.readBlock(0, 0));
 const zeroChunk = await client.chunk(0, 0);
 await client.setChunk(0, 0, zeroChunk);
 console.log(await client.chunkExists(0, 0));
+const emptyState = await client.readChunk(0, 0);
+console.log(emptyState);
+const blockBits = zeroChunk.length / emptyState.presence.length;
+await client.setChunkState(1, 0, {
+  bits: `${"1".repeat(blockBits)}${zeroChunk.slice(blockBits)}`,
+  presence: `1${"0".repeat(emptyState.presence.length - 1)}`,
+});
+console.log(await client.chunkbinState(1, 0));
 console.log(await client.info());
 await client.close();

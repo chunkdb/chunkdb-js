@@ -40,6 +40,17 @@ export type ChunkBlockState =
       bits: string;
     };
 
+export interface ChunkChunkState {
+  exists: boolean;
+  bits: string;
+  presence: string;
+}
+
+export interface ChunkChunkStateInput {
+  bits: string;
+  presence: string;
+}
+
 export type ChunkErrorPhase =
   | "connect"
   | "auth"

@@ -12,7 +12,14 @@ import {
 } from "./errors";
 import { parseFrame, parseInfoPayload, serializeCommand, type ChunkFrame } from "./protocol";
 import { formatChunkUri, parseChunkUri } from "./uri";
-import type { ChunkBlockState, ChunkClientOptions, ChunkInfo, ParsedChunkUri } from "./types";
+import type {
+  ChunkBlockState,
+  ChunkChunkState,
+  ChunkChunkStateInput,
+  ChunkClientOptions,
+  ChunkInfo,
+  ParsedChunkUri,
+} from "./types";
 
 type TransportSocket = net.Socket | tls.TLSSocket;
 
@@ -39,9 +46,41 @@ interface PendingRequest {
   reject: (error: Error) => void;
 }
 
+interface ChunkGeometryInfo {
+  chunkPayloadBits: number;
+  chunkBlockCount: number;
+  chunkPayloadBytes: number;
+  presenceBytes: number;
+}
+
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 4242;
 const DEFAULT_TIMEOUT_MS = 5000;
+
+function isBitString(bits: string): boolean {
+  return /^[01]+$/.test(bits);
+}
+
+function parseChunkStateText(text: string, command: string): { bits: string; presence: string } {
+  const separator = text.indexOf("|");
+  if (separator <= 0 || separator !== text.lastIndexOf("|") || separator === text.length - 1) {
+    throw new ChunkProtocolError(`unexpected ${command} STATE payload`, {
+      phase: "protocol",
+      command,
+    });
+  }
+
+  const bits = text.slice(0, separator);
+  const presence = text.slice(separator + 1);
+  if (!isBitString(bits) || !isBitString(presence)) {
+    throw new ChunkProtocolError(`unexpected ${command} STATE payload`, {
+      phase: "protocol",
+      command,
+    });
+  }
+
+  return { bits, presence };
+}
 
 function resolveTlsServerName(options: ResolvedOptions): string | undefined {
   if (options.tlsServerName !== undefined && options.tlsServerName !== "") {
@@ -93,6 +132,7 @@ export class ChunkClient {
   private buffer = Buffer.alloc(0);
   private connected = false;
   private disposed = false;
+  private geometryInfo: ChunkGeometryInfo | null = null;
 
   constructor(options: ChunkClientOptions = {}) {
     this.options = resolveOptions(options);
@@ -290,15 +330,68 @@ export class ChunkClient {
     });
   }
 
+  readChunk(cx: number, cy: number): Promise<ChunkChunkState> {
+    return this.enqueue(async () => {
+      const frame = await this.sendCommand("CHUNK", [cx, cy, "STATE"]);
+      const payload = this.expectBulk(frame, "CHUNK").toString("utf8");
+      const { bits, presence } = parseChunkStateText(payload, "CHUNK");
+      return {
+        exists: presence.includes("1"),
+        bits,
+        presence,
+      };
+    });
+  }
+
   setChunk(cx: number, cy: number, bits: string): Promise<void> {
     return this.enqueue(async () => {
-      if (!/^[01]+$/.test(bits)) {
+      if (!isBitString(bits)) {
         throw new ChunkProtocolError("CHUNKSET bits must contain only 0 and 1", {
           phase: "request",
           command: "CHUNKSET",
         });
       }
       const frame = await this.sendCommand("CHUNKSET", [cx, cy, bits]);
+      const text = this.expectSimple(frame, "CHUNKSET");
+      if (text !== "OK") {
+        throw new ChunkProtocolError(`unexpected CHUNKSET response: ${text}`, {
+          phase: "protocol",
+          command: "CHUNKSET",
+        });
+      }
+    });
+  }
+
+  setChunkState(cx: number, cy: number, state: ChunkChunkStateInput): Promise<void> {
+    return this.enqueue(async () => {
+      if (!isBitString(state.bits)) {
+        throw new ChunkProtocolError("CHUNKSET STATE payload bits must contain only 0 and 1", {
+          phase: "request",
+          command: "CHUNKSET",
+        });
+      }
+      if (!isBitString(state.presence)) {
+        throw new ChunkProtocolError("CHUNKSET STATE presence bits must contain only 0 and 1", {
+          phase: "request",
+          command: "CHUNKSET",
+        });
+      }
+
+      const geometry = await this.ensureChunkGeometry();
+      if (state.bits.length !== geometry.chunkPayloadBits) {
+        throw new ChunkProtocolError(
+          `CHUNKSET STATE payload bits must be ${geometry.chunkPayloadBits} bits`,
+          { phase: "request", command: "CHUNKSET" },
+        );
+      }
+      if (state.presence.length !== geometry.chunkBlockCount) {
+        throw new ChunkProtocolError(
+          `CHUNKSET STATE presence bits must be ${geometry.chunkBlockCount} bits`,
+          { phase: "request", command: "CHUNKSET" },
+        );
+      }
+
+      const frame = await this.sendCommand("CHUNKSET", [cx, cy, "STATE", `${state.bits}|${state.presence}`]);
       const text = this.expectSimple(frame, "CHUNKSET");
       if (text !== "OK") {
         throw new ChunkProtocolError(`unexpected CHUNKSET response: ${text}`, {
@@ -320,6 +413,21 @@ export class ChunkClient {
     return this.enqueue(async () => {
       const frame = await this.sendCommand("CHUNKBIN", [cx, cy]);
       return this.expectBulk(frame, "CHUNKBIN");
+    });
+  }
+
+  chunkbinState(cx: number, cy: number): Promise<Buffer> {
+    return this.enqueue(async () => {
+      const geometry = await this.ensureChunkGeometry();
+      const frame = await this.sendCommand("CHUNKBIN", [cx, cy, "STATE"]);
+      const payload = this.expectBulk(frame, "CHUNKBIN");
+      if (payload.length !== geometry.chunkPayloadBytes + geometry.presenceBytes) {
+        throw new ChunkProtocolError("unexpected CHUNKBIN STATE payload length", {
+          phase: "protocol",
+          command: "CHUNKBIN",
+        });
+      }
+      return payload;
     });
   }
 
@@ -536,6 +644,40 @@ export class ChunkClient {
       });
     }
     return frame.value;
+  }
+
+  private async ensureChunkGeometry(): Promise<ChunkGeometryInfo> {
+    if (this.geometryInfo !== null) {
+      return this.geometryInfo;
+    }
+
+    const frame = await this.sendCommand("INFO", []);
+    const payload = this.expectBulk(frame, "INFO");
+    const values = parseInfoPayload(payload);
+
+    const blockBits = this.parsePositiveInt(values.block_bits, "block_bits");
+    const chunkWidth = this.parsePositiveInt(values.chunk_width_blocks, "chunk_width_blocks");
+    const chunkHeight = this.parsePositiveInt(values.chunk_height_blocks, "chunk_height_blocks");
+    const chunkBlockCount = chunkWidth * chunkHeight;
+
+    this.geometryInfo = {
+      chunkPayloadBits: chunkBlockCount * blockBits,
+      chunkBlockCount,
+      chunkPayloadBytes: Math.ceil((chunkBlockCount * blockBits) / 8),
+      presenceBytes: Math.ceil(chunkBlockCount / 8),
+    };
+    return this.geometryInfo;
+  }
+
+  private parsePositiveInt(value: string | undefined, field: string): number {
+    const parsed = Number.parseInt(value ?? "", 10);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      throw new ChunkProtocolError(`INFO missing valid ${field}`, {
+        phase: "protocol",
+        command: "INFO",
+      });
+    }
+    return parsed;
   }
 
   private wrapTransportError(error: unknown, phase: "connect" | "request" | "tls", command?: string): ChunkError {

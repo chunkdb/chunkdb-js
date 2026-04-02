@@ -15,7 +15,7 @@ This package is intentionally small:
 - `chunk://` and `chunks://` URI support
 - Node core `net` / `tls` transport
 - `connect`, `connectUri`, and `ChunkClient`
-- `auth`, `ping`, `info`, `get`, `readBlock`, `exists`, `set`, `unset`, `chunkExists`, `setChunk`, `chunk`, `chunkbin`
+- `auth`, `ping`, `info`, `get`, `readBlock`, `exists`, `set`, `unset`, `chunkExists`, `readChunk`, `setChunk`, `setChunkState`, `chunk`, `chunkbin`, `chunkbinState`
 - typed error classes
 - configurable connect and command timeouts
 - dual ESM / CommonJS build output
@@ -34,6 +34,7 @@ import { connectUri } from "@chunkdb/client";
 const client = await connectUri("chunk://chunk-token@127.0.0.1:4242/");
 console.log(await client.ping());
 console.log(await client.readBlock(0, 0));
+console.log(await client.readChunk(0, 0));
 await client.close();
 ```
 
@@ -97,9 +98,12 @@ Methods:
 - `set(x, y, bits)`
 - `unset(x, y)`
 - `chunkExists(cx, cy)`
+- `readChunk(cx, cy)`
 - `setChunk(cx, cy, bits)`
+- `setChunkState(cx, cy, { bits, presence })`
 - `chunk(cx, cy)`
 - `chunkbin(cx, cy)`
+- `chunkbinState(cx, cy)`
 
 `readBlock(x, y)` is the preferred high-level read API:
 
@@ -118,8 +122,22 @@ Use `exists(x, y)` only when you specifically want the lower-level protocol-styl
 Chunk-level presence uses the same pattern:
 
 - `chunkExists(cx, cy)` tells you whether the chunk is explicitly present
+- `readChunk(cx, cy)` is the preferred high-level chunk read API and returns:
+
+```ts
+type ChunkChunkState = {
+  exists: boolean;
+  bits: string;
+  presence: string;
+};
+```
+
+- absent chunk -> `{ exists: false, bits: "000...0", presence: "000...0" }`
+- explicit zero chunk -> `{ exists: true, bits: "000...0", presence: "111...1" }`
 - `chunk(cx, cy)` is kept for backward-compatible low-level chunk reads and still returns the configured zero-bit payload for an absent chunk
 - `setChunk(cx, cy, bits)` explicitly replaces the full chunk payload, including an all-zero chunk
+- `setChunkState(cx, cy, { bits, presence })` writes mixed present/absent block state in one request
+- `chunkbinState(cx, cy)` returns `[payload_bytes][presence_bytes]` for exact chunk-state transfer
 
 `info()` returns:
 
@@ -150,7 +168,14 @@ console.log(await client.readBlock(0, 0));
 const zeroChunk = await client.chunk(0, 0);
 await client.setChunk(0, 0, zeroChunk);
 console.log(await client.chunkExists(0, 0));
-console.log(await client.chunkbin(0, 0));
+const emptyState = await client.readChunk(0, 0);
+console.log(emptyState);
+const blockBits = zeroChunk.length / emptyState.presence.length;
+await client.setChunkState(1, 0, {
+  bits: `${"1".repeat(blockBits)}${zeroChunk.slice(blockBits)}`,
+  presence: `1${"0".repeat(emptyState.presence.length - 1)}`,
+});
+console.log(await client.chunkbinState(1, 0));
 await client.close();
 ```
 
