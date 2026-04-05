@@ -1,6 +1,6 @@
 {
   "name": "@chunkdb/client",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Official Node.js and TypeScript client for chunkdb.",
   "keywords": [
     "chunkdb",
