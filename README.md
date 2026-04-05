@@ -4,18 +4,19 @@ Official Node.js and TypeScript client for `chunkdb`.
 
 This package is intentionally small:
 
-- one client = one socket
-- sequential request/response flow
-- no pooling
-- no retries or reconnect
+- `ChunkClient` = one long-lived socket
+- sequential request/response flow per client
+- opt-in pooling via `ChunkPool`
+- no automatic retries or background reconnect loops
 - no browser transport
 
 ## Features
 
 - `chunk://` and `chunks://` URI support
 - Node core `net` / `tls` transport
-- `connect`, `connectUri`, and `ChunkClient`
+- `connect`, `connectUri`, `connectPool`, `ChunkClient`, and `ChunkPool`
 - `auth`, `ping`, `info`, `get`, `readBlock`, `exists`, `set`, `unset`, `chunkExists`, `readChunk`, `setChunk`, `setChunkState`, `chunk`, `chunkbin`, `chunkbinState`
+- persistent socket reuse for low-concurrency callers and opt-in pooled concurrency for Node services
 - typed error classes
 - configurable connect and command timeouts
 - dual ESM / CommonJS build output
@@ -63,6 +64,45 @@ const client = await connectUri("chunk://chunk-token@127.0.0.1:4242/", {
 });
 ```
 
+## Connection Model
+
+- Reuse one `ChunkClient` for low-concurrency code paths. It keeps one socket open and sends one request at a time.
+- Use one shared `ChunkPool` for concurrent Node.js workloads. It keeps several warm `ChunkClient` instances and leases them per operation.
+- True single-socket multiplexing is intentionally out of scope for protocol v1. Parallelism comes from multiple sockets, not request IDs on one socket.
+
+## Pooling
+
+```ts
+import { connectPool } from "@chunkdb/client";
+
+const pool = await connectPool({
+  uri: "chunk://chunk-token@127.0.0.1:4242/",
+  maxConnections: 4,
+  minConnections: 1,
+  acquireTimeoutMs: 2000,
+});
+
+await Promise.all([
+  pool.set(0, 0, "1011001110110011"),
+  pool.set(1, 0, "0000111100001111"),
+]);
+
+console.log(await pool.readBlock(0, 0));
+
+await pool.withClient(async (client) => {
+  console.log(await client.ping());
+  console.log(await client.info());
+});
+
+await pool.close();
+```
+
+`ChunkPoolOptions` extends `ChunkClientOptions` and adds:
+
+- `maxConnections`: maximum number of leased/open clients in the pool
+- `minConnections`: optional warm connections created by `connectPool`
+- `acquireTimeoutMs`: maximum time to wait for a free pooled client
+
 ## TLS Options
 
 - `tls: true` or `chunks://...` to enable TLS
@@ -81,11 +121,13 @@ const client = await connectUri("chunks://chunk-token@127.0.0.1:4242/", {
 
 - `connect(options)`
 - `connectUri(uri, overrides?)`
+- `connectPool(options)`
 - `parseChunkUri(uri)`
 - `formatChunkUri(parsed)`
 - `ChunkClient`
+- `ChunkPool`
 
-Methods:
+`ChunkClient` methods:
 
 - `connect()`
 - `close()`
@@ -104,6 +146,11 @@ Methods:
 - `chunk(cx, cy)`
 - `chunkbin(cx, cy)`
 - `chunkbinState(cx, cy)`
+
+`ChunkPool` mirrors the same high-level data methods and adds:
+
+- `close()`
+- `withClient(fn)`
 
 `readBlock(x, y)` is the preferred high-level read API:
 
@@ -177,6 +224,25 @@ await client.setChunkState(1, 0, {
 });
 console.log(await client.chunkbinState(1, 0));
 await client.close();
+```
+
+```ts
+import { connectPool } from "@chunkdb/client";
+
+const pool = await connectPool({
+  uri: "chunk://chunk-token@127.0.0.1:4242/",
+  maxConnections: 4,
+  minConnections: 1,
+});
+
+const writes = Array.from({ length: 8 }, (_, x) =>
+  pool.set(x, 0, x % 2 === 0 ? "1011001110110011" : "0000111100001111"),
+);
+
+await Promise.all(writes);
+console.log(await Promise.all([pool.readBlock(0, 0), pool.readBlock(1, 0)]));
+
+await pool.close();
 ```
 
 ## Errors

@@ -1,4 +1,5 @@
 export { ChunkClient, connect, connectUri } from "./client";
+export { ChunkPool, connectPool } from "./pool";
 export {
   ChunkAuthError,
   ChunkConnectionError,
@@ -17,5 +18,6 @@ export type {
   ChunkClientOptions,
   ChunkErrorPhase,
   ChunkInfo,
+  ChunkPoolOptions,
   ParsedChunkUri,
 } from "./types";

@@ -162,9 +162,7 @@ export class ChunkClient {
   async close(): Promise<void> {
     this.disposed = true;
     const socket = this.socket;
-    this.socket = null;
-    this.connected = false;
-    this.failPending(new ChunkConnectionError("connection closed", { phase: "connect" }));
+    this.clearConnectionState(new ChunkConnectionError("connection closed", { phase: "connect" }));
 
     if (socket === null) {
       return;
@@ -439,6 +437,7 @@ export class ChunkClient {
   }
 
   private async connectInternal(): Promise<this> {
+    this.clearConnectionState();
     const socket = await this.openSocket();
     this.socket = socket;
     this.connected = true;
@@ -449,19 +448,15 @@ export class ChunkClient {
     });
 
     socket.on("error", (error) => {
-      this.connected = false;
       if (this.socket === socket) {
-        this.socket = null;
+        this.clearConnectionState(this.wrapTransportError(error, this.options.secure ? "tls" : "connect"));
       }
-      this.failPending(this.wrapTransportError(error, this.options.secure ? "tls" : "connect"));
     });
 
     socket.on("close", () => {
-      this.connected = false;
       if (this.socket === socket) {
-        this.socket = null;
+        this.clearConnectionState(new ChunkConnectionError("connection closed", { phase: "connect" }));
       }
-      this.failPending(new ChunkConnectionError("connection closed", { phase: "connect" }));
     });
 
     if (this.options.autoAuth && this.options.token !== "") {
@@ -624,6 +619,15 @@ export class ChunkClient {
     this.pending = null;
     clearTimeout(pending.timer);
     pending.reject(error);
+  }
+
+  private clearConnectionState(error?: Error): void {
+    this.buffer = Buffer.alloc(0);
+    this.connected = false;
+    this.socket = null;
+    if (error !== undefined) {
+      this.failPending(error);
+    }
   }
 
   private expectSimple(frame: ChunkFrame, command: string): string {

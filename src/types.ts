@@ -25,6 +25,12 @@ export interface ChunkClientOptions {
   key?: string | Buffer;
 }
 
+export interface ChunkPoolOptions extends ChunkClientOptions {
+  maxConnections: number;
+  minConnections?: number;
+  acquireTimeoutMs?: number;
+}
+
 export interface ChunkInfo {
   raw: string;
   values: Record<string, string>;
