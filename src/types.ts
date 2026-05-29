@@ -23,6 +23,8 @@ export interface ChunkClientOptions {
   ca?: string | Buffer;
   cert?: string | Buffer;
   key?: string | Buffer;
+  /** Max concurrent in-flight requests per connection. Default 1 (sequential). */
+  pipelineDepth?: number;
 }
 
 export interface ChunkPoolOptions extends ChunkClientOptions {

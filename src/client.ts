@@ -10,7 +10,7 @@ import {
   ChunkTlsError,
   type ChunkError,
 } from "./errors";
-import { parseFrame, parseInfoPayload, serializeCommand, type ChunkFrame } from "./protocol";
+import { parseFrame, parseInfoPayload, serializeCommand, type BulkFrame, type ChunkFrame } from "./protocol";
 import { formatChunkUri, parseChunkUri } from "./uri";
 import type {
   ChunkBlockState,
@@ -37,6 +37,7 @@ interface ResolvedOptions {
   cert?: string | Buffer;
   key?: string | Buffer;
   uri: ParsedChunkUri;
+  pipelineDepth: number;
 }
 
 interface PendingRequest {
@@ -112,6 +113,7 @@ function resolveOptions(options: ChunkClientOptions = {}): ResolvedOptions {
     ca: options.ca,
     cert: options.cert,
     key: options.key,
+    pipelineDepth: Math.max(1, options.pipelineDepth ?? 1),
     uri: {
       scheme: secure ? "chunks" : "chunk",
       secure,
@@ -126,16 +128,21 @@ function resolveOptions(options: ChunkClientOptions = {}): ResolvedOptions {
 export class ChunkClient {
   private readonly options: ResolvedOptions;
   private socket: TransportSocket | null = null;
-  private pending: PendingRequest | null = null;
+  private pendingQueue: PendingRequest[] = [];
   private connectPromise: Promise<this> | null = null;
-  private queue: Promise<unknown> = Promise.resolve();
   private buffer = Buffer.alloc(0);
   private connected = false;
   private disposed = false;
   private geometryInfo: ChunkGeometryInfo | null = null;
 
+  // Pipeline concurrency tracking
+  private activeOps = 0;
+  private readonly maxPipeline: number;
+  private readonly opWaiters: Array<{ run: () => void; reject: (err: Error) => void }> = [];
+
   constructor(options: ChunkClientOptions = {}) {
     this.options = resolveOptions(options);
+    this.maxPipeline = this.options.pipelineDepth;
   }
 
   uri(): string {
@@ -311,6 +318,42 @@ export class ChunkClient {
     });
   }
 
+  mset(blocks: Array<{ x: number; y: number; bits: string }>): Promise<void> {
+    return this.enqueue(async () => {
+      if (blocks.length === 0) return;
+      const args: Array<string | number> = [];
+      for (const { x, y, bits } of blocks) {
+        if (!isBitString(bits)) {
+          throw new ChunkProtocolError("MSET bits must contain only 0 and 1", {
+            phase: "request",
+            command: "MSET",
+          });
+        }
+        args.push(x, y, bits);
+      }
+      const frame = await this.sendCommand("MSET", args);
+      const text = this.expectSimple(frame, "MSET");
+      if (text !== "OK") {
+        throw new ChunkProtocolError(`unexpected MSET response: ${text}`, {
+          phase: "protocol",
+          command: "MSET",
+        });
+      }
+    });
+  }
+
+  mget(blocks: Array<{ x: number; y: number }>): Promise<string[]> {
+    return this.enqueue(async () => {
+      if (blocks.length === 0) return [];
+      const args: Array<string | number> = [];
+      for (const { x, y } of blocks) {
+        args.push(x, y);
+      }
+      const frame = await this.sendCommand("MGET", args);
+      return this.expectArray(frame, "MGET").map((f) => f.value.toString("utf8"));
+    });
+  }
+
   chunkExists(cx: number, cy: number): Promise<boolean> {
     return this.enqueue(async () => {
       const frame = await this.sendCommand("CHUNKEXISTS", [cx, cy]);
@@ -430,10 +473,27 @@ export class ChunkClient {
   }
 
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {
-    const run = async () => operation();
-    const result = this.queue.then(run, run) as Promise<T>;
-    this.queue = result.catch(() => undefined);
-    return result;
+    return new Promise<T>((resolve, reject) => {
+      const run = () => {
+        this.activeOps += 1;
+        operation().then(
+          (value) => { this.activeOps -= 1; this.releaseEnqueueSlot(); resolve(value); },
+          (err: unknown) => { this.activeOps -= 1; this.releaseEnqueueSlot(); reject(err); },
+        );
+      };
+      if (this.activeOps < this.maxPipeline) {
+        run();
+      } else {
+        this.opWaiters.push({ run, reject });
+      }
+    });
+  }
+
+  private releaseEnqueueSlot(): void {
+    if (this.opWaiters.length > 0 && this.activeOps < this.maxPipeline) {
+      const waiter = this.opWaiters.shift()!;
+      waiter.run();
+    }
   }
 
   private async connectInternal(): Promise<this> {
@@ -546,9 +606,9 @@ export class ChunkClient {
 
     const framePromise = new Promise<ChunkFrame>((resolve, reject) => {
       const timer = setTimeout(() => {
-        if (this.pending?.command === command) {
-          this.pending = null;
-        }
+        // Find by timer reference to avoid closure TDZ issues
+        const idx = this.pendingQueue.findIndex((p) => p.timer === timer);
+        if (idx !== -1) this.pendingQueue.splice(idx, 1);
         socket.destroy();
         reject(
           new ChunkTimeoutError(`command timeout after ${this.options.commandTimeoutMs}ms`, {
@@ -558,23 +618,16 @@ export class ChunkClient {
         );
       }, this.options.commandTimeoutMs);
 
-      this.pending = {
-        command,
-        timer,
-        resolve,
-        reject,
-      };
+      this.pendingQueue.push({ command, timer, resolve, reject });
       this.drainFrames();
     });
 
     await new Promise<void>((resolve, reject) => {
       socket.write(serializeCommand([command, ...args]), (error) => {
-        if (!error) {
-          resolve();
-          return;
-        }
-        this.failPending(this.wrapTransportError(error, "request", command));
-        reject(this.wrapTransportError(error, "request", command));
+        if (!error) { resolve(); return; }
+        const wrapped = this.wrapTransportError(error, "request", command);
+        this.failAllPending(wrapped);
+        reject(wrapped);
       });
     });
 
@@ -595,38 +648,34 @@ export class ChunkClient {
   }
 
   private drainFrames(): void {
-    if (this.pending === null) {
-      return;
+    while (this.pendingQueue.length > 0) {
+      const parsed = parseFrame(this.buffer);
+      if (parsed === null) return;
+      this.buffer = this.buffer.subarray(parsed.bytesConsumed);
+      const pending = this.pendingQueue.shift()!;
+      clearTimeout(pending.timer);
+      pending.resolve(parsed.frame);
     }
-
-    const parsed = parseFrame(this.buffer);
-    if (parsed === null) {
-      return;
-    }
-
-    this.buffer = this.buffer.subarray(parsed.bytesConsumed);
-    const pending = this.pending;
-    this.pending = null;
-    clearTimeout(pending.timer);
-    pending.resolve(parsed.frame);
   }
 
-  private failPending(error: Error): void {
-    if (this.pending === null) {
-      return;
+  private failAllPending(error: Error): void {
+    const queue = this.pendingQueue.splice(0);
+    for (const pending of queue) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
     }
-    const pending = this.pending;
-    this.pending = null;
-    clearTimeout(pending.timer);
-    pending.reject(error);
   }
 
   private clearConnectionState(error?: Error): void {
     this.buffer = Buffer.alloc(0);
     this.connected = false;
     this.socket = null;
+    const connErr = error ?? new ChunkConnectionError("connection closed", { phase: "connect" });
+    // Reject enqueue waiters that haven't started yet
+    const waiters = this.opWaiters.splice(0);
+    for (const w of waiters) w.reject(connErr);
     if (error !== undefined) {
-      this.failPending(error);
+      this.failAllPending(error);
     }
   }
 
@@ -648,6 +697,16 @@ export class ChunkClient {
       });
     }
     return frame.value;
+  }
+
+  private expectArray(frame: ChunkFrame, command: string): BulkFrame[] {
+    if (frame.type !== "array") {
+      throw new ChunkProtocolError(`expected array response for ${command}`, {
+        phase: "protocol",
+        command,
+      });
+    }
+    return frame.items;
   }
 
   private async ensureChunkGeometry(): Promise<ChunkGeometryInfo> {

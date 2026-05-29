@@ -10,6 +10,7 @@ export {
   ChunkTlsError,
 } from "./errors";
 export { parseFrame, parseInfoPayload, serializeCommand } from "./protocol";
+export type { ArrayFrame, BulkFrame, ChunkFrame, SimpleFrame, ErrorFrame } from "./protocol";
 export { formatChunkUri, parseChunkUri } from "./uri";
 export type {
   ChunkBlockState,

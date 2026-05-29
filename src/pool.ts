@@ -225,6 +225,14 @@ export class ChunkPool {
     return this.withClient(async (client) => await client.chunkbinState(cx, cy));
   }
 
+  mset(blocks: Array<{ x: number; y: number; bits: string }>): Promise<void> {
+    return this.withClient(async (client) => await client.mset(blocks));
+  }
+
+  mget(blocks: Array<{ x: number; y: number }>): Promise<string[]> {
+    return this.withClient(async (client) => await client.mget(blocks));
+  }
+
   private createClient(): ChunkClient {
     const client = new ChunkClient(this.clientOptions);
     this.clients.add(client);

@@ -17,9 +17,22 @@ export interface BulkFrame {
   value: Buffer;
 }
 
-export type ChunkFrame = SimpleFrame | ErrorFrame | BulkFrame;
+export interface ArrayFrame {
+  type: "array";
+  items: BulkFrame[];
+}
+
+export type ChunkFrame = SimpleFrame | ErrorFrame | BulkFrame | ArrayFrame;
 
 export function serializeCommand(parts: Array<string | number>): Buffer {
+  for (const part of parts) {
+    const s = String(part);
+    if (s.includes("\r") || s.includes("\n")) {
+      throw new ChunkProtocolError("command part contains invalid control characters", {
+        phase: "request",
+      });
+    }
+  }
   return Buffer.from(`${parts.map((part) => String(part)).join(" ")}\r\n`, "utf8");
 }
 
@@ -72,6 +85,29 @@ export function parseFrame(
       frame: { type: "error", code, message, raw },
       bytesConsumed: lineEnd.end + lineEnd.width,
     };
+  }
+
+  if (buffer[0] === 0x2a) {
+    // '*N' — array of bulk frames
+    const headerEnd = findLineEnd(buffer);
+    if (headerEnd === null) return null;
+    const countText = buffer.subarray(1, headerEnd.end).toString("utf8");
+    const count = Number(countText);
+    if (!Number.isInteger(count) || count < 0) {
+      throw new ChunkProtocolError(`invalid array length: ${countText}`, { phase: "protocol" });
+    }
+    let cursor = headerEnd.end + headerEnd.width;
+    const items: BulkFrame[] = [];
+    for (let i = 0; i < count; i++) {
+      const sub = parseFrame(buffer.subarray(cursor));
+      if (sub === null) return null;
+      if (sub.frame.type !== "bulk") {
+        throw new ChunkProtocolError("expected bulk item in array response", { phase: "protocol" });
+      }
+      items.push(sub.frame);
+      cursor += sub.bytesConsumed;
+    }
+    return { frame: { type: "array", items }, bytesConsumed: cursor };
   }
 
   if (buffer[0] !== 0x24) {
