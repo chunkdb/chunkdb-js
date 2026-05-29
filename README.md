@@ -1,11 +1,14 @@
 # @chunkdb/client
 
-Official Node.js and TypeScript client for `chunkdb`.
+Official Node.js and TypeScript client for [`chunkdb`](https://github.com/chunkdb/chunkdb).
+
+Targets the stable `chunkdb` 1.x protocol; see the engine's
+[compatibility policy](https://github.com/chunkdb/chunkdb/blob/main/docs/COMPATIBILITY.md).
 
 This package is intentionally small:
 
 - `ChunkClient` = one long-lived socket
-- sequential request/response flow per client
+- sequential request/response per client by default, with opt-in pipelining (`pipelineDepth`)
 - opt-in pooling via `ChunkPool`
 - no automatic retries or background reconnect loops
 - no browser transport
@@ -15,7 +18,8 @@ This package is intentionally small:
 - `chunk://` and `chunks://` URI support
 - Node core `net` / `tls` transport
 - `connect`, `connectUri`, `connectPool`, `ChunkClient`, and `ChunkPool`
-- `auth`, `ping`, `info`, `get`, `readBlock`, `exists`, `set`, `unset`, `chunkExists`, `readChunk`, `setChunk`, `setChunkState`, `chunk`, `chunkbin`, `chunkbinState`
+- `auth`, `ping`, `info`, `get`, `readBlock`, `exists`, `set`, `unset`, `mset`, `mget`, `chunkExists`, `readChunk`, `setChunk`, `setChunkState`, `chunk`, `chunkbin`, `chunkbinState`
+- batch `mset` / `mget` (single round-trip for many blocks) and configurable request pipelining (`pipelineDepth`) for high-latency links
 - persistent socket reuse for low-concurrency callers and opt-in pooled concurrency for Node services
 - typed error classes
 - configurable connect and command timeouts
@@ -139,6 +143,8 @@ const client = await connectUri("chunks://chunk-token@127.0.0.1:4242/", {
 - `exists(x, y)`
 - `set(x, y, bits)`
 - `unset(x, y)`
+- `mset(blocks: { x, y, bits }[])` — batch write, one round-trip
+- `mget(blocks: { x, y }[]): Promise<string[]>` — batch read, one round-trip
 - `chunkExists(cx, cy)`
 - `readChunk(cx, cy)`
 - `setChunk(cx, cy, bits)`
