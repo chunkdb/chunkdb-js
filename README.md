@@ -216,19 +216,10 @@ const client = await connect({
 
 await client.set(0, 0, "1011001110110011");
 console.log(await client.readBlock(0, 0));
+
 await client.unset(0, 0);
 console.log(await client.readBlock(0, 0));
-const zeroChunk = await client.chunk(0, 0);
-await client.setChunk(0, 0, zeroChunk);
-console.log(await client.chunkExists(0, 0));
-const emptyState = await client.readChunk(0, 0);
-console.log(emptyState);
-const blockBits = zeroChunk.length / emptyState.presence.length;
-await client.setChunkState(1, 0, {
-  bits: `${"1".repeat(blockBits)}${zeroChunk.slice(blockBits)}`,
-  presence: `1${"0".repeat(emptyState.presence.length - 1)}`,
-});
-console.log(await client.chunkbinState(1, 0));
+
 await client.close();
 ```
 
@@ -298,31 +289,3 @@ Override paths when needed with:
 - `CHUNKDB_REPO_ROOT`
 - `CHUNKDB_SERVER_BIN`
 - `CHUNKDB_SERVER_BIN_TLS`
-
-## Releasing
-
-Releases are tag-driven and publish to npm only when a matching version tag is pushed.
-
-Requirements:
-
-- GitHub Actions secret: `NPM_TOKEN`
-- `package.json` version must exactly match the pushed tag without the `v` prefix
-
-Release flow:
-
-```bash
-npm version <patch|minor|major> --no-git-tag-version
-VERSION=$(node -p "require('./package.json').version")
-git add package.json package-lock.json
-git commit -m "chore(release): bump version to ${VERSION}"
-git push origin main
-git tag "v${VERSION}"
-git push origin "v${VERSION}"
-```
-
-On the tag push, GitHub Actions will:
-
-- fail immediately if the tag does not match `package.json`
-- build the current `chunkdb` `main` server binaries needed for integration tests
-- run `npm run build`, `npm test`, and `npm pack`
-- publish the exact tested tarball to npm as a public package
