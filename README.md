@@ -2,6 +2,8 @@
 
 Official Node.js and TypeScript client for [`chunkdb`](https://github.com/chunkdb/chunkdb).
 
+Package: [`@chunkdb/client` on npm](https://www.npmjs.com/package/@chunkdb/client).
+
 Targets the stable `chunkdb` 1.x protocol; see the engine's
 [compatibility policy](https://github.com/chunkdb/chunkdb/blob/main/docs/COMPATIBILITY.md).
 
