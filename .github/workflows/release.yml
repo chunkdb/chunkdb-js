@@ -47,13 +47,6 @@ jobs:
           }
           EOF
 
-      - name: Build chunkdb server binaries
-        run: |
-          cmake -S chunkdb -B chunkdb/build-quick -DCHUNKDB_WITH_TLS=OFF
-          cmake --build chunkdb/build-quick --target chunkdb_server --parallel
-          cmake -S chunkdb -B chunkdb/build-quick-tls -DCHUNKDB_WITH_TLS=ON
-          cmake --build chunkdb/build-quick-tls --target chunkdb_server --parallel
-
       - name: Install dependencies
         run: npm ci
 
@@ -62,6 +55,9 @@ jobs:
 
       - name: Run tests
         env:
+          # test:server (via scripts/build-test-server.mjs) and test/helpers.ts
+          # both resolve the chunkdb tree from CHUNKDB_REPO_ROOT and build/run the
+          # server under <root>/build-js-tests, so no separate pre-build is needed.
           CHUNKDB_REPO_ROOT: ${{ github.workspace }}/chunkdb
         run: npm test
 

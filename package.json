@@ -49,7 +49,7 @@
     "build": "npm run clean && tsc -p tsconfig.build.json && tsup --config tsup.config.ts",
     "test": "npm run test:unit && npm run test:integration",
     "test:unit": "tsx --test test/uri.test.ts test/protocol.test.ts test/pool.test.ts test/zrle.test.ts test/helpers.test.ts",
-    "test:server": "cmake -S ../chunkdb -B ../chunkdb/build-js-tests -DCMAKE_BUILD_TYPE=Debug -DCHUNKDB_BUILD_TESTS=OFF -DCHUNKDB_WITH_TLS=ON && cmake --build ../chunkdb/build-js-tests --target chunkdb_server --config Debug",
+    "test:server": "node scripts/build-test-server.mjs",
     "test:integration": "npm run test:server && tsx --test test/integration.test.ts test/worldops.integration.test.ts test/pool.integration.test.ts test/tls.integration.test.ts",
     "prepublishOnly": "npm run build && npm test"
   },
