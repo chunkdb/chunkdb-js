@@ -5,12 +5,17 @@ import {
 } from "./errors";
 import { ChunkClient } from "./client";
 import type {
+  ChunkBatchOperation,
   ChunkBlockState,
   ChunkChunkState,
   ChunkChunkStateInput,
   ChunkClientOptions,
+  ChunkCoordPair,
   ChunkInfo,
+  ChunkMutationResult,
   ChunkPoolOptions,
+  ChunkRangeEntry,
+  ChunkScanResult,
 } from "./types";
 
 interface ResolvedPoolOptions {
@@ -225,12 +230,64 @@ export class ChunkPool {
     return this.withClient(async (client) => await client.chunkbinState(cx, cy));
   }
 
+  chunkbinCompressed(cx: number, cy: number): Promise<Buffer> {
+    return this.withClient(async (client) => await client.chunkbinCompressed(cx, cy));
+  }
+
+  chunkbinStateCompressed(cx: number, cy: number): Promise<Buffer> {
+    return this.withClient(async (client) => await client.chunkbinStateCompressed(cx, cy));
+  }
+
   mset(blocks: Array<{ x: number; y: number; bits: string }>): Promise<void> {
     return this.withClient(async (client) => await client.mset(blocks));
   }
 
   mget(blocks: Array<{ x: number; y: number }>): Promise<string[]> {
     return this.withClient(async (client) => await client.mget(blocks));
+  }
+
+  chunkScan(limit: number, cursor?: ChunkCoordPair): Promise<ChunkScanResult> {
+    return this.withClient(async (client) => await client.chunkScan(limit, cursor));
+  }
+
+  chunkRange(cx0: number, cy0: number, cx1: number, cy1: number): Promise<ChunkRangeEntry[]> {
+    return this.withClient(async (client) => await client.chunkRange(cx0, cy0, cx1, cy1));
+  }
+
+  chunkRadius(cx: number, cy: number, radiusChunks: number): Promise<ChunkRangeEntry[]> {
+    return this.withClient(async (client) => await client.chunkRadius(cx, cy, radiusChunks));
+  }
+
+  chunkVersion(cx: number, cy: number): Promise<bigint> {
+    return this.withClient(async (client) => await client.chunkVersion(cx, cy));
+  }
+
+  chunkCompareAndSet(
+    cx: number,
+    cy: number,
+    expectedVersion: bigint,
+    state: ChunkChunkStateInput,
+  ): Promise<ChunkMutationResult> {
+    return this.withClient(
+      async (client) => await client.chunkCompareAndSet(cx, cy, expectedVersion, state),
+    );
+  }
+
+  chunkBatch(
+    cx: number,
+    cy: number,
+    operations: ChunkBatchOperation[],
+    options: { ifVersion?: bigint } = {},
+  ): Promise<ChunkMutationResult> {
+    return this.withClient(async (client) => await client.chunkBatch(cx, cy, operations, options));
+  }
+
+  walFlush(): Promise<void> {
+    return this.withClient(async (client) => await client.walFlush());
+  }
+
+  metrics(): Promise<string> {
+    return this.withClient(async (client) => await client.metrics());
   }
 
   private createClient(): ChunkClient {

@@ -13,13 +13,19 @@ import {
 import { parseFrame, parseInfoPayload, serializeCommand, type BulkFrame, type ChunkFrame } from "./protocol";
 import { formatChunkUri, parseChunkUri } from "./uri";
 import type {
+  ChunkBatchOperation,
   ChunkBlockState,
   ChunkChunkState,
   ChunkChunkStateInput,
   ChunkClientOptions,
+  ChunkCoordPair,
   ChunkInfo,
+  ChunkMutationResult,
+  ChunkRangeEntry,
+  ChunkScanResult,
   ParsedChunkUri,
 } from "./types";
+import { zrleDecompress } from "./zrle";
 
 type TransportSocket = net.Socket | tls.TLSSocket;
 
@@ -470,6 +476,275 @@ export class ChunkClient {
       }
       return payload;
     });
+  }
+
+  chunkbinCompressed(cx: number, cy: number): Promise<Buffer> {
+    return this.enqueue(async () => {
+      const geometry = await this.ensureChunkGeometry();
+      const frame = await this.sendCommand("CHUNKBINC", [cx, cy]);
+      const payload = this.expectBulk(frame, "CHUNKBINC");
+      try {
+        return zrleDecompress(payload, geometry.chunkPayloadBytes);
+      } catch (error) {
+        throw new ChunkProtocolError(
+          `invalid CHUNKBINC payload: ${error instanceof Error ? error.message : String(error)}`,
+          { phase: "protocol", command: "CHUNKBINC" },
+        );
+      }
+    });
+  }
+
+  chunkbinStateCompressed(cx: number, cy: number): Promise<Buffer> {
+    return this.enqueue(async () => {
+      const geometry = await this.ensureChunkGeometry();
+      const frame = await this.sendCommand("CHUNKBINC", [cx, cy, "STATE"]);
+      const payload = this.expectBulk(frame, "CHUNKBINC");
+      try {
+        return zrleDecompress(payload, geometry.chunkPayloadBytes + geometry.presenceBytes);
+      } catch (error) {
+        throw new ChunkProtocolError(
+          `invalid CHUNKBINC STATE payload: ${error instanceof Error ? error.message : String(error)}`,
+          { phase: "protocol", command: "CHUNKBINC" },
+        );
+      }
+    });
+  }
+
+  chunkScan(limit: number, cursor?: ChunkCoordPair): Promise<ChunkScanResult> {
+    return this.enqueue(async () => {
+      const args: Array<string | number> =
+        cursor === undefined ? [limit] : [limit, cursor.cx, cursor.cy];
+      const frame = await this.sendCommand("CHUNKSCAN", args);
+      const items = this.expectArray(frame, "CHUNKSCAN").map((f) => f.value.toString("utf8"));
+      if (items.length === 0) {
+        throw new ChunkProtocolError("empty CHUNKSCAN response", {
+          phase: "protocol",
+          command: "CHUNKSCAN",
+        });
+      }
+
+      const header = items[0];
+      let nextCursor: ChunkCoordPair | null = null;
+      if (header.startsWith("CURSOR ")) {
+        const parts = header.split(" ");
+        if (parts.length !== 3) {
+          throw new ChunkProtocolError(`unexpected CHUNKSCAN header: ${header}`, {
+            phase: "protocol",
+            command: "CHUNKSCAN",
+          });
+        }
+        nextCursor = { cx: this.parseCoordToken(parts[1], "CHUNKSCAN"), cy: this.parseCoordToken(parts[2], "CHUNKSCAN") };
+      } else if (header !== "END") {
+        throw new ChunkProtocolError(`unexpected CHUNKSCAN header: ${header}`, {
+          phase: "protocol",
+          command: "CHUNKSCAN",
+        });
+      }
+
+      const coords = items.slice(1).map((item) => {
+        const parts = item.split(" ");
+        if (parts.length !== 2) {
+          throw new ChunkProtocolError(`unexpected CHUNKSCAN entry: ${item}`, {
+            phase: "protocol",
+            command: "CHUNKSCAN",
+          });
+        }
+        return {
+          cx: this.parseCoordToken(parts[0], "CHUNKSCAN"),
+          cy: this.parseCoordToken(parts[1], "CHUNKSCAN"),
+        };
+      });
+      return { coords, nextCursor };
+    });
+  }
+
+  chunkRange(cx0: number, cy0: number, cx1: number, cy1: number): Promise<ChunkRangeEntry[]> {
+    return this.enqueue(async () => {
+      const frame = await this.sendCommand("CHUNKRANGE", [cx0, cy0, cx1, cy1]);
+      return this.expectArray(frame, "CHUNKRANGE").map((f) => {
+        const text = f.value.toString("utf8");
+        const firstSpace = text.indexOf(" ");
+        const secondSpace = text.indexOf(" ", firstSpace + 1);
+        if (firstSpace <= 0 || secondSpace <= firstSpace) {
+          throw new ChunkProtocolError(`unexpected CHUNKRANGE entry: ${text}`, {
+            phase: "protocol",
+            command: "CHUNKRANGE",
+          });
+        }
+        const state = parseChunkStateText(text.slice(secondSpace + 1), "CHUNKRANGE");
+        return {
+          cx: this.parseCoordToken(text.slice(0, firstSpace), "CHUNKRANGE"),
+          cy: this.parseCoordToken(text.slice(firstSpace + 1, secondSpace), "CHUNKRANGE"),
+          bits: state.bits,
+          presence: state.presence,
+        };
+      });
+    });
+  }
+
+  chunkRadius(cx: number, cy: number, radiusChunks: number): Promise<ChunkRangeEntry[]> {
+    return this.enqueue(async () => {
+      const frame = await this.sendCommand("CHUNKRADIUS", [cx, cy, radiusChunks]);
+      return this.expectArray(frame, "CHUNKRADIUS").map((f) => {
+        const text = f.value.toString("utf8");
+        const firstSpace = text.indexOf(" ");
+        const secondSpace = text.indexOf(" ", firstSpace + 1);
+        if (firstSpace <= 0 || secondSpace <= firstSpace) {
+          throw new ChunkProtocolError(`unexpected CHUNKRADIUS entry: ${text}`, {
+            phase: "protocol",
+            command: "CHUNKRADIUS",
+          });
+        }
+        const state = parseChunkStateText(text.slice(secondSpace + 1), "CHUNKRADIUS");
+        return {
+          cx: this.parseCoordToken(text.slice(0, firstSpace), "CHUNKRADIUS"),
+          cy: this.parseCoordToken(text.slice(firstSpace + 1, secondSpace), "CHUNKRADIUS"),
+          bits: state.bits,
+          presence: state.presence,
+        };
+      });
+    });
+  }
+
+  chunkVersion(cx: number, cy: number): Promise<bigint> {
+    return this.enqueue(async () => {
+      const frame = await this.sendCommand("CHUNKVER", [cx, cy]);
+      return this.parseVersionText(this.expectBulk(frame, "CHUNKVER").toString("utf8"), "CHUNKVER");
+    });
+  }
+
+  chunkCompareAndSet(
+    cx: number,
+    cy: number,
+    expectedVersion: bigint,
+    state: ChunkChunkStateInput,
+  ): Promise<ChunkMutationResult> {
+    return this.enqueue(async () => {
+      try {
+        const frame = await this.sendCommand("CHUNKCAS", [
+          cx,
+          cy,
+          expectedVersion.toString(),
+          "STATE",
+          `${state.bits}|${state.presence}`,
+        ]);
+        return {
+          ok: true,
+          version: this.parseVersionText(this.expectBulk(frame, "CHUNKCAS").toString("utf8"), "CHUNKCAS"),
+        };
+      } catch (error) {
+        const mismatch = this.parseVersionMismatch(error, "CHUNKCAS");
+        if (mismatch !== null) {
+          return mismatch;
+        }
+        throw error;
+      }
+    });
+  }
+
+  chunkBatch(
+    cx: number,
+    cy: number,
+    operations: ChunkBatchOperation[],
+    options: { ifVersion?: bigint } = {},
+  ): Promise<ChunkMutationResult> {
+    return this.enqueue(async () => {
+      if (operations.length === 0) {
+        throw new ChunkProtocolError("chunkBatch requires at least one operation", {
+          phase: "protocol",
+          command: "CHUNKBATCH",
+        });
+      }
+      const args: Array<string | number> = [
+        cx,
+        cy,
+        options.ifVersion === undefined ? "-" : options.ifVersion.toString(),
+      ];
+      for (const operation of operations) {
+        if (operation.type === "set") {
+          if (!isBitString(operation.bits)) {
+            throw new ChunkProtocolError("chunkBatch set bits must contain only 0 and 1", {
+              phase: "protocol",
+              command: "CHUNKBATCH",
+            });
+          }
+          args.push("SET", operation.x, operation.y, operation.bits);
+        } else {
+          args.push("UNSET", operation.x, operation.y);
+        }
+      }
+      try {
+        const frame = await this.sendCommand("CHUNKBATCH", args);
+        return {
+          ok: true,
+          version: this.parseVersionText(
+            this.expectBulk(frame, "CHUNKBATCH").toString("utf8"),
+            "CHUNKBATCH",
+          ),
+        };
+      } catch (error) {
+        const mismatch = this.parseVersionMismatch(error, "CHUNKBATCH");
+        if (mismatch !== null) {
+          return mismatch;
+        }
+        throw error;
+      }
+    });
+  }
+
+  walFlush(): Promise<void> {
+    return this.enqueue(async () => {
+      const frame = await this.sendCommand("WALFLUSH", []);
+      const text = this.expectSimple(frame, "WALFLUSH");
+      if (text !== "OK") {
+        throw new ChunkProtocolError(`unexpected WALFLUSH response: ${text}`, {
+          phase: "protocol",
+          command: "WALFLUSH",
+        });
+      }
+    });
+  }
+
+  metrics(): Promise<string> {
+    return this.enqueue(async () => {
+      const frame = await this.sendCommand("METRICS", []);
+      return this.expectBulk(frame, "METRICS").toString("utf8");
+    });
+  }
+
+  private parseCoordToken(token: string, command: string): number {
+    const value = Number.parseInt(token, 10);
+    if (!Number.isSafeInteger(value) || String(value) !== token) {
+      throw new ChunkProtocolError(`invalid coordinate in ${command} response: ${token}`, {
+        phase: "protocol",
+        command,
+      });
+    }
+    return value;
+  }
+
+  private parseVersionText(text: string, command: string): bigint {
+    if (!/^[0-9]+$/.test(text)) {
+      throw new ChunkProtocolError(`invalid version in ${command} response: ${text}`, {
+        phase: "protocol",
+        command,
+      });
+    }
+    return BigInt(text);
+  }
+
+  private parseVersionMismatch(error: unknown, command: string): ChunkMutationResult | null {
+    if (!(error instanceof ChunkServerError) || error.code !== "VERSION_MISMATCH") {
+      return null;
+    }
+    const match = /current=([0-9]+)/.exec(error.message);
+    if (match === null) {
+      throw new ChunkProtocolError(`unexpected VERSION_MISMATCH payload for ${command}`, {
+        phase: "protocol",
+        command,
+      });
+    }
+    return { ok: false, version: BigInt(match[1]) };
   }
 
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {

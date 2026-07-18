@@ -59,6 +59,39 @@ export interface ChunkChunkStateInput {
   presence: string;
 }
 
+export interface ChunkCoordPair {
+  cx: number;
+  cy: number;
+}
+
+export interface ChunkScanResult {
+  coords: ChunkCoordPair[];
+  /** Pass back as the cursor of the next chunkScan call; null when done. */
+  nextCursor: ChunkCoordPair | null;
+}
+
+export interface ChunkRangeEntry {
+  cx: number;
+  cy: number;
+  bits: string;
+  presence: string;
+}
+
+export type ChunkBatchOperation =
+  | { type: "set"; x: number; y: number; bits: string }
+  | { type: "unset"; x: number; y: number };
+
+export interface ChunkMutationResult {
+  ok: boolean;
+  /**
+   * On success: the chunk version after the mutation.
+   * On version mismatch (ok === false): the current chunk version.
+   * Versions are opaque tokens; they change on every content mutation and
+   * whenever the server reloads the chunk (eviction or restart).
+   */
+  version: bigint;
+}
+
 export type ChunkErrorPhase =
   | "connect"
   | "auth"

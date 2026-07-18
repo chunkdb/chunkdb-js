@@ -6,6 +6,24 @@ This client follows [Semantic Versioning](https://semver.org/) and targets the
 stable `chunkdb` 1.x protocol; see the engine's
 [compatibility policy](https://github.com/chunkdb/chunkdb/blob/main/docs/COMPATIBILITY.md).
 
+## Unreleased
+
+### Added
+- `chunkScan(limit, cursor?)`, `chunkRange(cx0, cy0, cx1, cy1)`, and
+  `chunkRadius(cx, cy, radiusChunks)` for world streaming (paginated
+  populated-chunk enumeration plus bounded rectangular and radius reads)
+- `chunkVersion(cx, cy)`, `chunkCompareAndSet(...)`, and `chunkBatch(...)`
+  for optimistic concurrency on a single chunk
+- `walFlush()` explicit durability barrier
+- `metrics()` Prometheus text-format runtime metrics
+- `chunkbinCompressed(cx, cy)` / `chunkbinStateCompressed(cx, cy)` using the
+  server's `zrle` codec, plus exported `zrleCompress`/`zrleDecompress`
+- `ChunkPool` now mirrors every new `ChunkClient` operation (world reads,
+  concurrency primitives, compressed reads, `walFlush`, `metrics`)
+
+Requires a `chunkdb` server that implements these additive commands; all
+existing methods keep working against older 1.x servers.
+
 ## 1.0.0
 
 First stable release of `@chunkdb/client`, aligned with stable `chunkdb` 1.0.0.

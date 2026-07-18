@@ -25,15 +25,158 @@ export function chunkdbRepoRoot(): string {
   return process.env.CHUNKDB_REPO_ROOT ?? path.resolve(repoRoot(), "../chunkdb");
 }
 
-function resolveServerBinary(tlsEnabled: boolean): string {
+function serverBinaryName(): string {
+  return process.platform === "win32" ? "chunkdb_server.exe" : "chunkdb_server";
+}
+
+export function workspaceServerBinary(root = chunkdbRepoRoot()): string {
+  const base = path.join(root, "build-js-tests");
+  const direct = path.join(base, serverBinaryName());
+  if (fs.existsSync(direct)) {
+    return direct;
+  }
+  // Multi-config generators place executables below the selected config.
+  return path.join(base, "Debug", serverBinaryName());
+}
+
+export function resolveServerBinary(
+  tlsEnabled: boolean,
+  root = chunkdbRepoRoot(),
+): string {
   const envValue = tlsEnabled ? process.env.CHUNKDB_SERVER_BIN_TLS : process.env.CHUNKDB_SERVER_BIN;
   if (envValue) {
     return envValue;
   }
-  return path.join(
-    chunkdbRepoRoot(),
-    tlsEnabled ? "build-quick-tls/chunkdb_server" : "build-quick/chunkdb_server",
+  const candidate = workspaceServerBinary(root);
+  if (fs.existsSync(candidate)) {
+    return candidate;
+  }
+  const envName = tlsEnabled ? "CHUNKDB_SERVER_BIN_TLS" : "CHUNKDB_SERVER_BIN";
+  throw new Error(
+    `fresh workspace chunkdb server binary not found at ${candidate}. ` +
+      "Run `npm run test:server` (or ordinary `npm test`) from chunkdb-js, " +
+      `or explicitly set ${envName}.`,
   );
+}
+
+// Every command family exercised by the integration suite. Deliberately
+// invalid arguments keep the probe side-effect-free while still distinguishing
+// an implemented command (INVALID_ARGUMENT) from an absent one
+// (UNKNOWN_COMMAND).
+export const REQUIRED_COMMAND_PROBES = [
+  "PING extra",
+  "INFO extra",
+  "GET",
+  "EXISTS",
+  "SET",
+  "UNSET",
+  "MGET",
+  "MSET",
+  "CHUNKEXISTS",
+  "CHUNK",
+  "CHUNKSET",
+  "CHUNKBIN",
+  "CHUNKSCAN",
+  "CHUNKRANGE",
+  "CHUNKRADIUS",
+  "CHUNKVER",
+  "CHUNKCAS",
+  "CHUNKBATCH",
+  "CHUNKBINC",
+  "WALFLUSH extra",
+  "METRICS extra",
+] as const;
+
+export function missingCommandFromProbe(
+  probe: string,
+  responseLine: string,
+): string | undefined {
+  return responseLine.startsWith("-ERR UNKNOWN_COMMAND")
+    ? probe.split(" ", 1)[0]
+    : undefined;
+}
+
+async function assertServerSupportsRequiredCommands(
+  host: string,
+  port: number,
+  token: string,
+): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const socket = net.connect({ host, port });
+    let buffer = "";
+    let authenticated = false;
+    let probeIndex = 0;
+    let pendingBulkBytes: number | undefined;
+    const fail = (message: string) => {
+      socket.destroy();
+      reject(new Error(message));
+    };
+    socket.setEncoding("utf8");
+    socket.once("error", reject);
+    socket.once("connect", () => {
+      socket.write(`AUTH ${token}\r\n`);
+    });
+    socket.on("data", (chunk: string) => {
+      buffer += chunk;
+      while (true) {
+        if (pendingBulkBytes !== undefined) {
+          if (buffer.length < pendingBulkBytes + 2) {
+            return;
+          }
+          buffer = buffer.slice(pendingBulkBytes + 2);
+          pendingBulkBytes = undefined;
+          probeIndex += 1;
+          if (probeIndex === REQUIRED_COMMAND_PROBES.length) {
+            socket.end();
+            resolve();
+            return;
+          }
+          socket.write(`${REQUIRED_COMMAND_PROBES[probeIndex]}\r\n`);
+          continue;
+        }
+        const newline = buffer.indexOf("\n");
+        if (newline === -1) {
+          return;
+        }
+        const line = buffer.slice(0, newline).replace(/\r$/, "");
+        buffer = buffer.slice(newline + 1);
+        if (!authenticated) {
+          if (!line.startsWith("+OK")) {
+            fail(`server rejected AUTH during compatibility probe: ${line}`);
+            return;
+          }
+          authenticated = true;
+          socket.write(`${REQUIRED_COMMAND_PROBES[probeIndex]}\r\n`);
+          continue;
+        }
+        const probe = REQUIRED_COMMAND_PROBES[probeIndex];
+        const missing = missingCommandFromProbe(probe, line);
+        if (missing !== undefined) {
+          fail(
+            "chunkdb server is missing protocol capabilities required by the integration suite " +
+              `(${missing}). Rebuild the current workspace server with \`npm run test:server\`.`,
+          );
+          return;
+        }
+        if (line.startsWith("$")) {
+          const length = Number.parseInt(line.slice(1), 10);
+          if (!Number.isSafeInteger(length) || length < 0) {
+            fail(`invalid bulk response during compatibility probe: ${line}`);
+            return;
+          }
+          pendingBulkBytes = length;
+          continue;
+        }
+        probeIndex += 1;
+        if (probeIndex === REQUIRED_COMMAND_PROBES.length) {
+          socket.end();
+          resolve();
+          return;
+        }
+        socket.write(`${REQUIRED_COMMAND_PROBES[probeIndex]}\r\n`);
+      }
+    });
+  });
 }
 
 async function pickFreePort(): Promise<number> {
@@ -132,6 +275,17 @@ export async function startServer(options: { tls?: boolean; token?: string } = {
   child.stdout.on("data", () => {});
 
   await waitForServer(host, port);
+  // The plaintext probe cannot speak TLS; the non-TLS suites already exercise
+  // the same binary, so a TLS-only mismatch still surfaces there.
+  if (!tlsEnabled) {
+    try {
+      await assertServerSupportsRequiredCommands(host, port, token);
+    } catch (error) {
+      child.kill("SIGKILL");
+      fs.rmSync(dataDir, { recursive: true, force: true });
+      throw error;
+    }
+  }
 
   return {
     process: child,

@@ -145,7 +145,7 @@ const client = await connectUri("chunks://chunk-token@127.0.0.1:4242/", {
 - `exists(x, y)`
 - `set(x, y, bits)`
 - `unset(x, y)`
-- `mset(blocks: { x, y, bits }[])` — batch write, one round-trip
+- `mset(blocks: { x, y, bits }[])` — batch write, one round-trip; items apply in order and are not atomic as a group (on error, earlier items may already be applied) — use `chunkBatch` for an atomic single-chunk update
 - `mget(blocks: { x, y }[]): Promise<string[]>` — batch read, one round-trip
 - `chunkExists(cx, cy)`
 - `readChunk(cx, cy)`
@@ -154,6 +154,32 @@ const client = await connectUri("chunks://chunk-token@127.0.0.1:4242/", {
 - `chunk(cx, cy)`
 - `chunkbin(cx, cy)`
 - `chunkbinState(cx, cy)`
+- `chunkbinCompressed(cx, cy)` / `chunkbinStateCompressed(cx, cy)` — same
+  payloads as `chunkbin`/`chunkbinState`, transferred compressed and
+  decompressed client-side
+- `chunkScan(limit, cursor?)` — enumerate populated chunks in deterministic
+  `(cx, cy)` order; returns `{ coords, nextCursor }`, pass `nextCursor` back
+  to continue (limit 1..1024 per page)
+- `chunkRange(cx0, cy0, cx1, cy1)` — bounded rectangular multi-chunk read
+  (max 256 chunks, 64 MiB response cap); returns `{ cx, cy, bits, presence }`
+  for populated chunks only
+- `chunkRadius(cx, cy, radiusChunks)` — bounded radius/disc multi-chunk read
+  with the same limits and result shape as `chunkRange`
+- `chunkVersion(cx, cy): Promise<bigint>` — opaque chunk version token
+- `chunkCompareAndSet(cx, cy, expectedVersion, { bits, presence })` —
+  conditional full-chunk replace; resolves `{ ok, version }` (on `ok: false`
+  the returned version is the current one; state is unchanged)
+- `chunkBatch(cx, cy, operations, { ifVersion? })` — atomic single-chunk
+  batch of `{ type: "set", x, y, bits }` / `{ type: "unset", x, y }`
+  operations; same `{ ok, version }` result
+- `walFlush()` — explicit durability barrier: resolves once every previously
+  acknowledged write is durable, even when the server runs in `relaxed` mode
+- `metrics()` — Prometheus text-format runtime metrics
+
+Chunk versions are opaque: they change on every content mutation and whenever
+the server reloads the chunk (eviction or restart), so a stale version can
+never silently match after recovery. On `ok: false`, re-read, reconcile, and
+retry with the fresh version.
 
 `ChunkPool` mirrors the same high-level data methods and adds:
 
@@ -281,10 +307,8 @@ npm test
 npm pack --dry-run
 ```
 
-Integration tests expect a sibling `chunkdb` repository with built server binaries at:
-
-- `../chunkdb/build-quick/chunkdb_server`
-- `../chunkdb/build-quick-tls/chunkdb_server`
+Integration tests build and use the TLS-enabled server at
+`../chunkdb/build-js-tests/chunkdb_server`.
 
 Override paths when needed with:
 
