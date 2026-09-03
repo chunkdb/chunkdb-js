@@ -6,6 +6,15 @@ This client follows [Semantic Versioning](https://semver.org/) and targets the
 stable `chunkdb` 1.x protocol; see the engine's
 [compatibility policy](https://github.com/chunkdb/chunkdb/blob/main/docs/COMPATIBILITY.md).
 
+## Unreleased
+
+### Added
+- `setChunkBin(cx, cy, payload)` and `setChunkBinState(cx, cy, state)`:
+  binary chunk writes over the new `CHUNKSETBIN` command (chunkdb server
+  1.3+), taking exactly the byte layouts `chunkbin` / `chunkbinState` return.
+  Payload lengths are validated against the server geometry before sending.
+  `ChunkPool` mirrors both
+
 ## 1.1.0 - 2026-07-18
 
 ### Added

@@ -20,7 +20,7 @@ This package is intentionally small:
 - `chunk://` and `chunks://` URI support
 - Node core `net` / `tls` transport
 - `connect`, `connectUri`, `connectPool`, `ChunkClient`, and `ChunkPool`
-- `auth`, `ping`, `info`, `get`, `readBlock`, `exists`, `set`, `unset`, `mset`, `mget`, `chunkExists`, `readChunk`, `setChunk`, `setChunkState`, `chunk`, `chunkbin`, `chunkbinState`
+- `auth`, `ping`, `info`, `get`, `readBlock`, `exists`, `set`, `unset`, `mset`, `mget`, `chunkExists`, `readChunk`, `setChunk`, `setChunkState`, `setChunkBin`, `setChunkBinState`, `chunk`, `chunkbin`, `chunkbinState`
 - batch `mset` / `mget` (single round-trip for many blocks) and configurable request pipelining (`pipelineDepth`) for high-latency links
 - persistent socket reuse for low-concurrency callers and opt-in pooled concurrency for Node services
 - typed error classes
@@ -154,6 +154,9 @@ const client = await connectUri("chunks://chunk-token@127.0.0.1:4242/", {
 - `chunk(cx, cy)`
 - `chunkbin(cx, cy)`
 - `chunkbinState(cx, cy)`
+- `setChunkBin(cx, cy, payload)` / `setChunkBinState(cx, cy, state)` — binary
+  writes taking exactly the `Buffer` layouts `chunkbin`/`chunkbinState`
+  return, so large geometries round-trip without bit strings (server 1.3+)
 - `chunkbinCompressed(cx, cy)` / `chunkbinStateCompressed(cx, cy)` — same
   payloads as `chunkbin`/`chunkbinState`, transferred compressed and
   decompressed client-side
@@ -219,6 +222,7 @@ type ChunkChunkState = {
 - `setChunk(cx, cy, bits)` explicitly replaces the full chunk payload, including an all-zero chunk
 - `setChunkState(cx, cy, { bits, presence })` writes mixed present/absent block state in one request
 - `chunkbinState(cx, cy)` returns `[payload_bytes][presence_bytes]` for exact chunk-state transfer
+- `setChunkBin(cx, cy, payload)` / `setChunkBinState(cx, cy, state)` write those same byte layouts back; the client checks the length against the server geometry before sending
 
 `info()` returns:
 

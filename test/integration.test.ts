@@ -89,6 +89,49 @@ test("info, chunk, and chunkbin", async () => {
   }
 });
 
+test("setChunkBin and setChunkBinState round-trip the chunkbin byte layouts", async () => {
+  const server = await startServer();
+  try {
+    const client = await connectUri(server.uri);
+    const info = await client.info();
+    const widthBlocks = Number.parseInt(info.values.chunk_width_blocks, 10);
+    const heightBlocks = Number.parseInt(info.values.chunk_height_blocks, 10);
+    const blockBits = Number.parseInt(info.values.block_bits, 10);
+    const payloadBytes = Math.ceil((widthBlocks * heightBlocks * blockBits) / 8);
+    const presenceBytes = Math.ceil((widthBlocks * heightBlocks) / 8);
+
+    const payload = Buffer.alloc(payloadBytes);
+    for (let i = 0; i < payloadBytes; i += 1) payload[i] = (i * 37 + 11) & 0xff;
+
+    await client.setChunkBin(2, 3, payload);
+    assert.equal(await client.chunkExists(2, 3), true);
+    assert.deepEqual(await client.chunkbin(2, 3), payload);
+    const state = await client.chunkbinState(2, 3);
+    assert.equal(state.length, payloadBytes + presenceBytes);
+    assert.deepEqual(state.subarray(0, payloadBytes), payload);
+
+    // STATE form with an empty presence bitmap leaves the chunk absent even
+    // though payload bytes were sent (they are canonicalized to zero).
+    const absentState = Buffer.concat([payload, Buffer.alloc(presenceBytes)]);
+    await client.setChunkBinState(4, 3, absentState);
+    assert.equal(await client.chunkExists(4, 3), false);
+
+    // Round-trip: write back exactly what chunkbinState returned.
+    await client.setChunkBinState(5, 3, state);
+    assert.deepEqual(await client.chunkbinState(5, 3), state);
+
+    // Length validation happens client-side before anything is sent, and the
+    // connection stays usable afterwards.
+    await assert.rejects(client.setChunkBin(6, 3, Buffer.alloc(payloadBytes + 1)), /CHUNKSETBIN payload must be/);
+    await assert.rejects(client.setChunkBinState(6, 3, Buffer.alloc(1)), /CHUNKSETBIN STATE payload must be/);
+    assert.equal(await client.ping(), "PONG");
+
+    await client.close();
+  } finally {
+    await server.stop();
+  }
+});
+
 test("chunkExists and setChunk distinguish absent chunks from explicit zero chunks", async () => {
   const server = await startServer();
   try {

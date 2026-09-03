@@ -53,6 +53,8 @@ interface PendingRequest {
   reject: (error: Error) => void;
 }
 
+const CRLF = Buffer.from("\r\n", "utf8");
+
 interface ChunkGeometryInfo {
   chunkPayloadBits: number;
   chunkBlockCount: number;
@@ -444,6 +446,49 @@ export class ChunkClient {
         throw new ChunkProtocolError(`unexpected CHUNKSET response: ${text}`, {
           phase: "protocol",
           command: "CHUNKSET",
+        });
+      }
+    });
+  }
+
+  setChunkBin(cx: number, cy: number, payload: Buffer): Promise<void> {
+    return this.enqueue(async () => {
+      const geometry = await this.ensureChunkGeometry();
+      const expected = Math.ceil(geometry.chunkPayloadBits / 8);
+      if (payload.length !== expected) {
+        throw new ChunkProtocolError(`CHUNKSETBIN payload must be ${expected} bytes`, {
+          phase: "request",
+          command: "CHUNKSETBIN",
+        });
+      }
+      const frame = await this.sendCommand("CHUNKSETBIN", [cx, cy, payload.length], payload);
+      const text = this.expectSimple(frame, "CHUNKSETBIN");
+      if (text !== "OK") {
+        throw new ChunkProtocolError(`unexpected CHUNKSETBIN response: ${text}`, {
+          phase: "protocol",
+          command: "CHUNKSETBIN",
+        });
+      }
+    });
+  }
+
+  setChunkBinState(cx: number, cy: number, state: Buffer): Promise<void> {
+    return this.enqueue(async () => {
+      const geometry = await this.ensureChunkGeometry();
+      const expected =
+        Math.ceil(geometry.chunkPayloadBits / 8) + Math.ceil(geometry.chunkBlockCount / 8);
+      if (state.length !== expected) {
+        throw new ChunkProtocolError(`CHUNKSETBIN STATE payload must be ${expected} bytes`, {
+          phase: "request",
+          command: "CHUNKSETBIN",
+        });
+      }
+      const frame = await this.sendCommand("CHUNKSETBIN", [cx, cy, "STATE", state.length], state);
+      const text = this.expectSimple(frame, "CHUNKSETBIN");
+      if (text !== "OK") {
+        throw new ChunkProtocolError(`unexpected CHUNKSETBIN response: ${text}`, {
+          phase: "protocol",
+          command: "CHUNKSETBIN",
         });
       }
     });
@@ -872,7 +917,14 @@ export class ChunkClient {
     }
   }
 
-  private async sendCommand(command: string, args: Array<string | number>): Promise<ChunkFrame> {
+  // `payload`, when given, is written after the request line followed by an
+  // empty line (the CHUNKSETBIN framing); the server reads exactly the byte
+  // count declared in the request line.
+  private async sendCommand(
+    command: string,
+    args: Array<string | number>,
+    payload?: Buffer,
+  ): Promise<ChunkFrame> {
     await this.ensureConnected();
     const socket = this.socket;
     if (socket === null) {
@@ -898,7 +950,9 @@ export class ChunkClient {
     });
 
     await new Promise<void>((resolve, reject) => {
-      socket.write(serializeCommand([command, ...args]), (error) => {
+      const line = serializeCommand([command, ...args]);
+      const wire = payload === undefined ? line : Buffer.concat([line, payload, CRLF]);
+      socket.write(wire, (error) => {
         if (!error) { resolve(); return; }
         const wrapped = this.wrapTransportError(error, "request", command);
         this.failAllPending(wrapped);

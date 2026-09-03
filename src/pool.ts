@@ -222,6 +222,14 @@ export class ChunkPool {
     return this.withClient(async (client) => await client.chunk(cx, cy));
   }
 
+  setChunkBin(cx: number, cy: number, payload: Buffer): Promise<void> {
+    return this.withClient(async (client) => await client.setChunkBin(cx, cy, payload));
+  }
+
+  setChunkBinState(cx: number, cy: number, state: Buffer): Promise<void> {
+    return this.withClient(async (client) => await client.setChunkBinState(cx, cy, state));
+  }
+
   chunkbin(cx: number, cy: number): Promise<Buffer> {
     return this.withClient(async (client) => await client.chunkbin(cx, cy));
   }
