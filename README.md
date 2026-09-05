@@ -20,7 +20,15 @@ This package is intentionally small:
 - `chunk://` and `chunks://` URI support
 - Node core `net` / `tls` transport
 - `connect`, `connectUri`, `connectPool`, `ChunkClient`, and `ChunkPool`
-- `auth`, `ping`, `info`, `get`, `readBlock`, `exists`, `set`, `unset`, `mset`, `mget`, `chunkExists`, `readChunk`, `setChunk`, `setChunkState`, `setChunkBin`, `setChunkBinState`, `chunk`, `chunkbin`, `chunkbinState`
+- `auth`, `ping`, `info`, `get`, `readBlock`, `exists`, `set`, `unset`, `mset`, `mget`, `chunkExists`, `readChunk`, `setChunk`, `setChunkState`, `chunk`, `chunkbin`, `chunkbinState`
+- binary chunk writes (`setChunkBin`, `setChunkBinState`) that take the same
+  `Buffer` layouts `chunkbin` / `chunkbinState` return (server 1.3+)
+- world reads: `chunkScan`, `chunkRange`, `chunkRadius`
+- compressed chunk transfer (`chunkbinCompressed`, `chunkbinStateCompressed`),
+  decompressed and size-checked client-side
+- optimistic concurrency: `chunkVersion`, `chunkCompareAndSet`, and atomic
+  single-chunk `chunkBatch`
+- `walFlush` durability barrier and `metrics` (Prometheus text format)
 - batch `mset` / `mget` (single round-trip for many blocks) and configurable request pipelining (`pipelineDepth`) for high-latency links
 - persistent socket reuse for low-concurrency callers and opt-in pooled concurrency for Node services
 - typed error classes
@@ -28,6 +36,11 @@ This package is intentionally small:
 - dual ESM / CommonJS build output
 
 ## Install
+
+Requirements:
+
+- Node.js 20 or newer
+- a reachable `chunkdb` 1.x server
 
 ```bash
 npm install @chunkdb/client
@@ -130,6 +143,8 @@ const client = await connectUri("chunks://chunk-token@127.0.0.1:4242/", {
 - `connectPool(options)`
 - `parseChunkUri(uri)`
 - `formatChunkUri(parsed)`
+- `serializeCommand(parts)`, `parseFrame(buffer)`, `parseInfoPayload(buffer)`
+- `zrleCompress(buffer)`, `zrleDecompress(buffer, expectedSize)`
 - `ChunkClient`
 - `ChunkPool`
 
@@ -137,6 +152,7 @@ const client = await connectUri("chunks://chunk-token@127.0.0.1:4242/", {
 
 - `connect()`
 - `close()`
+- `uri()`
 - `auth(token?)`
 - `ping()`
 - `info()`
@@ -301,21 +317,3 @@ try {
   }
 }
 ```
-
-## Local Development
-
-```bash
-npm install
-npm run build
-npm test
-npm pack --dry-run
-```
-
-Integration tests build and use the TLS-enabled server at
-`../chunkdb/build-js-tests/chunkdb_server`.
-
-Override paths when needed with:
-
-- `CHUNKDB_REPO_ROOT`
-- `CHUNKDB_SERVER_BIN`
-- `CHUNKDB_SERVER_BIN_TLS`
