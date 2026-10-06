@@ -13,8 +13,8 @@ export interface ChunkClientOptions {
   host?: string;
   port?: number;
   uri?: string;
+  /** Sent as `HELLO 2 AUTH <token>` when the connection opens. */
   token?: string;
-  autoAuth?: boolean;
   connectTimeoutMs?: number;
   commandTimeoutMs?: number;
   tls?: boolean;
@@ -26,8 +26,8 @@ export interface ChunkClientOptions {
   /** Max concurrent in-flight requests per connection. Default 1 (sequential). */
   pipelineDepth?: number;
   /**
-   * Table the connection works on; selected with `USE` after connecting and
-   * after every reconnect. Defaults to the URI path (`chunk://host:4242/terrain`),
+   * Table the connection works on; named in `HELLO` when connecting and
+   * reconnecting. Defaults to the URI path (`chunk://host:4242/terrain`),
    * then to the server's `default` table.
    */
   table?: string;
@@ -82,30 +82,54 @@ export interface ChunkTableInfo {
   values: Record<string, string>;
 }
 
+/** The server's `HELLO` reply. */
+export interface ChunkHelloInfo {
+  protocol: number;
+  serverVersion: string;
+  /** Optional features, for example `"zrle"`. */
+  capabilities: string[];
+  maxLineBytes: number;
+  /** Most chunks one `chunkRange` / `chunkRadius` call may cover. */
+  maxAreaChunks: number;
+  /** Largest `chunkRange` / `chunkRadius` response, in bytes. */
+  maxResponseBytes: number;
+  maxScanLimit: number;
+  maxBatchOps: number;
+  /** The connection's table, or null when it has none (no `default`). */
+  table: ChunkTableInfo | null;
+  /** Every key/value line of the reply. */
+  values: Record<string, string>;
+}
+
 export interface ChunkInfo {
   raw: string;
   values: Record<string, string>;
 }
 
-export type ChunkBlockState =
-  | {
-      exists: false;
-      bits: null;
-    }
-  | {
-      exists: true;
-      bits: string;
-    };
-
-export interface ChunkChunkState {
-  exists: boolean;
-  bits: string;
-  presence: string;
+/**
+ * A chunk's binary state: the packed block payload and the presence bitmap
+ * (one bit per block, set when the block is explicitly present).
+ */
+export interface ChunkChunkStateInput {
+  payload: Buffer;
+  presence: Buffer;
 }
 
-export interface ChunkChunkStateInput {
-  bits: string;
-  presence: string;
+export interface ChunkChunkState extends ChunkChunkStateInput {
+  /** True when any block is explicitly present. */
+  exists: boolean;
+}
+
+export interface ChunkGetOptions {
+  /** Transfer the chunk zrle-compressed; the result is decompressed. */
+  zrle?: boolean;
+}
+
+export interface ChunkPutOptions {
+  /** Write only if the chunk's current version equals this one. */
+  ifVersion?: bigint;
+  /** Send the chunk zrle-compressed when that is smaller. */
+  zrle?: boolean;
 }
 
 export interface ChunkCoordPair {
@@ -119,11 +143,9 @@ export interface ChunkScanResult {
   nextCursor: ChunkCoordPair | null;
 }
 
-export interface ChunkRangeEntry {
+export interface ChunkRangeEntry extends ChunkChunkStateInput {
   cx: number;
   cy: number;
-  bits: string;
-  presence: string;
 }
 
 export type ChunkBatchOperation =
@@ -136,7 +158,7 @@ export interface ChunkMutationResult {
    * On success: the chunk version after the mutation.
    * On version mismatch (ok === false): the current chunk version.
    * Versions are opaque tokens; they change on every content mutation and
-   * whenever the server reloads the chunk (eviction or restart).
+   * survive eviction and restart.
    */
   version: bigint;
 }

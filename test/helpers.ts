@@ -59,30 +59,27 @@ export function resolveServerBinary(
   );
 }
 
-// Every command family exercised by the integration suite. Deliberately
-// invalid arguments keep the probe side-effect-free while still distinguishing
-// an implemented command (INVALID_ARGUMENT) from an absent one
-// (UNKNOWN_COMMAND).
+// Every command family exercised by the integration suite, probed after
+// `HELLO 2` (which a server without protocol 2 refuses). Deliberately invalid
+// arguments keep the probe side-effect-free while still distinguishing an
+// implemented command (INVALID_ARGUMENT) from an absent one (UNKNOWN_COMMAND).
+// CHUNKPUT is not probed: a malformed CHUNKPUT header closes the connection,
+// and protocol 2 itself implies it.
 export const REQUIRED_COMMAND_PROBES = [
   "PING extra",
   "INFO extra",
   "GET",
-  "EXISTS",
   "SET",
   "UNSET",
   "MGET",
   "MSET",
   "CHUNKEXISTS",
-  "CHUNK",
-  "CHUNKSET",
-  "CHUNKBIN",
+  "CHUNKGET",
   "CHUNKSCAN",
   "CHUNKRANGE",
   "CHUNKRADIUS",
   "CHUNKVER",
-  "CHUNKCAS",
   "CHUNKBATCH",
-  "CHUNKBINC",
   "WALFLUSH extra",
   "METRICS extra",
   "TABLES extra",
@@ -110,7 +107,7 @@ async function assertServerSupportsRequiredCommands(
   await new Promise<void>((resolve, reject) => {
     const socket = net.connect({ host, port });
     let buffer = "";
-    let authenticated = false;
+    let greeted = false;
     let probeIndex = 0;
     let pendingBulkBytes: number | undefined;
     const fail = (message: string) => {
@@ -120,7 +117,7 @@ async function assertServerSupportsRequiredCommands(
     socket.setEncoding("utf8");
     socket.once("error", reject);
     socket.once("connect", () => {
-      socket.write(`AUTH ${token}\r\n`);
+      socket.write(`HELLO 2 AUTH ${token}\r\n`);
     });
     socket.on("data", (chunk: string) => {
       buffer += chunk;
@@ -131,6 +128,11 @@ async function assertServerSupportsRequiredCommands(
           }
           buffer = buffer.slice(pendingBulkBytes + 2);
           pendingBulkBytes = undefined;
+          if (!greeted) {
+            greeted = true;
+            socket.write(`${REQUIRED_COMMAND_PROBES[probeIndex]}\r\n`);
+            continue;
+          }
           probeIndex += 1;
           if (probeIndex === REQUIRED_COMMAND_PROBES.length) {
             socket.end();
@@ -146,14 +148,12 @@ async function assertServerSupportsRequiredCommands(
         }
         const line = buffer.slice(0, newline).replace(/\r$/, "");
         buffer = buffer.slice(newline + 1);
-        if (!authenticated) {
-          if (!line.startsWith("+OK")) {
-            fail(`server rejected AUTH during compatibility probe: ${line}`);
-            return;
-          }
-          authenticated = true;
-          socket.write(`${REQUIRED_COMMAND_PROBES[probeIndex]}\r\n`);
-          continue;
+        if (!greeted && !line.startsWith("$")) {
+          fail(
+            `server refused HELLO 2 during compatibility probe (${line}); it does not speak ` +
+              "protocol 2. Rebuild the current workspace server with `npm run test:server`.",
+          );
+          return;
         }
         const probe = REQUIRED_COMMAND_PROBES[probeIndex];
         const missing = missingCommandFromProbe(probe, line);

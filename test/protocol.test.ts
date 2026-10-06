@@ -18,12 +18,12 @@ test("parse simple frame", () => {
 });
 
 test("parse error frame", () => {
-  const parsed = parseFrame(Buffer.from("-ERR AUTH_REQUIRED use AUTH <token>\r\n", "utf8"));
+  const parsed = parseFrame(Buffer.from("-ERR AUTH_REQUIRED use HELLO 2 AUTH <token>\r\n", "utf8"));
   assert.ok(parsed !== null);
   assert.equal(parsed.frame.type, "error");
   if (parsed.frame.type === "error") {
     assert.equal(parsed.frame.code, "AUTH_REQUIRED");
-    assert.equal(parsed.frame.message, "use AUTH <token>");
+    assert.equal(parsed.frame.message, "use HELLO 2 AUTH <token>");
   }
 });
 
@@ -46,4 +46,20 @@ test("parse info payload", () => {
   const values = parseInfoPayload(Buffer.from("chunkdb_version=1\nblock_bits=16\n", "utf8"));
   assert.equal(values.chunkdb_version, "1");
   assert.equal(values.block_bits, "16");
+});
+
+test("parse null frame and arrays with nulls", () => {
+  const parsed = parseFrame(Buffer.from("$-1\r\n", "utf8"));
+  assert.deepEqual(parsed, { frame: { type: "null" }, bytesConsumed: 5 });
+
+  const array = parseFrame(Buffer.from("*3\r\n$2\r\n10\r\n$-1\r\n$1\r\n1\r\n", "utf8"));
+  assert.ok(array !== null && array.frame.type === "array");
+  if (array.frame.type === "array") {
+    assert.deepEqual(
+      array.frame.items.map((item) => (item.type === "null" ? null : item.value.toString("utf8"))),
+      ["10", null, "1"],
+    );
+  }
+  // An incomplete array waits for more bytes.
+  assert.equal(parseFrame(Buffer.from("*2\r\n$-1\r\n", "utf8")), null);
 });

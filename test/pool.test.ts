@@ -10,6 +10,14 @@ import {
   connectPool,
 } from "../src/index";
 
+// The HELLO reply of a server with no default table.
+const FAKE_HELLO = (() => {
+  const body =
+    "protocol=2\nserver_version=test\ncapabilities=zrle\nmax_line_bytes=65536\n" +
+    "max_area_chunks=256\nmax_response_bytes=67108864\nmax_scan_limit=1024\nmax_batch_ops=1024\n";
+  return `$${Buffer.byteLength(body)}\r\n${body}\r\n`;
+})();
+
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -84,8 +92,8 @@ async function startPingServer(options: { autoRespond?: boolean } = {}): Promise
           }
           continue;
         }
-        if (line.startsWith("AUTH ")) {
-          socket.write("+OK\r\n");
+        if (line.startsWith("HELLO 2")) {
+          socket.write(FAKE_HELLO);
           continue;
         }
         socket.write("-ERR UNKNOWN_COMMAND unsupported\r\n");
@@ -172,7 +180,6 @@ test("connectPool warms minConnections", async () => {
     const pool = await connectPool({
       host: server.host,
       port: server.port,
-      autoAuth: false,
       maxConnections: 3,
       minConnections: 2,
     });
@@ -190,7 +197,6 @@ test("ChunkPool reuses one socket for sequential work", async () => {
     const pool = new ChunkPool({
       host: server.host,
       port: server.port,
-      autoAuth: false,
       maxConnections: 1,
     });
 
@@ -210,7 +216,6 @@ test("ChunkPool caps concurrent sockets at maxConnections", async () => {
     const pool = new ChunkPool({
       host: server.host,
       port: server.port,
-      autoAuth: false,
       maxConnections: 2,
       acquireTimeoutMs: 500,
     });
@@ -245,7 +250,6 @@ test("ChunkPool wakes queued waiters in FIFO order", async () => {
     const pool = new ChunkPool({
       host: server.host,
       port: server.port,
-      autoAuth: false,
       maxConnections: 1,
       acquireTimeoutMs: 500,
     });
@@ -290,7 +294,6 @@ test("ChunkPool times out queued acquires", async () => {
     const pool = new ChunkPool({
       host: server.host,
       port: server.port,
-      autoAuth: false,
       maxConnections: 1,
       commandTimeoutMs: 1000,
       acquireTimeoutMs: 50,
@@ -322,7 +325,6 @@ test("ChunkPool close rejects queued waiters and drains active leases", async ()
     const pool = new ChunkPool({
       host: server.host,
       port: server.port,
-      autoAuth: false,
       maxConnections: 1,
       acquireTimeoutMs: 1000,
     });
@@ -367,6 +369,10 @@ test("ChunkClient clears stale buffered data after forced disconnect and can rec
         }
         const line = buffer.slice(0, lineEnd).replace(/\r$/, "");
         buffer = buffer.slice(lineEnd + 1);
+        if (line.startsWith("HELLO 2")) {
+          socket.write(FAKE_HELLO);
+          continue;
+        }
         if (line !== "PING") {
           socket.write("-ERR UNKNOWN_COMMAND unsupported\r\n");
           continue;
@@ -397,7 +403,6 @@ test("ChunkClient clears stale buffered data after forced disconnect and can rec
   const client = new ChunkClient({
     host,
     port: address.port,
-    autoAuth: false,
     connectTimeoutMs: 500,
     commandTimeoutMs: 500,
   });

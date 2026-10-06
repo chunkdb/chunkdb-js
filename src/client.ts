@@ -10,17 +10,26 @@ import {
   ChunkTlsError,
   type ChunkError,
 } from "./errors";
-import { parseFrame, parseInfoPayload, serializeCommand, type BulkFrame, type ChunkFrame } from "./protocol";
+import {
+  parseFrame,
+  parseInfoPayload,
+  serializeCommand,
+  type BulkFrame,
+  type ChunkFrame,
+  type NullFrame,
+} from "./protocol";
 import { formatChunkUri, parseChunkUri, tableFromUriPath } from "./uri";
 import type {
   ChunkBatchOperation,
-  ChunkBlockState,
   ChunkChunkState,
   ChunkChunkStateInput,
   ChunkClientOptions,
   ChunkCoordPair,
+  ChunkGetOptions,
+  ChunkHelloInfo,
   ChunkInfo,
   ChunkMutationResult,
+  ChunkPutOptions,
   ChunkRangeEntry,
   ChunkScanResult,
   ChunkTableCreateOptions,
@@ -28,7 +37,7 @@ import type {
   ChunkTableOptions,
   ParsedChunkUri,
 } from "./types";
-import { zrleDecompress } from "./zrle";
+import { zrleCompress, zrleDecompress } from "./zrle";
 
 type TransportSocket = net.Socket | tls.TLSSocket;
 
@@ -37,7 +46,6 @@ interface ResolvedOptions {
   port: number;
   token: string;
   secure: boolean;
-  autoAuth: boolean;
   connectTimeoutMs: number;
   commandTimeoutMs: number;
   tlsInsecure: boolean;
@@ -58,10 +66,10 @@ interface PendingRequest {
 }
 
 const CRLF = Buffer.from("\r\n", "utf8");
+const PROTOCOL_VERSION = 2;
+const MAX_VERSION = (1n << 64n) - 1n;
 
 interface ChunkGeometryInfo {
-  chunkPayloadBits: number;
-  chunkBlockCount: number;
   chunkPayloadBytes: number;
   presenceBytes: number;
 }
@@ -74,25 +82,82 @@ function isBitString(bits: string): boolean {
   return /^[01]+$/.test(bits);
 }
 
-function parseChunkStateText(text: string, command: string): { bits: string; presence: string } {
-  const separator = text.indexOf("|");
-  if (separator <= 0 || separator !== text.lastIndexOf("|") || separator === text.length - 1) {
-    throw new ChunkProtocolError(`unexpected ${command} STATE payload`, {
+function bulkText(item: BulkFrame | NullFrame, command: string): string {
+  if (item.type !== "bulk") {
+    throw new ChunkProtocolError(`unexpected null item in ${command} response`, {
       phase: "protocol",
       command,
     });
   }
+  return item.value.toString("utf8");
+}
 
-  const bits = text.slice(0, separator);
-  const presence = text.slice(separator + 1);
-  if (!isBitString(bits) || !isBitString(presence)) {
-    throw new ChunkProtocolError(`unexpected ${command} STATE payload`, {
+function parseCoordPair(text: string, command: string): ChunkCoordPair {
+  const parts = text.split(" ");
+  if (parts.length !== 2) {
+    throw new ChunkProtocolError(`unexpected ${command} coordinates: ${text}`, {
       phase: "protocol",
       command,
     });
   }
+  const coord = (token: string): number => {
+    const value = Number.parseInt(token, 10);
+    if (!Number.isSafeInteger(value) || String(value) !== token) {
+      throw new ChunkProtocolError(`invalid coordinate in ${command} response: ${token}`, {
+        phase: "protocol",
+        command,
+      });
+    }
+    return value;
+  };
+  return { cx: coord(parts[0]), cy: coord(parts[1]) };
+}
 
-  return { bits, presence };
+function parseVersionText(text: string, command: string): bigint {
+  if (!/^[0-9]+$/.test(text)) {
+    throw new ChunkProtocolError(`invalid version in ${command} response: ${text}`, {
+      phase: "protocol",
+      command,
+    });
+  }
+  return BigInt(text);
+}
+
+function versionArgument(version: bigint, command: string): string {
+  if (typeof version !== "bigint" || version < 0n || version > MAX_VERSION) {
+    throw new ChunkProtocolError(`${command} ifVersion must be an unsigned 64-bit bigint`, {
+      phase: "request",
+      command,
+    });
+  }
+  return version.toString();
+}
+
+// Chunk bytes from the server, checked against the table's sizes.
+function decodeChunkBytes(body: Buffer, expected: number, zrle: boolean, command: string): Buffer {
+  if (zrle) {
+    try {
+      return zrleDecompress(body, expected);
+    } catch (error) {
+      throw new ChunkProtocolError(
+        `invalid ${command} ZRLE payload: ${error instanceof Error ? error.message : String(error)}`,
+        { phase: "protocol", command },
+      );
+    }
+  }
+  if (body.length !== expected) {
+    throw new ChunkProtocolError(`${command} returned ${body.length} bytes, expected ${expected}`, {
+      phase: "protocol",
+      command,
+    });
+  }
+  return body;
+}
+
+function splitChunkState(bytes: Buffer, geometry: ChunkGeometryInfo): ChunkChunkState {
+  const payload = bytes.subarray(0, geometry.chunkPayloadBytes);
+  const presence = bytes.subarray(geometry.chunkPayloadBytes);
+  return { exists: presence.some((byte) => byte !== 0), payload, presence };
 }
 
 function resolveTlsServerName(options: ResolvedOptions): string | undefined {
@@ -108,7 +173,6 @@ function resolveOptions(options: ChunkClientOptions = {}): ResolvedOptions {
   const host = options.host ?? parsed?.host ?? DEFAULT_HOST;
   const port = options.port ?? parsed?.port ?? DEFAULT_PORT;
   const token = options.token ?? parsed?.token ?? "";
-  const autoAuth = options.autoAuth ?? token !== "";
   const connectTimeoutMs = options.connectTimeoutMs ?? DEFAULT_TIMEOUT_MS;
   const commandTimeoutMs = options.commandTimeoutMs ?? DEFAULT_TIMEOUT_MS;
   const table =
@@ -121,7 +185,6 @@ function resolveOptions(options: ChunkClientOptions = {}): ResolvedOptions {
     port,
     token,
     secure,
-    autoAuth,
     connectTimeoutMs,
     commandTimeoutMs,
     tlsInsecure: options.tlsInsecure ?? false,
@@ -200,10 +263,38 @@ function parseTableInfo(payload: Buffer, command: string): ChunkTableInfo {
 function geometryOf(info: { blockBits: number; chunkWidthBlocks: number; chunkHeightBlocks: number }): ChunkGeometryInfo {
   const chunkBlockCount = info.chunkWidthBlocks * info.chunkHeightBlocks;
   return {
-    chunkPayloadBits: chunkBlockCount * info.blockBits,
-    chunkBlockCount,
     chunkPayloadBytes: Math.ceil((chunkBlockCount * info.blockBits) / 8),
     presenceBytes: Math.ceil(chunkBlockCount / 8),
+  };
+}
+
+function parseHelloInfo(payload: Buffer): ChunkHelloInfo {
+  const values = parseInfoPayload(payload);
+  if (values.protocol !== String(PROTOCOL_VERSION)) {
+    throw new ChunkProtocolError(
+      `server replied with protocol ${values.protocol ?? "(none)"}, expected ${PROTOCOL_VERSION}`,
+      { phase: "protocol", command: "HELLO" },
+    );
+  }
+  const integer = (key: string): number => {
+    const parsed = Number(values[key]);
+    if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+      throw new ChunkProtocolError(`HELLO missing valid ${key}`, { phase: "protocol", command: "HELLO" });
+    }
+    return parsed;
+  };
+  return {
+    protocol: PROTOCOL_VERSION,
+    serverVersion: values.server_version ?? "",
+    capabilities: (values.capabilities ?? "").split(",").filter((name) => name !== ""),
+    maxLineBytes: integer("max_line_bytes"),
+    maxAreaChunks: integer("max_area_chunks"),
+    maxResponseBytes: integer("max_response_bytes"),
+    maxScanLimit: integer("max_scan_limit"),
+    maxBatchOps: integer("max_batch_ops"),
+    // Without a `default` table and without TABLE, the connection has none.
+    table: values.table === undefined ? null : parseTableInfo(payload, "HELLO"),
+    values,
   };
 }
 
@@ -217,13 +308,16 @@ export class ChunkClient {
   private connected = false;
   private disposed = false;
   private geometryInfo: ChunkGeometryInfo | null = null;
+  private helloInfo: ChunkHelloInfo | null = null;
   // The table this connection works on; null means the server's `default`.
   private selectedTable: string | null;
 
   // Pipeline concurrency tracking
   private activeOps = 0;
   private readonly maxPipeline: number;
-  private readonly opWaiters: Array<{ run: () => void; reject: (err: Error) => void }> = [];
+  private readonly opWaiters: Array<{ run: () => void; reject: (err: Error) => void; exclusive: boolean }> = [];
+  // An exclusive operation (USE) runs alone: nothing else is in flight.
+  private exclusiveRunning = false;
 
   constructor(options: ChunkClientOptions = {}) {
     this.clientOptions = { ...options };
@@ -248,7 +342,7 @@ export class ChunkClient {
   tables(): Promise<string[]> {
     return this.enqueue(async () => {
       const frame = await this.sendCommand("TABLES", []);
-      return this.expectArray(frame, "TABLES").map((item) => item.value.toString("utf8"));
+      return this.expectArray(frame, "TABLES").map((item) => bulkText(item, "TABLES"));
     });
   }
 
@@ -264,7 +358,10 @@ export class ChunkClient {
    * name fails with `NO_TABLE` and keeps the current table.
    */
   use(name: string): Promise<ChunkTableInfo> {
-    return this.enqueue(async () => await this.useTable(name));
+    // USE changes the sizes chunk requests are checked and framed with, so it
+    // waits for the requests in flight and holds back new ones until its
+    // reply: each request runs entirely on the old or the new table.
+    return this.enqueue(async () => await this.useTable(name), true);
   }
 
   /** Creates a table. Its geometry is fixed; options can change later. */
@@ -366,24 +463,9 @@ export class ChunkClient {
     });
   }
 
-  auth(token?: string): Promise<void> {
-    return this.enqueue(async () => {
-      const authToken = token ?? this.options.token;
-      if (authToken === "") {
-        throw new ChunkAuthError("AUTH_FAILED", "token is required", {
-          phase: "auth",
-          command: "AUTH",
-        });
-      }
-      const frame = await this.sendCommand("AUTH", [authToken]);
-      const text = this.expectSimple(frame, "AUTH");
-      if (text !== "OK") {
-        throw new ChunkProtocolError(`unexpected AUTH response: ${text}`, {
-          phase: "protocol",
-          command: "AUTH",
-        });
-      }
-    });
+  /** The server's `HELLO` reply for the current connection; null before connecting. */
+  serverInfo(): ChunkHelloInfo | null {
+    return this.helloInfo;
   }
 
   ping(): Promise<"PONG"> {
@@ -411,81 +493,29 @@ export class ChunkClient {
     });
   }
 
-  get(x: number, y: number): Promise<string> {
+  /** A block's bits, or null when the block is unset. */
+  get(x: number, y: number): Promise<string | null> {
     return this.enqueue(async () => {
       const frame = await this.sendCommand("GET", [x, y]);
-      return this.expectBulk(frame, "GET").toString("utf8");
-    });
-  }
-
-  readBlock(x: number, y: number): Promise<ChunkBlockState> {
-    return this.enqueue(async () => {
-      const existsFrame = await this.sendCommand("EXISTS", [x, y]);
-      const existsText = this.expectSimple(existsFrame, "EXISTS");
-      if (existsText === "0") {
-        return { exists: false, bits: null };
-      }
-      if (existsText !== "1") {
-        throw new ChunkProtocolError(`unexpected EXISTS response: ${existsText}`, {
-          phase: "protocol",
-          command: "EXISTS",
-        });
-      }
-
-      const getFrame = await this.sendCommand("GET", [x, y]);
-      return {
-        exists: true,
-        bits: this.expectBulk(getFrame, "GET").toString("utf8"),
-      };
-    });
-  }
-
-  exists(x: number, y: number): Promise<boolean> {
-    return this.enqueue(async () => {
-      const frame = await this.sendCommand("EXISTS", [x, y]);
-      const text = this.expectSimple(frame, "EXISTS");
-      if (text === "1") {
-        return true;
-      }
-      if (text === "0") {
-        return false;
-      }
-      throw new ChunkProtocolError(`unexpected EXISTS response: ${text}`, {
-        phase: "protocol",
-        command: "EXISTS",
-      });
+      return this.expectBulkOrNull(frame, "GET")?.toString("utf8") ?? null;
     });
   }
 
   set(x: number, y: number, bits: string): Promise<void> {
     return this.enqueue(async () => {
-      if (!/^[01]+$/.test(bits)) {
+      if (!isBitString(bits)) {
         throw new ChunkProtocolError("SET bits must contain only 0 and 1", {
           phase: "request",
           command: "SET",
         });
       }
-      const frame = await this.sendCommand("SET", [x, y, bits]);
-      const text = this.expectSimple(frame, "SET");
-      if (text !== "OK") {
-        throw new ChunkProtocolError(`unexpected SET response: ${text}`, {
-          phase: "protocol",
-          command: "SET",
-        });
-      }
+      this.expectOk(await this.sendCommand("SET", [x, y, bits]), "SET");
     });
   }
 
   unset(x: number, y: number): Promise<void> {
     return this.enqueue(async () => {
-      const frame = await this.sendCommand("UNSET", [x, y]);
-      const text = this.expectSimple(frame, "UNSET");
-      if (text !== "OK") {
-        throw new ChunkProtocolError(`unexpected UNSET response: ${text}`, {
-          phase: "protocol",
-          command: "UNSET",
-        });
-      }
+      this.expectOk(await this.sendCommand("UNSET", [x, y]), "UNSET");
     });
   }
 
@@ -502,18 +532,12 @@ export class ChunkClient {
         }
         args.push(x, y, bits);
       }
-      const frame = await this.sendCommand("MSET", args);
-      const text = this.expectSimple(frame, "MSET");
-      if (text !== "OK") {
-        throw new ChunkProtocolError(`unexpected MSET response: ${text}`, {
-          phase: "protocol",
-          command: "MSET",
-        });
-      }
+      this.expectOk(await this.sendCommand("MSET", args), "MSET");
     });
   }
 
-  mget(blocks: Array<{ x: number; y: number }>): Promise<string[]> {
+  /** Bits per requested block, in request order; null for an unset block. */
+  mget(blocks: Array<{ x: number; y: number }>): Promise<Array<string | null>> {
     return this.enqueue(async () => {
       if (blocks.length === 0) return [];
       const args: Array<string | number> = [];
@@ -521,7 +545,14 @@ export class ChunkClient {
         args.push(x, y);
       }
       const frame = await this.sendCommand("MGET", args);
-      return this.expectArray(frame, "MGET").map((f) => f.value.toString("utf8"));
+      const items = this.expectArray(frame, "MGET");
+      if (items.length !== blocks.length) {
+        throw new ChunkProtocolError(
+          `MGET returned ${items.length} items for ${blocks.length} blocks`,
+          { phase: "protocol", command: "MGET" },
+        );
+      }
+      return items.map((item) => (item.type === "null" ? null : item.value.toString("utf8")));
     });
   }
 
@@ -542,179 +573,85 @@ export class ChunkClient {
     });
   }
 
-  readChunk(cx: number, cy: number): Promise<ChunkChunkState> {
+  /**
+   * The chunk's packed block payload. An absent chunk reads as zeros; use
+   * `getChunkState` or `chunkExists` to tell it from an all-zero chunk.
+   */
+  getChunk(cx: number, cy: number, options: ChunkGetOptions = {}): Promise<Buffer> {
     return this.enqueue(async () => {
-      const frame = await this.sendCommand("CHUNK", [cx, cy, "STATE"]);
-      const payload = this.expectBulk(frame, "CHUNK").toString("utf8");
-      const { bits, presence } = parseChunkStateText(payload, "CHUNK");
-      return {
-        exists: presence.includes("1"),
-        bits,
-        presence,
-      };
+      await this.ensureConnected();
+      const geometry = this.requireGeometry("CHUNKGET");
+      const zrle = options.zrle === true;
+      const frame = await this.sendCommand("CHUNKGET", zrle ? [cx, cy, "ZRLE"] : [cx, cy]);
+      return decodeChunkBytes(this.expectBulk(frame, "CHUNKGET"), geometry.chunkPayloadBytes, zrle, "CHUNKGET");
     });
   }
 
-  setChunk(cx: number, cy: number, bits: string): Promise<void> {
+  /** The chunk's payload and presence bitmap. */
+  getChunkState(cx: number, cy: number, options: ChunkGetOptions = {}): Promise<ChunkChunkState> {
     return this.enqueue(async () => {
-      if (!isBitString(bits)) {
-        throw new ChunkProtocolError("CHUNKSET bits must contain only 0 and 1", {
+      await this.ensureConnected();
+      const geometry = this.requireGeometry("CHUNKGET");
+      const zrle = options.zrle === true;
+      const frame = await this.sendCommand(
+        "CHUNKGET",
+        zrle ? [cx, cy, "STATE", "ZRLE"] : [cx, cy, "STATE"],
+      );
+      const bytes = decodeChunkBytes(
+        this.expectBulk(frame, "CHUNKGET"),
+        geometry.chunkPayloadBytes + geometry.presenceBytes,
+        zrle,
+        "CHUNKGET",
+      );
+      return splitChunkState(bytes, geometry);
+    });
+  }
+
+  /**
+   * Replaces the chunk's payload; every block becomes explicitly present.
+   * With `ifVersion`, the write applies only if the chunk still has that
+   * version; otherwise the result has `ok: false` and the current version.
+   */
+  putChunk(cx: number, cy: number, payload: Buffer, options: ChunkPutOptions = {}): Promise<ChunkMutationResult> {
+    return this.enqueue(async () => {
+      await this.ensureConnected();
+      const geometry = this.requireGeometry("CHUNKPUT");
+      if (payload.length !== geometry.chunkPayloadBytes) {
+        throw new ChunkProtocolError(`CHUNKPUT payload must be ${geometry.chunkPayloadBytes} bytes`, {
           phase: "request",
-          command: "CHUNKSET",
+          command: "CHUNKPUT",
         });
       }
-      const frame = await this.sendCommand("CHUNKSET", [cx, cy, bits]);
-      const text = this.expectSimple(frame, "CHUNKSET");
-      if (text !== "OK") {
-        throw new ChunkProtocolError(`unexpected CHUNKSET response: ${text}`, {
-          phase: "protocol",
-          command: "CHUNKSET",
-        });
-      }
+      return await this.putChunkBytes(cx, cy, payload, false, options);
     });
   }
 
-  setChunkState(cx: number, cy: number, state: ChunkChunkStateInput): Promise<void> {
+  /**
+   * Replaces the chunk's payload and presence bitmap; payload bits of absent
+   * blocks are stored as zero. `ifVersion` works as for `putChunk`.
+   */
+  putChunkState(
+    cx: number,
+    cy: number,
+    state: ChunkChunkStateInput,
+    options: ChunkPutOptions = {},
+  ): Promise<ChunkMutationResult> {
     return this.enqueue(async () => {
-      if (!isBitString(state.bits)) {
-        throw new ChunkProtocolError("CHUNKSET STATE payload bits must contain only 0 and 1", {
+      await this.ensureConnected();
+      const geometry = this.requireGeometry("CHUNKPUT");
+      if (state.payload.length !== geometry.chunkPayloadBytes) {
+        throw new ChunkProtocolError(`CHUNKPUT STATE payload must be ${geometry.chunkPayloadBytes} bytes`, {
           phase: "request",
-          command: "CHUNKSET",
+          command: "CHUNKPUT",
         });
       }
-      if (!isBitString(state.presence)) {
-        throw new ChunkProtocolError("CHUNKSET STATE presence bits must contain only 0 and 1", {
+      if (state.presence.length !== geometry.presenceBytes) {
+        throw new ChunkProtocolError(`CHUNKPUT STATE presence must be ${geometry.presenceBytes} bytes`, {
           phase: "request",
-          command: "CHUNKSET",
+          command: "CHUNKPUT",
         });
       }
-
-      const geometry = await this.ensureChunkGeometry();
-      if (state.bits.length !== geometry.chunkPayloadBits) {
-        throw new ChunkProtocolError(
-          `CHUNKSET STATE payload bits must be ${geometry.chunkPayloadBits} bits`,
-          { phase: "request", command: "CHUNKSET" },
-        );
-      }
-      if (state.presence.length !== geometry.chunkBlockCount) {
-        throw new ChunkProtocolError(
-          `CHUNKSET STATE presence bits must be ${geometry.chunkBlockCount} bits`,
-          { phase: "request", command: "CHUNKSET" },
-        );
-      }
-
-      const frame = await this.sendCommand("CHUNKSET", [cx, cy, "STATE", `${state.bits}|${state.presence}`]);
-      const text = this.expectSimple(frame, "CHUNKSET");
-      if (text !== "OK") {
-        throw new ChunkProtocolError(`unexpected CHUNKSET response: ${text}`, {
-          phase: "protocol",
-          command: "CHUNKSET",
-        });
-      }
-    });
-  }
-
-  setChunkBin(cx: number, cy: number, payload: Buffer): Promise<void> {
-    return this.enqueue(async () => {
-      const geometry = await this.ensureChunkGeometry();
-      const expected = Math.ceil(geometry.chunkPayloadBits / 8);
-      if (payload.length !== expected) {
-        throw new ChunkProtocolError(`CHUNKSETBIN payload must be ${expected} bytes`, {
-          phase: "request",
-          command: "CHUNKSETBIN",
-        });
-      }
-      const frame = await this.sendCommand("CHUNKSETBIN", [cx, cy, payload.length], payload);
-      const text = this.expectSimple(frame, "CHUNKSETBIN");
-      if (text !== "OK") {
-        throw new ChunkProtocolError(`unexpected CHUNKSETBIN response: ${text}`, {
-          phase: "protocol",
-          command: "CHUNKSETBIN",
-        });
-      }
-    });
-  }
-
-  setChunkBinState(cx: number, cy: number, state: Buffer): Promise<void> {
-    return this.enqueue(async () => {
-      const geometry = await this.ensureChunkGeometry();
-      const expected =
-        Math.ceil(geometry.chunkPayloadBits / 8) + Math.ceil(geometry.chunkBlockCount / 8);
-      if (state.length !== expected) {
-        throw new ChunkProtocolError(`CHUNKSETBIN STATE payload must be ${expected} bytes`, {
-          phase: "request",
-          command: "CHUNKSETBIN",
-        });
-      }
-      const frame = await this.sendCommand("CHUNKSETBIN", [cx, cy, "STATE", state.length], state);
-      const text = this.expectSimple(frame, "CHUNKSETBIN");
-      if (text !== "OK") {
-        throw new ChunkProtocolError(`unexpected CHUNKSETBIN response: ${text}`, {
-          phase: "protocol",
-          command: "CHUNKSETBIN",
-        });
-      }
-    });
-  }
-
-  chunk(cx: number, cy: number): Promise<string> {
-    return this.enqueue(async () => {
-      const frame = await this.sendCommand("CHUNK", [cx, cy]);
-      return this.expectBulk(frame, "CHUNK").toString("utf8");
-    });
-  }
-
-  chunkbin(cx: number, cy: number): Promise<Buffer> {
-    return this.enqueue(async () => {
-      const frame = await this.sendCommand("CHUNKBIN", [cx, cy]);
-      return this.expectBulk(frame, "CHUNKBIN");
-    });
-  }
-
-  chunkbinState(cx: number, cy: number): Promise<Buffer> {
-    return this.enqueue(async () => {
-      const geometry = await this.ensureChunkGeometry();
-      const frame = await this.sendCommand("CHUNKBIN", [cx, cy, "STATE"]);
-      const payload = this.expectBulk(frame, "CHUNKBIN");
-      if (payload.length !== geometry.chunkPayloadBytes + geometry.presenceBytes) {
-        throw new ChunkProtocolError("unexpected CHUNKBIN STATE payload length", {
-          phase: "protocol",
-          command: "CHUNKBIN",
-        });
-      }
-      return payload;
-    });
-  }
-
-  chunkbinCompressed(cx: number, cy: number): Promise<Buffer> {
-    return this.enqueue(async () => {
-      const geometry = await this.ensureChunkGeometry();
-      const frame = await this.sendCommand("CHUNKBINC", [cx, cy]);
-      const payload = this.expectBulk(frame, "CHUNKBINC");
-      try {
-        return zrleDecompress(payload, geometry.chunkPayloadBytes);
-      } catch (error) {
-        throw new ChunkProtocolError(
-          `invalid CHUNKBINC payload: ${error instanceof Error ? error.message : String(error)}`,
-          { phase: "protocol", command: "CHUNKBINC" },
-        );
-      }
-    });
-  }
-
-  chunkbinStateCompressed(cx: number, cy: number): Promise<Buffer> {
-    return this.enqueue(async () => {
-      const geometry = await this.ensureChunkGeometry();
-      const frame = await this.sendCommand("CHUNKBINC", [cx, cy, "STATE"]);
-      const payload = this.expectBulk(frame, "CHUNKBINC");
-      try {
-        return zrleDecompress(payload, geometry.chunkPayloadBytes + geometry.presenceBytes);
-      } catch (error) {
-        throw new ChunkProtocolError(
-          `invalid CHUNKBINC STATE payload: ${error instanceof Error ? error.message : String(error)}`,
-          { phase: "protocol", command: "CHUNKBINC" },
-        );
-      }
+      return await this.putChunkBytes(cx, cy, Buffer.concat([state.payload, state.presence]), true, options);
     });
   }
 
@@ -723,7 +660,7 @@ export class ChunkClient {
       const args: Array<string | number> =
         cursor === undefined ? [limit] : [limit, cursor.cx, cursor.cy];
       const frame = await this.sendCommand("CHUNKSCAN", args);
-      const items = this.expectArray(frame, "CHUNKSCAN").map((f) => f.value.toString("utf8"));
+      const items = this.expectArray(frame, "CHUNKSCAN").map((item) => bulkText(item, "CHUNKSCAN"));
       if (items.length === 0) {
         throw new ChunkProtocolError("empty CHUNKSCAN response", {
           phase: "protocol",
@@ -734,14 +671,7 @@ export class ChunkClient {
       const header = items[0];
       let nextCursor: ChunkCoordPair | null = null;
       if (header.startsWith("CURSOR ")) {
-        const parts = header.split(" ");
-        if (parts.length !== 3) {
-          throw new ChunkProtocolError(`unexpected CHUNKSCAN header: ${header}`, {
-            phase: "protocol",
-            command: "CHUNKSCAN",
-          });
-        }
-        nextCursor = { cx: this.parseCoordToken(parts[1], "CHUNKSCAN"), cy: this.parseCoordToken(parts[2], "CHUNKSCAN") };
+        nextCursor = parseCoordPair(header.slice("CURSOR ".length), "CHUNKSCAN");
       } else if (header !== "END") {
         throw new ChunkProtocolError(`unexpected CHUNKSCAN header: ${header}`, {
           phase: "protocol",
@@ -749,104 +679,36 @@ export class ChunkClient {
         });
       }
 
-      const coords = items.slice(1).map((item) => {
-        const parts = item.split(" ");
-        if (parts.length !== 2) {
-          throw new ChunkProtocolError(`unexpected CHUNKSCAN entry: ${item}`, {
-            phase: "protocol",
-            command: "CHUNKSCAN",
-          });
-        }
-        return {
-          cx: this.parseCoordToken(parts[0], "CHUNKSCAN"),
-          cy: this.parseCoordToken(parts[1], "CHUNKSCAN"),
-        };
-      });
+      const coords = items.slice(1).map((item) => parseCoordPair(item, "CHUNKSCAN"));
       return { coords, nextCursor };
     });
   }
 
-  chunkRange(cx0: number, cy0: number, cx1: number, cy1: number): Promise<ChunkRangeEntry[]> {
-    return this.enqueue(async () => {
-      const frame = await this.sendCommand("CHUNKRANGE", [cx0, cy0, cx1, cy1]);
-      return this.expectArray(frame, "CHUNKRANGE").map((f) => {
-        const text = f.value.toString("utf8");
-        const firstSpace = text.indexOf(" ");
-        const secondSpace = text.indexOf(" ", firstSpace + 1);
-        if (firstSpace <= 0 || secondSpace <= firstSpace) {
-          throw new ChunkProtocolError(`unexpected CHUNKRANGE entry: ${text}`, {
-            phase: "protocol",
-            command: "CHUNKRANGE",
-          });
-        }
-        const state = parseChunkStateText(text.slice(secondSpace + 1), "CHUNKRANGE");
-        return {
-          cx: this.parseCoordToken(text.slice(0, firstSpace), "CHUNKRANGE"),
-          cy: this.parseCoordToken(text.slice(firstSpace + 1, secondSpace), "CHUNKRANGE"),
-          bits: state.bits,
-          presence: state.presence,
-        };
-      });
-    });
+  /** Populated chunks in the rectangle, with payload and presence. */
+  chunkRange(
+    cx0: number,
+    cy0: number,
+    cx1: number,
+    cy1: number,
+    options: ChunkGetOptions = {},
+  ): Promise<ChunkRangeEntry[]> {
+    return this.enqueue(async () => await this.readArea("CHUNKRANGE", [cx0, cy0, cx1, cy1], options));
   }
 
-  chunkRadius(cx: number, cy: number, radiusChunks: number): Promise<ChunkRangeEntry[]> {
-    return this.enqueue(async () => {
-      const frame = await this.sendCommand("CHUNKRADIUS", [cx, cy, radiusChunks]);
-      return this.expectArray(frame, "CHUNKRADIUS").map((f) => {
-        const text = f.value.toString("utf8");
-        const firstSpace = text.indexOf(" ");
-        const secondSpace = text.indexOf(" ", firstSpace + 1);
-        if (firstSpace <= 0 || secondSpace <= firstSpace) {
-          throw new ChunkProtocolError(`unexpected CHUNKRADIUS entry: ${text}`, {
-            phase: "protocol",
-            command: "CHUNKRADIUS",
-          });
-        }
-        const state = parseChunkStateText(text.slice(secondSpace + 1), "CHUNKRADIUS");
-        return {
-          cx: this.parseCoordToken(text.slice(0, firstSpace), "CHUNKRADIUS"),
-          cy: this.parseCoordToken(text.slice(firstSpace + 1, secondSpace), "CHUNKRADIUS"),
-          bits: state.bits,
-          presence: state.presence,
-        };
-      });
-    });
+  /** Populated chunks within `radiusChunks` of a chunk, with payload and presence. */
+  chunkRadius(
+    cx: number,
+    cy: number,
+    radiusChunks: number,
+    options: ChunkGetOptions = {},
+  ): Promise<ChunkRangeEntry[]> {
+    return this.enqueue(async () => await this.readArea("CHUNKRADIUS", [cx, cy, radiusChunks], options));
   }
 
   chunkVersion(cx: number, cy: number): Promise<bigint> {
     return this.enqueue(async () => {
       const frame = await this.sendCommand("CHUNKVER", [cx, cy]);
-      return this.parseVersionText(this.expectBulk(frame, "CHUNKVER").toString("utf8"), "CHUNKVER");
-    });
-  }
-
-  chunkCompareAndSet(
-    cx: number,
-    cy: number,
-    expectedVersion: bigint,
-    state: ChunkChunkStateInput,
-  ): Promise<ChunkMutationResult> {
-    return this.enqueue(async () => {
-      try {
-        const frame = await this.sendCommand("CHUNKCAS", [
-          cx,
-          cy,
-          expectedVersion.toString(),
-          "STATE",
-          `${state.bits}|${state.presence}`,
-        ]);
-        return {
-          ok: true,
-          version: this.parseVersionText(this.expectBulk(frame, "CHUNKCAS").toString("utf8"), "CHUNKCAS"),
-        };
-      } catch (error) {
-        const mismatch = this.parseVersionMismatch(error, "CHUNKCAS");
-        if (mismatch !== null) {
-          return mismatch;
-        }
-        throw error;
-      }
+      return parseVersionText(this.expectBulk(frame, "CHUNKVER").toString("utf8"), "CHUNKVER");
     });
   }
 
@@ -859,20 +721,19 @@ export class ChunkClient {
     return this.enqueue(async () => {
       if (operations.length === 0) {
         throw new ChunkProtocolError("chunkBatch requires at least one operation", {
-          phase: "protocol",
+          phase: "request",
           command: "CHUNKBATCH",
         });
       }
-      const args: Array<string | number> = [
-        cx,
-        cy,
-        options.ifVersion === undefined ? "-" : options.ifVersion.toString(),
-      ];
+      const args: Array<string | number> = [cx, cy];
+      if (options.ifVersion !== undefined) {
+        args.push("IF", versionArgument(options.ifVersion, "CHUNKBATCH"));
+      }
       for (const operation of operations) {
         if (operation.type === "set") {
           if (!isBitString(operation.bits)) {
             throw new ChunkProtocolError("chunkBatch set bits must contain only 0 and 1", {
-              phase: "protocol",
+              phase: "request",
               command: "CHUNKBATCH",
             });
           }
@@ -881,22 +742,7 @@ export class ChunkClient {
           args.push("UNSET", operation.x, operation.y);
         }
       }
-      try {
-        const frame = await this.sendCommand("CHUNKBATCH", args);
-        return {
-          ok: true,
-          version: this.parseVersionText(
-            this.expectBulk(frame, "CHUNKBATCH").toString("utf8"),
-            "CHUNKBATCH",
-          ),
-        };
-      } catch (error) {
-        const mismatch = this.parseVersionMismatch(error, "CHUNKBATCH");
-        if (mismatch !== null) {
-          return mismatch;
-        }
-        throw error;
-      }
+      return await this.versionedWrite("CHUNKBATCH", args);
     });
   }
 
@@ -920,67 +766,153 @@ export class ChunkClient {
     });
   }
 
-  private parseCoordToken(token: string, command: string): number {
-    const value = Number.parseInt(token, 10);
-    if (!Number.isSafeInteger(value) || String(value) !== token) {
-      throw new ChunkProtocolError(`invalid coordinate in ${command} response: ${token}`, {
+  private requireGeometry(command: string): ChunkGeometryInfo {
+    if (this.geometryInfo === null) {
+      throw new ChunkProtocolError(`${command} needs a table: the server has no default table; select one with use()`, {
+        phase: "request",
+        command,
+      });
+    }
+    return this.geometryInfo;
+  }
+
+  private async putChunkBytes(
+    cx: number,
+    cy: number,
+    bytes: Buffer,
+    state: boolean,
+    options: ChunkPutOptions,
+  ): Promise<ChunkMutationResult> {
+    // A CHUNKPUT header the server cannot parse is refused without reading
+    // the bytes and the connection closes, so check the arguments first.
+    for (const [name, value] of [["cx", cx], ["cy", cy]] as const) {
+      if (!Number.isSafeInteger(value)) {
+        throw new ChunkProtocolError(`CHUNKPUT ${name} must be a safe integer`, {
+          phase: "request",
+          command: "CHUNKPUT",
+        });
+      }
+    }
+    const args: Array<string | number> = [cx, cy];
+    if (state) {
+      args.push("STATE");
+    }
+    let body = bytes;
+    if (options.zrle === true) {
+      const compressed = zrleCompress(bytes);
+      if (compressed.length < bytes.length) {
+        body = compressed;
+        args.push("ZRLE");
+      }
+    }
+    if (options.ifVersion !== undefined) {
+      args.push("IF", versionArgument(options.ifVersion, "CHUNKPUT"));
+    }
+    args.push(body.length);
+    return await this.versionedWrite("CHUNKPUT", args, body);
+  }
+
+  // CHUNKPUT and CHUNKBATCH reply with the chunk version, or VERSION_MISMATCH
+  // with the current one.
+  private async versionedWrite(
+    command: string,
+    args: Array<string | number>,
+    payload?: Buffer,
+  ): Promise<ChunkMutationResult> {
+    try {
+      const frame = await this.sendCommand(command, args, payload);
+      return { ok: true, version: parseVersionText(this.expectBulk(frame, command).toString("utf8"), command) };
+    } catch (error) {
+      if (!(error instanceof ChunkServerError) || error.code !== "VERSION_MISMATCH") {
+        throw error;
+      }
+      const match = /^current=([0-9]+)$/.exec(error.serverMessage);
+      if (match === null) {
+        throw new ChunkProtocolError(`unexpected VERSION_MISMATCH payload for ${command}`, {
+          phase: "protocol",
+          command,
+        });
+      }
+      return { ok: false, version: BigInt(match[1]) };
+    }
+  }
+
+  private async readArea(
+    command: "CHUNKRANGE" | "CHUNKRADIUS",
+    coords: number[],
+    options: ChunkGetOptions,
+  ): Promise<ChunkRangeEntry[]> {
+    await this.ensureConnected();
+    const geometry = this.requireGeometry(command);
+    const zrle = options.zrle === true;
+    const args: Array<string | number> = [...coords, "STATE"];
+    if (zrle) {
+      args.push("ZRLE");
+    }
+    const items = this.expectArray(await this.sendCommand(command, args), command);
+    if (items.length % 2 !== 0) {
+      throw new ChunkProtocolError(`${command} returned an odd number of items`, {
         phase: "protocol",
         command,
       });
     }
-    return value;
+    const entries: ChunkRangeEntry[] = [];
+    for (let i = 0; i < items.length; i += 2) {
+      const { cx, cy } = parseCoordPair(bulkText(items[i], command), command);
+      const body = items[i + 1];
+      if (body.type !== "bulk") {
+        throw new ChunkProtocolError(`${command} returned a null chunk`, { phase: "protocol", command });
+      }
+      const bytes = decodeChunkBytes(body.value, geometry.chunkPayloadBytes + geometry.presenceBytes, zrle, command);
+      const { payload, presence } = splitChunkState(bytes, geometry);
+      entries.push({ cx, cy, payload, presence });
+    }
+    return entries;
   }
 
-  private parseVersionText(text: string, command: string): bigint {
-    if (!/^[0-9]+$/.test(text)) {
-      throw new ChunkProtocolError(`invalid version in ${command} response: ${text}`, {
-        phase: "protocol",
-        command,
-      });
-    }
-    return BigInt(text);
-  }
-
-  private parseVersionMismatch(error: unknown, command: string): ChunkMutationResult | null {
-    if (!(error instanceof ChunkServerError) || error.code !== "VERSION_MISMATCH") {
-      return null;
-    }
-    const match = /current=([0-9]+)/.exec(error.message);
-    if (match === null) {
-      throw new ChunkProtocolError(`unexpected VERSION_MISMATCH payload for ${command}`, {
-        phase: "protocol",
-        command,
-      });
-    }
-    return { ok: false, version: BigInt(match[1]) };
-  }
-
-  private enqueue<T>(operation: () => Promise<T>): Promise<T> {
+  private enqueue<T>(operation: () => Promise<T>, exclusive = false): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       const run = () => {
         this.activeOps += 1;
+        this.exclusiveRunning = exclusive;
+        const finish = () => {
+          this.activeOps -= 1;
+          if (exclusive) {
+            this.exclusiveRunning = false;
+          }
+          this.releaseEnqueueSlot();
+        };
         operation().then(
-          (value) => { this.activeOps -= 1; this.releaseEnqueueSlot(); resolve(value); },
-          (err: unknown) => { this.activeOps -= 1; this.releaseEnqueueSlot(); reject(err); },
+          (value) => { finish(); resolve(value); },
+          (err: unknown) => { finish(); reject(err); },
         );
       };
-      if (this.activeOps < this.maxPipeline) {
+      // Waiters start in order, so an exclusive operation is not starved.
+      if (this.opWaiters.length === 0 && this.canStart(exclusive)) {
         run();
       } else {
-        this.opWaiters.push({ run, reject });
+        this.opWaiters.push({ run, reject, exclusive });
       }
     });
   }
 
+  private canStart(exclusive: boolean): boolean {
+    if (this.exclusiveRunning) {
+      return false;
+    }
+    return exclusive ? this.activeOps === 0 : this.activeOps < this.maxPipeline;
+  }
+
   private releaseEnqueueSlot(): void {
-    if (this.opWaiters.length > 0 && this.activeOps < this.maxPipeline) {
-      const waiter = this.opWaiters.shift()!;
-      waiter.run();
+    while (this.opWaiters.length > 0 && this.canStart(this.opWaiters[0].exclusive)) {
+      this.opWaiters.shift()!.run();
     }
   }
 
   private async connectInternal(): Promise<this> {
     this.clearConnectionState();
+    this.helloInfo = null;
+    this.geometryInfo = null;
     const socket = await this.openSocket();
     this.socket = socket;
     this.connected = true;
@@ -1005,12 +937,7 @@ export class ChunkClient {
     // A failed handshake (bad token, missing table) must not leave the
     // socket open behind a client the caller never received.
     try {
-      if (this.options.autoAuth && this.options.token !== "") {
-        await this.auth(this.options.token);
-      }
-      if (this.selectedTable !== null) {
-        await this.enqueue(async () => await this.useTable(this.selectedTable!));
-      }
+      await this.hello();
     } catch (error) {
       if (this.socket === socket) {
         this.clearConnectionState();
@@ -1020,6 +947,39 @@ export class ChunkClient {
     }
 
     return this;
+  }
+
+  // HELLO is the first command on every connection. It is sent outside the
+  // pipeline queue: operations waiting for the connection hold its slots.
+  private async hello(): Promise<void> {
+    const args: Array<string | number> = [PROTOCOL_VERSION];
+    if (this.options.token !== "") {
+      args.push("AUTH", this.options.token);
+    }
+    if (this.selectedTable !== null) {
+      args.push("TABLE", this.selectedTable);
+    }
+    let frame: ChunkFrame;
+    try {
+      frame = await this.sendCommand("HELLO", args);
+    } catch (error) {
+      // A 1.x server does not know HELLO; one that requires a token answers
+      // AUTH_REQUIRED although HELLO carried it, which a protocol 2 server
+      // never does.
+      if (
+        error instanceof ChunkServerError &&
+        (error.code === "UNKNOWN_COMMAND" || (error.code === "AUTH_REQUIRED" && this.options.token !== ""))
+      ) {
+        throw new ChunkProtocolError(
+          "server does not speak protocol 2 (chunkdb 1.x); this client needs chunkdb 2.0 or later",
+          { phase: "protocol", command: "HELLO", cause: error },
+        );
+      }
+      throw error;
+    }
+    const info = parseHelloInfo(this.expectBulk(frame, "HELLO"));
+    this.helloInfo = info;
+    this.geometryInfo = info.table === null ? null : geometryOf(info.table);
   }
 
   private async useTable(name: string): Promise<ChunkTableInfo> {
@@ -1112,7 +1072,7 @@ export class ChunkClient {
   }
 
   // `payload`, when given, is written after the request line followed by an
-  // empty line (the CHUNKSETBIN framing); the server reads exactly the byte
+  // empty line (the CHUNKPUT framing); the server reads exactly the byte
   // count declared in the request line.
   private async sendCommand(
     command: string,
@@ -1156,9 +1116,9 @@ export class ChunkClient {
 
     const frame = await framePromise;
     if (frame.type === "error") {
-      if (frame.code === "AUTH_FAILED") {
+      if (frame.code === "AUTH_FAILED" || frame.code === "AUTH_REQUIRED") {
         throw new ChunkAuthError(frame.code, frame.message, {
-          phase: command === "AUTH" ? "auth" : "response",
+          phase: command === "HELLO" ? "auth" : "response",
           command,
         });
       }
@@ -1222,7 +1182,14 @@ export class ChunkClient {
     return frame.value;
   }
 
-  private expectArray(frame: ChunkFrame, command: string): BulkFrame[] {
+  private expectBulkOrNull(frame: ChunkFrame, command: string): Buffer | null {
+    if (frame.type === "null") {
+      return null;
+    }
+    return this.expectBulk(frame, command);
+  }
+
+  private expectArray(frame: ChunkFrame, command: string): Array<BulkFrame | NullFrame> {
     if (frame.type !== "array") {
       throw new ChunkProtocolError(`expected array response for ${command}`, {
         phase: "protocol",
@@ -1230,40 +1197,6 @@ export class ChunkClient {
       });
     }
     return frame.items;
-  }
-
-  private async ensureChunkGeometry(): Promise<ChunkGeometryInfo> {
-    if (this.geometryInfo !== null) {
-      return this.geometryInfo;
-    }
-
-    const frame = await this.sendCommand("INFO", []);
-    const payload = this.expectBulk(frame, "INFO");
-    const values = parseInfoPayload(payload);
-
-    const blockBits = this.parsePositiveInt(values.block_bits, "block_bits");
-    const chunkWidth = this.parsePositiveInt(values.chunk_width_blocks, "chunk_width_blocks");
-    const chunkHeight = this.parsePositiveInt(values.chunk_height_blocks, "chunk_height_blocks");
-    const chunkBlockCount = chunkWidth * chunkHeight;
-
-    this.geometryInfo = {
-      chunkPayloadBits: chunkBlockCount * blockBits,
-      chunkBlockCount,
-      chunkPayloadBytes: Math.ceil((chunkBlockCount * blockBits) / 8),
-      presenceBytes: Math.ceil(chunkBlockCount / 8),
-    };
-    return this.geometryInfo;
-  }
-
-  private parsePositiveInt(value: string | undefined, field: string): number {
-    const parsed = Number.parseInt(value ?? "", 10);
-    if (!Number.isFinite(parsed) || parsed <= 0) {
-      throw new ChunkProtocolError(`INFO missing valid ${field}`, {
-        phase: "protocol",
-        command: "INFO",
-      });
-    }
-    return parsed;
   }
 
   private wrapTransportError(error: unknown, phase: "connect" | "request" | "tls", command?: string): ChunkError {

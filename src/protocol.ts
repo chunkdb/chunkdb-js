@@ -17,12 +17,17 @@ export interface BulkFrame {
   value: Buffer;
 }
 
-export interface ArrayFrame {
-  type: "array";
-  items: BulkFrame[];
+/** `$-1`: no value (an unset block). */
+export interface NullFrame {
+  type: "null";
 }
 
-export type ChunkFrame = SimpleFrame | ErrorFrame | BulkFrame | ArrayFrame;
+export interface ArrayFrame {
+  type: "array";
+  items: Array<BulkFrame | NullFrame>;
+}
+
+export type ChunkFrame = SimpleFrame | ErrorFrame | BulkFrame | NullFrame | ArrayFrame;
 
 export function serializeCommand(parts: Array<string | number>): Buffer {
   for (const part of parts) {
@@ -88,7 +93,7 @@ export function parseFrame(
   }
 
   if (buffer[0] === 0x2a) {
-    // '*N' — array of bulk frames
+    // '*N' — array of bulk frames and nulls
     const headerEnd = findLineEnd(buffer);
     if (headerEnd === null) return null;
     const countText = buffer.subarray(1, headerEnd.end).toString("utf8");
@@ -97,11 +102,11 @@ export function parseFrame(
       throw new ChunkProtocolError(`invalid array length: ${countText}`, { phase: "protocol" });
     }
     let cursor = headerEnd.end + headerEnd.width;
-    const items: BulkFrame[] = [];
+    const items: Array<BulkFrame | NullFrame> = [];
     for (let i = 0; i < count; i++) {
       const sub = parseFrame(buffer.subarray(cursor));
       if (sub === null) return null;
-      if (sub.frame.type !== "bulk") {
+      if (sub.frame.type !== "bulk" && sub.frame.type !== "null") {
         throw new ChunkProtocolError("expected bulk item in array response", { phase: "protocol" });
       }
       items.push(sub.frame);
@@ -122,6 +127,9 @@ export function parseFrame(
   }
 
   const lengthText = buffer.subarray(1, headerEnd.end).toString("utf8");
+  if (lengthText === "-1") {
+    return { frame: { type: "null" }, bytesConsumed: headerEnd.end + headerEnd.width };
+  }
   const length = Number(lengthText);
   if (!Number.isInteger(length) || length < 0) {
     throw new ChunkProtocolError(`invalid bulk length: ${lengthText}`, {
