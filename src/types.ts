@@ -25,12 +25,61 @@ export interface ChunkClientOptions {
   key?: string | Buffer;
   /** Max concurrent in-flight requests per connection. Default 1 (sequential). */
   pipelineDepth?: number;
+  /**
+   * Table the connection works on; selected with `USE` after connecting and
+   * after every reconnect. Defaults to the URI path (`chunk://host:4242/terrain`),
+   * then to the server's `default` table.
+   */
+  table?: string;
 }
 
 export interface ChunkPoolOptions extends ChunkClientOptions {
   maxConnections: number;
   minConnections?: number;
   acquireTimeoutMs?: number;
+}
+
+export type ChunkDurabilityMode = "relaxed" | "fsync-wal" | "fsync-checkpoint";
+export type ChunkCheckpointCompression = "none" | "zrle";
+
+/** Table options; omitted fields keep their current (or the server's default) value. */
+export interface ChunkTableOptions {
+  durabilityMode?: ChunkDurabilityMode;
+  checkpointUpdates?: number;
+  checkpointWalBytes?: number;
+  walGroupCommitUpdates?: number;
+  checkpointCompression?: ChunkCheckpointCompression;
+}
+
+/** Geometry and options of a new table. Geometry is fixed once created. */
+export interface ChunkTableCreateOptions extends ChunkTableOptions {
+  blockBits: number;
+  /** Default 16. */
+  chunkWidthBlocks?: number;
+  /** Default 16. */
+  chunkHeightBlocks?: number;
+  /** Default 8. */
+  largeChunkWidthChunks?: number;
+  /** Default 8. */
+  largeChunkHeightChunks?: number;
+}
+
+export interface ChunkTableInfo {
+  name: string;
+  /** Changes when a table is dropped and created again under the same name. */
+  storeId: string;
+  blockBits: number;
+  chunkWidthBlocks: number;
+  chunkHeightBlocks: number;
+  largeChunkWidthChunks: number;
+  largeChunkHeightChunks: number;
+  durabilityMode: string;
+  checkpointUpdates: number;
+  checkpointWalBytes: number;
+  walGroupCommitUpdates: number;
+  checkpointCompression: string;
+  /** Every key/value line of the reply. */
+  values: Record<string, string>;
 }
 
 export interface ChunkInfo {

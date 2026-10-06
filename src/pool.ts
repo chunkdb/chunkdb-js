@@ -73,6 +73,7 @@ function toClientOptions(options: ChunkPoolOptions): ChunkClientOptions {
     ca: options.ca,
     cert: options.cert,
     key: options.key,
+    table: options.table,
   };
 }
 

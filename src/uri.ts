@@ -43,6 +43,23 @@ export function parseChunkUri(uri: string): ParsedChunkUri {
   };
 }
 
+/**
+ * The table a URI path names: `/terrain` -> `"terrain"`, `/` -> `null` (the
+ * server's `default` table). Throws for a path with more than one segment.
+ */
+export function tableFromUriPath(path: string): string | null {
+  const name = path.startsWith("/") ? path.slice(1) : path;
+  if (name === "") {
+    return null;
+  }
+  if (name.includes("/")) {
+    throw new ChunkConnectionError(`chunk URI path must name one table: ${path}`, {
+      phase: "connect",
+    });
+  }
+  return decodeURIComponent(name);
+}
+
 export function formatChunkUri(uri: ParsedChunkUri): string {
   const scheme = uri.secure ? "chunks" : uri.scheme;
   const auth = uri.token === "" ? "" : `${encodeURIComponent(uri.token)}@`;

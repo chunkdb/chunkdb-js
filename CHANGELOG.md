@@ -6,6 +6,22 @@ This client follows [Semantic Versioning](https://semver.org/) and targets the
 stable `chunkdb` 1.x protocol; see the engine's
 [compatibility policy](https://github.com/chunkdb/chunkdb/blob/main/docs/COMPATIBILITY.md).
 
+## Unreleased
+
+### Added
+- Tables (chunkdb 2.0+): `createTable`, `dropTable`, `tables`, `tableInfo`,
+  `setTableOptions` and `use`; `table(name)` returns a new client on a table;
+  the `table` option or the URI path (`chunk://host:4242/terrain`) selects
+  the table at connect, and the selection is repeated after a reconnect.
+  `ChunkPool` connections use the pool's table. `uri()` includes the selected
+  table, `currentTable()` reports it, and `tableFromUriPath` is exported.
+  Chunk sizes for binary reads and writes follow the selected table's
+  geometry
+
+### Fixed
+- a connection whose `AUTH` or table selection failed during `connect` was
+  left open behind a client the caller never received; it is closed now
+
 ## 1.2.0 - 2026-09-03
 
 ### Added
