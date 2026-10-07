@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { ChunkServerError, connectPool, connectUri } from "../src/index";
+import { ChunkProtocolError, ChunkServerError, connectPool, connectUri } from "../src/index";
 import { startServer } from "./helpers";
 
 function serverError(code: string) {
@@ -13,6 +13,7 @@ test("tables: create, select, use their geometry, change options, drop", async (
   try {
     const client = await connectUri(server.uri);
     assert.equal(client.currentTable(), "default");
+    assert.equal(client.serverInfo()?.table?.name, "default");
     assert.deepEqual(await client.tables(), ["default"]);
 
     await client.createTable("terrain", {
@@ -43,17 +44,20 @@ test("tables: create, select, use their geometry, change options, drop", async (
     assert.equal(await client.get(1, 1), "1111000011110000");
 
     // Binary chunk sizes follow the table's geometry: 8x2 blocks of 4 bits.
+    assert.equal(terrain.serverInfo()?.table?.blockBits, 4);
     const payload = Buffer.from([1, 2, 3, 4, 5, 6, 7, 8]);
-    await terrain.setChunkBin(3, 3, payload);
-    assert.deepEqual(await terrain.chunkbin(3, 3), payload);
-    const state = await terrain.chunkbinState(3, 3);
-    assert.equal(state.length, 8 + 2);
+    await terrain.putChunk(3, 3, payload);
+    assert.deepEqual(await terrain.getChunk(3, 3), payload);
+    const state = await terrain.getChunkState(3, 3);
+    assert.deepEqual(state.presence, Buffer.from([0xff, 0xff]));
+    await assert.rejects(client.putChunk(3, 3, payload), /CHUNKPUT payload must be/);
 
     // use() switches this connection.
     const used = await client.use("terrain");
     assert.equal(used.blockBits, 4);
     assert.equal(client.currentTable(), "terrain");
     assert.equal(await client.get(1, 1), "1010");
+    assert.deepEqual(await client.getChunk(3, 3), payload);
     assert.match(client.uri(), /\/terrain$/);
     await assert.rejects(client.use("missing"), serverError("NO_TABLE"));
     assert.equal(client.currentTable(), "terrain");
@@ -100,7 +104,7 @@ test("tables: the URI path selects the table, also for a pool", async () => {
     await pool.close();
 
     const onDefault = await connectUri(server.uri);
-    assert.equal(await onDefault.get(0, 0), "0".repeat(16));
+    assert.equal(await onDefault.get(0, 0), null);
     await onDefault.close();
 
     await assert.rejects(connectUri(server.uri.replace(/\/$/, "/missing")), serverError("NO_TABLE"));
@@ -111,6 +115,46 @@ test("tables: the URI path selects the table, also for a pool", async () => {
     assert.equal(await second.ping(), "PONG");
     await first.close();
     await second.close();
+  } finally {
+    await server.stop();
+  }
+});
+
+test("tables: use() is exclusive with pipelined chunk writes", async () => {
+  // Each write runs entirely on the old or the new table: it either succeeds
+  // or fails the client-side size check, and none reaches the server framed
+  // for the wrong table, which would close the connection under every
+  // request in flight.
+  const server = await startServer();
+  try {
+    const client = await connectUri(server.uri, { pipelineDepth: 8 });
+    await client.createTable("small", { blockBits: 1, chunkWidthBlocks: 2, chunkHeightBlocks: 2 });
+    const payload = Buffer.alloc(512, 0x5a);
+    const failures: unknown[] = [];
+    let stop = false;
+    const writer = async (w: number) => {
+      for (let i = 0; !stop; i += 1) {
+        try {
+          await client.putChunk(w, i % 16, payload);
+        } catch (error) {
+          failures.push(error);
+        }
+      }
+    };
+    const writers = Array.from({ length: 8 }, async (_, w) => await writer(w));
+    for (let round = 0; round < 20; round += 1) {
+      await client.use(round % 2 === 0 ? "small" : "default");
+    }
+    stop = true;
+    await Promise.all(writers);
+    for (const failure of failures) {
+      assert.ok(
+        failure instanceof ChunkProtocolError && failure.phase === "request",
+        `a pipelined write failed with ${String(failure)}`,
+      );
+    }
+    assert.equal(await client.ping(), "PONG");
+    await client.close();
   } finally {
     await server.stop();
   }

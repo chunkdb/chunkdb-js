@@ -1,5 +1,6 @@
 // Decoder/encoder for chunkdb's "CZ1" zero-run-length codec used by the
-// CHUNKBINC wire command:
+// ZRLE option of the chunk wire commands (CHUNKGET, CHUNKPUT, CHUNKRANGE,
+// CHUNKRADIUS):
 //
 //   [0x01][u32le uncompressedSize][token...]
 //   token := 0x00 <uleb128 n>            n zero bytes

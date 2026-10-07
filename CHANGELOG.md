@@ -2,11 +2,33 @@
 
 All notable changes to this project will be documented in this file.
 
-This client follows [Semantic Versioning](https://semver.org/) and targets the
-stable `chunkdb` 1.x protocol; see the engine's
+This client follows [Semantic Versioning](https://semver.org/). Version 1.x
+speaks the `chunkdb` 1.x protocol, version 2.x speaks protocol 2 (chunkdb
+2.0); see the engine's
 [compatibility policy](https://github.com/chunkdb/chunkdb/blob/main/docs/COMPATIBILITY.md).
 
 ## Unreleased
+
+### Breaking
+- Protocol 2 (chunkdb 2.0). Connecting sends `HELLO 2` with the token and
+  table; a 1.x server is refused with a `ChunkProtocolError`. The reply is
+  available as `serverInfo()` (server version, capabilities, limits, table
+  geometry and options). A wrong or missing token fails `connect()` with
+  `ChunkAuthError` (`AUTH_FAILED` / `AUTH_REQUIRED`). Removed: `auth()` and
+  the `autoAuth` option
+- `get` and `mget` return `null` for an unset block; `readBlock` and
+  `exists` are removed
+- chunks are binary only. `getChunk` / `getChunkState` replace `chunk`,
+  `readChunk`, `chunkbin`, `chunkbinState`, `chunkbinCompressed` and
+  `chunkbinStateCompressed`; `putChunk` / `putChunkState` replace
+  `setChunk`, `setChunkState`, `setChunkBin`, `setChunkBinState` and
+  `chunkCompareAndSet` (`{ ifVersion }`). `ChunkChunkState` and
+  `ChunkChunkStateInput` hold `payload` / `presence` buffers. `{ zrle: true }`
+  compresses a read or write on the wire. Writes resolve `{ ok, version }`
+- `chunkRange` / `chunkRadius` entries hold `payload` / `presence` buffers
+  instead of bit strings and take `{ zrle }`
+- `parseFrame` returns `{ type: "null" }` for `$-1`, and array items may be
+  nulls (`NullFrame`)
 
 ### Added
 - Tables (chunkdb 2.0+): `createTable`, `dropTable`, `tables`, `tableInfo`,

@@ -11,6 +11,6 @@ await Promise.all([
   pool.set(1, 0, "0000111100001111"),
 ]);
 
-console.log(await Promise.all([pool.readBlock(0, 0), pool.readBlock(1, 0)]));
+console.log(await pool.mget([{ x: 0, y: 0 }, { x: 1, y: 0 }]));
 
 await pool.close();

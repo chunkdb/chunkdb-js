@@ -22,15 +22,13 @@ test("ChunkPool handles concurrent authenticated operations against chunkdb_serv
     );
 
     const blocks = await Promise.all(
-      Array.from({ length: 8 }, async (_, index) => await pool.readBlock(index, 0)),
+      Array.from({ length: 8 }, async (_, index) => await pool.get(index, 0)),
     );
 
     for (const [index, block] of blocks.entries()) {
-      assert.deepEqual(block, {
-        exists: true,
-        bits: bitsFor(index),
-      });
+      assert.equal(block, bitsFor(index));
     }
+    assert.equal(await pool.get(8, 0), null);
 
     assert.equal(await pool.ping(), "PONG");
     await pool.close();
