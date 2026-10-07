@@ -31,6 +31,7 @@ This package is intentionally small:
 - tables: `createTable`, `dropTable`, `tables`, `tableInfo`,
   `setTableOptions`, `use`, per-table handles (`client.table(name)`), and the
   table named in the URI path (`chunk://host:4242/terrain`)
+- per-block extra data: `xget`, `xput`, `xdel`, in `chunkBatch`, and with the chunk state in `getChunkState` / `putChunkState`
 - configurable request pipelining (`pipelineDepth`) for high-latency links
 - persistent socket reuse for low-concurrency callers and opt-in pooled concurrency for Node services
 - typed error classes
@@ -161,9 +162,7 @@ console.log(await sameTable.get(0, 0)); // "1011"
 await Promise.all([terrain.close(), sameTable.close(), admin.close()]);
 ```
 
-- Geometry is fixed when a table is created; `setTableOptions` changes
-  `durabilityMode`, `checkpointUpdates`, `checkpointWalBytes`,
-  `walGroupCommitUpdates` and `checkpointCompression`.
+- Geometry is fixed when a table is created; `setTableOptions` changes `durabilityMode`, `checkpointUpdates`, `checkpointWalBytes`, `walGroupCommitUpdates`, `checkpointCompression` and the extra-data limits (see [Extra Data](#extra-data)).
 - A pool works on one table: `connectPool({ uri: "chunk://...:4242/terrain", ... })`.
   Use one pool per table, and do not call `use` on a client from
   `withClient`: the pooled connection would keep that table for later work.
@@ -175,6 +174,45 @@ await Promise.all([terrain.close(), sameTable.close(), admin.close()]);
 - `use(name)` waits for the requests in flight on the client and holds back
   new ones until it completes, so with `pipelineDepth` above 1 each request
   still runs entirely on the old or the new table.
+
+## Extra Data
+
+A present block can carry one opaque value of 1 or more bits next to its payload, for example an owner, a label or an object's state. Values can differ in length from block to block, and blocks without one cost nothing.
+
+Extra data is a table option, off by default: `extraMaxBlockBits` is the longest value one block can carry, `extraMaxChunkBytes` (default 65536) the most one chunk can hold, counting 8 bytes per value plus its bytes. Turning it on is permanent, and both limits can only be raised. `tableInfo(name)` and `serverInfo().table` report both, `0` for a table without extra data.
+
+```ts
+import { connectUri } from "@chunkdb/client";
+
+const admin = await connectUri("chunk://chunk-token@127.0.0.1:4242/");
+await admin.createTable("things", { blockBits: 8, extraMaxBlockBits: 4096 });
+// On an existing table: await admin.setTableOptions("terrain", { extraMaxBlockBits: 256 });
+
+const things = await admin.table("things");
+await things.set(10, 4, "00000101");
+await things.xput(10, 4, Buffer.from("chest")); // 40 bits
+await things.xput(10, 4, { bitLength: 12, bytes: Uint8Array.from([0xab, 0x0c]) });
+console.log(await things.xget(10, 4)); // { bitLength: 12, bytes: <Buffer ab 0c> }
+
+// All values of a chunk, by block index, with its state.
+const state = await things.getChunkState(0, 0, { extra: true });
+console.log(state.extra.get(4 * 16 + 10)); // block (10, 4) of a 16-block-wide chunk
+await things.putChunkState(0, 0, state, { zrle: true });
+
+await things.chunkBatch(0, 0, [{ type: "xput", x: 10, y: 4, bits: "101" }]);
+await things.xdel(10, 4);
+await Promise.all([things.close(), admin.close()]);
+```
+
+- A value belongs to a present block: `xput` on an unset block fails, `unset` deletes the value, `set` keeps it. `xget` returns `null` for a block without a value, and `xdel` of such a block succeeds.
+- Bit `n` of a value is `bytes[n >> 3] >> (n & 7) & 1`; padding bits in the last byte are ignored on input and zero on output. `xput` also takes a byte array, using all of its bits. In `chunkBatch`, `{ type: "xput", x, y, bits }` takes `0`/`1` text (character `n` is bit `n`) and `{ type: "xdel", x, y }` removes a value; operations apply in order.
+- `getChunkState(cx, cy, { extra: true })` adds `extra`: a `Map` from block index (`localY * chunkWidthBlocks + localX`, local coordinates taken modulo the chunk size, never negative) to value. `putChunkState` with `extra` replaces all of the chunk's values, and each must belong to a block the new state has present; without `extra`, blocks that stay present keep theirs.
+- Every change advances the chunk version. `xput` and `xdel` take no `ifVersion`: use `putChunkState` or `chunkBatch` for a conditional write.
+- A value over the table's limits, a value for an absent block, or extra data on a table without it fails with a `ChunkServerError` whose `code` is `INVALID_ARGUMENT`, and the connection stays usable. The client checks bit lengths, byte counts and block indexes before sending.
+- `get`, `mget`, `getChunk`, `chunkRange` and `chunkRadius` do not return extra data.
+- Needs a server whose `serverInfo().capabilities` include `"extra-data"`. One value has at most 134217664 bits, and no table limit lets a chunk hold more than `serverInfo().maxExtraChunkBytes` (16 MiB).
+- `putChunk` and `mset` keep the values of blocks that stay present, like `set`.
+- `chunkBatch` sends its operations as one text line, so long values count against `serverInfo().maxLineBytes` (64 KiB by default); the client refuses a longer line before sending. Write long values with `xput` or `putChunkState`.
 
 ## Pooling
 
@@ -233,6 +271,7 @@ const client = await connectUri("chunks://chunk-token@127.0.0.1:4242/", {
 - `tableFromUriPath(path)` — the table a URI path names (`null` for `/`)
 - `serializeCommand(parts)`, `parseFrame(buffer)`, `parseInfoPayload(buffer)`
 - `zrleCompress(buffer)`, `zrleDecompress(buffer, expectedSize)`
+- `encodeExtraSection(extra, blockCount)`, `decodeExtraSection(buffer, blockCount)` — the binary EXTRA section of a chunk's extra data
 - `ChunkClient`
 - `ChunkPool`
 
@@ -240,10 +279,7 @@ const client = await connectUri("chunks://chunk-token@127.0.0.1:4242/", {
 
 - `connect()`
 - `close()`
-- `serverInfo(): ChunkHelloInfo | null` — the `HELLO` reply of the current
-  connection: `serverVersion`, `capabilities`, `maxLineBytes`,
-  `maxAreaChunks`, `maxResponseBytes`, `maxScanLimit`, `maxBatchOps`, and
-  `table` (geometry and options, or `null`)
+- `serverInfo(): ChunkHelloInfo | null` — the `HELLO` reply of the current connection: `serverVersion`, `capabilities`, `maxLineBytes`, `maxAreaChunks`, `maxResponseBytes`, `maxScanLimit`, `maxBatchOps`, `maxExtraChunkBytes`, and `table` (geometry and options, or `null`)
 - `uri()` — includes the selected table as its path
 - `currentTable()` — the table this connection works on
 - `tables(): Promise<string[]>`
@@ -263,9 +299,11 @@ const client = await connectUri("chunks://chunk-token@127.0.0.1:4242/", {
 - `mget(blocks: { x, y }[]): Promise<Array<string | null>>` — batch read, one round-trip
 - `chunkExists(cx, cy)`
 - `getChunk(cx, cy, { zrle? }): Promise<Buffer>` — the payload
-- `getChunkState(cx, cy, { zrle? }): Promise<{ exists, payload, presence }>`
+- `getChunkState(cx, cy, { zrle?, extra? }): Promise<{ exists, payload, presence, extra? }>`
 - `putChunk(cx, cy, payload, { ifVersion?, zrle? }): Promise<{ ok, version }>`
-- `putChunkState(cx, cy, { payload, presence }, { ifVersion?, zrle? }): Promise<{ ok, version }>`
+- `putChunkState(cx, cy, { payload, presence, extra? }, { ifVersion?, zrle? }): Promise<{ ok, version }>`
+- `xget(x, y): Promise<{ bitLength, bytes } | null>` — the block's extra data
+- `xput(x, y, { bitLength, bytes } | Uint8Array)` / `xdel(x, y)`
 - `chunkScan(limit, cursor?)` — enumerate populated chunks in deterministic
   `(cx, cy)` order; returns `{ coords, nextCursor }`, pass `nextCursor` back
   to continue (limit 1..1024 per page)
@@ -275,9 +313,7 @@ const client = await connectUri("chunks://chunk-token@127.0.0.1:4242/", {
 - `chunkRadius(cx, cy, radiusChunks, { zrle? })` — bounded radius/disc
   multi-chunk read with the same limits and result shape as `chunkRange`
 - `chunkVersion(cx, cy): Promise<bigint>` — opaque chunk version token
-- `chunkBatch(cx, cy, operations, { ifVersion? })` — atomic single-chunk
-  batch of `{ type: "set", x, y, bits }` / `{ type: "unset", x, y }`
-  operations; same `{ ok, version }` result
+- `chunkBatch(cx, cy, operations, { ifVersion? })` — atomic single-chunk batch of `{ type: "set", x, y, bits }`, `{ type: "unset", x, y }`, `{ type: "xput", x, y, bits }` and `{ type: "xdel", x, y }` operations; same `{ ok, version }` result
 - `walFlush()` — explicit durability barrier: resolves once every previously
   acknowledged write is durable, even when the server runs in `relaxed` mode
 - `metrics()` — Prometheus text-format runtime metrics

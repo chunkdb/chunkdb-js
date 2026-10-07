@@ -7,10 +7,14 @@ import { ChunkClient } from "./client";
 import type {
   ChunkBatchOperation,
   ChunkChunkState,
+  ChunkChunkStateExtra,
+  ChunkChunkStateExtraInput,
   ChunkChunkStateInput,
   ChunkClientOptions,
   ChunkCoordPair,
+  ChunkExtraValue,
   ChunkGetOptions,
+  ChunkGetStateOptions,
   ChunkInfo,
   ChunkMutationResult,
   ChunkPoolOptions,
@@ -211,7 +215,9 @@ export class ChunkPool {
     return this.withClient(async (client) => await client.getChunk(cx, cy, options));
   }
 
-  getChunkState(cx: number, cy: number, options: ChunkGetOptions = {}): Promise<ChunkChunkState> {
+  getChunkState(cx: number, cy: number, options: ChunkGetStateOptions & { extra: true }): Promise<ChunkChunkStateExtra>;
+  getChunkState(cx: number, cy: number, options?: ChunkGetStateOptions): Promise<ChunkChunkState>;
+  getChunkState(cx: number, cy: number, options: ChunkGetStateOptions = {}): Promise<ChunkChunkState | ChunkChunkStateExtra> {
     return this.withClient(async (client) => await client.getChunkState(cx, cy, options));
   }
 
@@ -222,10 +228,22 @@ export class ChunkPool {
   putChunkState(
     cx: number,
     cy: number,
-    state: ChunkChunkStateInput,
+    state: ChunkChunkStateInput | ChunkChunkStateExtraInput,
     options: ChunkPutOptions = {},
   ): Promise<ChunkMutationResult> {
     return this.withClient(async (client) => await client.putChunkState(cx, cy, state, options));
+  }
+
+  xget(x: number, y: number): Promise<ChunkExtraValue | null> {
+    return this.withClient(async (client) => await client.xget(x, y));
+  }
+
+  xput(x: number, y: number, value: ChunkExtraValue | Uint8Array): Promise<void> {
+    return this.withClient(async (client) => await client.xput(x, y, value));
+  }
+
+  xdel(x: number, y: number): Promise<void> {
+    return this.withClient(async (client) => await client.xdel(x, y));
   }
 
   chunkScan(limit: number, cursor?: ChunkCoordPair): Promise<ChunkScanResult> {

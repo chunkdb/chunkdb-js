@@ -49,6 +49,16 @@ export interface ChunkTableOptions {
   checkpointWalBytes?: number;
   walGroupCommitUpdates?: number;
   checkpointCompression?: ChunkCheckpointCompression;
+  /**
+   * Longest extra data value one block can carry, in bits. Setting it turns
+   * extra data on for good; afterwards it can only be raised.
+   */
+  extraMaxBlockBits?: number;
+  /**
+   * Most extra data one chunk can hold, in bytes: 8 per value plus its bytes.
+   * Server default 65536; can only be raised.
+   */
+  extraMaxChunkBytes?: number;
 }
 
 /** Geometry and options of a new table. Geometry is fixed once created. */
@@ -78,6 +88,10 @@ export interface ChunkTableInfo {
   checkpointWalBytes: number;
   walGroupCommitUpdates: number;
   checkpointCompression: string;
+  /** Longest extra data value of a block, in bits; 0 when the table has no extra data. */
+  extraMaxBlockBits: number;
+  /** Most extra data one chunk can hold, in bytes; 0 when the table has no extra data. */
+  extraMaxChunkBytes: number;
   /** Every key/value line of the reply. */
   values: Record<string, string>;
 }
@@ -86,7 +100,7 @@ export interface ChunkTableInfo {
 export interface ChunkHelloInfo {
   protocol: number;
   serverVersion: string;
-  /** Optional features, for example `"zrle"`. */
+  /** Optional features, for example `"zrle"` and `"extra-data"`. */
   capabilities: string[];
   maxLineBytes: number;
   /** Most chunks one `chunkRange` / `chunkRadius` call may cover. */
@@ -95,6 +109,11 @@ export interface ChunkHelloInfo {
   maxResponseBytes: number;
   maxScanLimit: number;
   maxBatchOps: number;
+  /**
+   * Most extra data any chunk can hold, in bytes; it bounds `xput` values and
+   * EXTRA sections. 0 when the server has no extra data.
+   */
+  maxExtraChunkBytes: number;
   /** The connection's table, or null when it has none (no `default`). */
   table: ChunkTableInfo | null;
   /** Every key/value line of the reply. */
@@ -125,6 +144,33 @@ export interface ChunkGetOptions {
   zrle?: boolean;
 }
 
+export interface ChunkGetStateOptions extends ChunkGetOptions {
+  /** Also read the chunk's extra data (a table with extra data only). */
+  extra?: boolean;
+}
+
+/**
+ * A block's extra data: `bitLength` bits (at least 1) held in
+ * `ceil(bitLength / 8)` bytes. Bit `n` is `bytes[n >> 3] >> (n & 7) & 1`;
+ * padding bits in the last byte are ignored on input and zero on output.
+ */
+export interface ChunkExtraValue {
+  bitLength: number;
+  bytes: Uint8Array;
+}
+
+/**
+ * A chunk state with all of its extra data, by block index
+ * (`localY * chunkWidthBlocks + localX`).
+ */
+export interface ChunkChunkStateExtraInput extends ChunkChunkStateInput {
+  extra: ReadonlyMap<number, ChunkExtraValue>;
+}
+
+export interface ChunkChunkStateExtra extends ChunkChunkState {
+  extra: Map<number, ChunkExtraValue>;
+}
+
 export interface ChunkPutOptions {
   /** Write only if the chunk's current version equals this one. */
   ifVersion?: bigint;
@@ -150,7 +196,10 @@ export interface ChunkRangeEntry extends ChunkChunkStateInput {
 
 export type ChunkBatchOperation =
   | { type: "set"; x: number; y: number; bits: string }
-  | { type: "unset"; x: number; y: number };
+  | { type: "unset"; x: number; y: number }
+  /** Sets the block's extra data; `bits` is `0`/`1` text, character `n` is bit `n`. */
+  | { type: "xput"; x: number; y: number; bits: string }
+  | { type: "xdel"; x: number; y: number };
 
 export interface ChunkMutationResult {
   ok: boolean;
