@@ -1,4 +1,3 @@
-import { AsyncLocalStorage } from "node:async_hooks";
 import net from "node:net";
 import tls from "node:tls";
 
@@ -20,18 +19,13 @@ import {
   type NullFrame,
 } from "./protocol";
 import { formatChunkUri, parseChunkUri, tableFromUriPath } from "./uri";
-import { checkExtraValue, decodeExtraValue, decodeSection, encodeSection } from "./extra";
 import type {
   ChunkBatchOperation,
   ChunkChunkState,
-  ChunkChunkStateExtra,
-  ChunkChunkStateExtraInput,
   ChunkChunkStateInput,
   ChunkClientOptions,
   ChunkCoordPair,
-  ChunkExtraValue,
   ChunkGetOptions,
-  ChunkGetStateOptions,
   ChunkHelloInfo,
   ChunkInfo,
   ChunkMutationResult,
@@ -78,7 +72,6 @@ const MAX_VERSION = (1n << 64n) - 1n;
 interface ChunkGeometryInfo {
   chunkPayloadBytes: number;
   presenceBytes: number;
-  blockCount: number;
 }
 
 const DEFAULT_HOST = "127.0.0.1";
@@ -120,20 +113,6 @@ function parseCoordPair(text: string, command: string): ChunkCoordPair {
   return { cx: coord(parts[0]), cy: coord(parts[1]) };
 }
 
-// Payload commands (CHUNKPUT, XPUT) whose header the server cannot parse are
-// refused without reading the bytes and the connection closes, so their
-// arguments are checked first.
-function checkSafeIntegers(command: string, values: Array<readonly [string, number]>): void {
-  for (const [name, value] of values) {
-    if (!Number.isSafeInteger(value)) {
-      throw new ChunkProtocolError(`${command} ${name} must be a safe integer`, {
-        phase: "request",
-        command,
-      });
-    }
-  }
-}
-
 function parseVersionText(text: string, command: string): bigint {
   if (!/^[0-9]+$/.test(text)) {
     throw new ChunkProtocolError(`invalid version in ${command} response: ${text}`, {
@@ -171,37 +150,6 @@ function decodeChunkBytes(body: Buffer, expected: number, zrle: boolean, command
       phase: "protocol",
       command,
     });
-  }
-  return body;
-}
-
-// A STATE EXTRA reply: the state followed by an EXTRA section of at most
-// `maxSectionBytes`, which also bounds ZRLE decompression.
-function decodeChunkStateExtraBytes(
-  body: Buffer,
-  stateBytes: number,
-  maxSectionBytes: number,
-  zrle: boolean,
-  command: string,
-): Buffer {
-  const maxBytes = stateBytes + maxSectionBytes;
-  if (zrle) {
-    // The decoded size the encoding declares, checked before decoding. A
-    // body too short to declare one fails in zrleDecompress.
-    const declared = body.length >= 5 ? body.readUInt32LE(1) : stateBytes;
-    if (declared < stateBytes || declared > maxBytes) {
-      throw new ChunkProtocolError(
-        `invalid ${command} ZRLE payload: it declares ${declared} bytes, expected ${stateBytes} to ${maxBytes}`,
-        { phase: "protocol", command },
-      );
-    }
-    return decodeChunkBytes(body, declared, true, command);
-  }
-  if (body.length < stateBytes || body.length > maxBytes) {
-    throw new ChunkProtocolError(
-      `${command} returned ${body.length} bytes, expected ${stateBytes} to ${maxBytes}`,
-      { phase: "protocol", command },
-    );
   }
   return body;
 }
@@ -263,22 +211,7 @@ const TABLE_OPTION_KEYS: Array<[keyof ChunkTableOptions, string]> = [
   ["checkpointWalBytes", "checkpoint_wal_bytes"],
   ["walGroupCommitUpdates", "wal_group_commit_updates"],
   ["checkpointCompression", "checkpoint_compression"],
-  ["extraMaxBlockBits", "extra_max_block_bits"],
-  ["extraMaxChunkBytes", "extra_max_chunk_bytes"],
 ];
-
-// A count a server without extra data does not report: 0 when absent.
-function optionalCount(values: Record<string, string>, key: string, command: string): number {
-  const text = values[key];
-  if (text === undefined) {
-    return 0;
-  }
-  const parsed = Number(text);
-  if (!/^[0-9]+$/.test(text) || !Number.isSafeInteger(parsed)) {
-    throw new ChunkProtocolError(`${command} has invalid ${key}: ${text}`, { phase: "protocol", command });
-  }
-  return parsed;
-}
 
 function tableOptionArgs(options: ChunkTableOptions): Array<string | number> {
   const args: Array<string | number> = [];
@@ -323,8 +256,6 @@ function parseTableInfo(payload: Buffer, command: string): ChunkTableInfo {
     checkpointWalBytes: integer("checkpoint_wal_bytes"),
     walGroupCommitUpdates: integer("wal_group_commit_updates"),
     checkpointCompression: text("checkpoint_compression"),
-    extraMaxBlockBits: optionalCount(values, "extra_max_block_bits", command),
-    extraMaxChunkBytes: optionalCount(values, "extra_max_chunk_bytes", command),
     values,
   };
 }
@@ -334,7 +265,6 @@ function geometryOf(info: { blockBits: number; chunkWidthBlocks: number; chunkHe
   return {
     chunkPayloadBytes: Math.ceil((chunkBlockCount * info.blockBits) / 8),
     presenceBytes: Math.ceil(chunkBlockCount / 8),
-    blockCount: chunkBlockCount,
   };
 }
 
@@ -362,19 +292,10 @@ function parseHelloInfo(payload: Buffer): ChunkHelloInfo {
     maxResponseBytes: integer("max_response_bytes"),
     maxScanLimit: integer("max_scan_limit"),
     maxBatchOps: integer("max_batch_ops"),
-    maxExtraChunkBytes: optionalCount(values, "max_extra_chunk_bytes", "HELLO"),
     // Without a `default` table and without TABLE, the connection has none.
     table: values.table === undefined ? null : parseTableInfo(payload, "HELLO"),
     values,
   };
-}
-
-
-// The place of one operation in the order requests are written (see
-// ChunkClient.sendTurns).
-interface SendTurn {
-  previous: Promise<void>;
-  release: () => void;
 }
 
 export class ChunkClient {
@@ -394,11 +315,6 @@ export class ChunkClient {
   // Pipeline concurrency tracking
   private activeOps = 0;
   private readonly maxPipeline: number;
-  // Requests reach the wire in the order their operations started, whatever
-  // each awaits before sending: an operation writes its first request only
-  // after the operation started before it wrote its own (or ended).
-  private readonly sendTurns = new AsyncLocalStorage<SendTurn>();
-  private lastSendTurn: Promise<void> = Promise.resolve();
   private readonly opWaiters: Array<{ run: () => void; reject: (err: Error) => void; exclusive: boolean }> = [];
   // An exclusive operation (USE) runs alone: nothing else is in flight.
   private exclusiveRunning = false;
@@ -671,37 +587,23 @@ export class ChunkClient {
     });
   }
 
-  /**
-   * The chunk's payload and presence bitmap. With `extra`, also all of its
-   * extra data by block index (a table with extra data only).
-   */
-  getChunkState(cx: number, cy: number, options: ChunkGetStateOptions & { extra: true }): Promise<ChunkChunkStateExtra>;
-  getChunkState(cx: number, cy: number, options?: ChunkGetStateOptions): Promise<ChunkChunkState>;
-  getChunkState(cx: number, cy: number, options: ChunkGetStateOptions = {}): Promise<ChunkChunkState | ChunkChunkStateExtra> {
+  /** The chunk's payload and presence bitmap. */
+  getChunkState(cx: number, cy: number, options: ChunkGetOptions = {}): Promise<ChunkChunkState> {
     return this.enqueue(async () => {
       await this.ensureConnected();
       const geometry = this.requireGeometry("CHUNKGET");
       const zrle = options.zrle === true;
-      const extra = options.extra === true;
-      const args: Array<string | number> = [cx, cy, "STATE"];
-      if (extra) {
-        args.push("EXTRA");
-      }
-      if (zrle) {
-        args.push("ZRLE");
-      }
-      const body = this.expectBulk(await this.sendCommand("CHUNKGET", args), "CHUNKGET");
-      const stateBytes = geometry.chunkPayloadBytes + geometry.presenceBytes;
-      if (!extra) {
-        return splitChunkState(decodeChunkBytes(body, stateBytes, zrle, "CHUNKGET"), geometry);
-      }
-      // Bounded by the server's cap, not the table's extra_max_chunk_bytes:
-      // another connection may have raised that since this one read it.
-      const bytes = decodeChunkStateExtraBytes(body, stateBytes, this.maxExtraChunkBytes(), zrle, "CHUNKGET");
-      return {
-        ...splitChunkState(bytes.subarray(0, stateBytes), geometry),
-        extra: decodeSection(bytes.subarray(stateBytes), geometry.blockCount, "CHUNKGET"),
-      };
+      const frame = await this.sendCommand(
+        "CHUNKGET",
+        zrle ? [cx, cy, "STATE", "ZRLE"] : [cx, cy, "STATE"],
+      );
+      const bytes = decodeChunkBytes(
+        this.expectBulk(frame, "CHUNKGET"),
+        geometry.chunkPayloadBytes + geometry.presenceBytes,
+        zrle,
+        "CHUNKGET",
+      );
+      return splitChunkState(bytes, geometry);
     });
   }
 
@@ -720,21 +622,18 @@ export class ChunkClient {
           command: "CHUNKPUT",
         });
       }
-      return await this.putChunkBytes(cx, cy, payload, [], options);
+      return await this.putChunkBytes(cx, cy, payload, false, options);
     });
   }
 
   /**
    * Replaces the chunk's payload and presence bitmap; payload bits of absent
-   * blocks are stored as zero. With `extra`, also replaces all of the
-   * chunk's extra data (each value must belong to a block the new state has
-   * present); without, the extra data of blocks that stay present is kept.
-   * `ifVersion` works as for `putChunk`.
+   * blocks are stored as zero. `ifVersion` works as for `putChunk`.
    */
   putChunkState(
     cx: number,
     cy: number,
-    state: ChunkChunkStateInput | ChunkChunkStateExtraInput,
+    state: ChunkChunkStateInput,
     options: ChunkPutOptions = {},
   ): Promise<ChunkMutationResult> {
     return this.enqueue(async () => {
@@ -752,72 +651,7 @@ export class ChunkClient {
           command: "CHUNKPUT",
         });
       }
-      const extra = "extra" in state ? state.extra : undefined;
-      if (extra === undefined) {
-        return await this.putChunkBytes(cx, cy, Buffer.concat([state.payload, state.presence]), ["STATE"], options);
-      }
-      this.requireExtraData("CHUNKPUT");
-      const section = encodeSection(extra, geometry.blockCount, "CHUNKPUT");
-      // A longer body is refused unread and closes the connection.
-      if (section.length > this.maxExtraChunkBytes()) {
-        throw new ChunkProtocolError(
-          `CHUNKPUT EXTRA section of ${section.length} bytes exceeds max_extra_chunk_bytes (${this.maxExtraChunkBytes()})`,
-          { phase: "request", command: "CHUNKPUT" },
-        );
-      }
-      return await this.putChunkBytes(
-        cx,
-        cy,
-        Buffer.concat([state.payload, state.presence, section]),
-        ["STATE", "EXTRA"],
-        options,
-      );
-    });
-  }
-
-  /**
-   * A block's extra data, or null when it has none. The table must have
-   * extra data (`extraMaxBlockBits` above 0).
-   */
-  xget(x: number, y: number): Promise<ChunkExtraValue | null> {
-    return this.enqueue(async () => {
-      const reply = this.expectBulkOrNull(await this.sendCommand("XGET", [x, y]), "XGET");
-      return reply === null ? null : decodeExtraValue(reply, "XGET");
-    });
-  }
-
-  /**
-   * Sets the extra data of a present block: `bitLength` bits in
-   * `ceil(bitLength / 8)` bytes, or every bit of a byte array.
-   */
-  xput(x: number, y: number, value: ChunkExtraValue | Uint8Array): Promise<void> {
-    return this.enqueue(async () => {
-      await this.ensureConnected();
-      this.requireGeometry("XPUT");
-      this.requireExtraData("XPUT");
-      if (value instanceof Uint8Array && value.length === 0) {
-        throw new ChunkProtocolError("xput value must not be empty", { phase: "request", command: "XPUT" });
-      }
-      const extra = value instanceof Uint8Array ? { bitLength: value.length * 8, bytes: value } : value;
-      checkSafeIntegers("XPUT", [["x", x], ["y", y]]);
-      checkExtraValue(extra, "XPUT");
-      const bytes = Buffer.from(extra.bytes.buffer, extra.bytes.byteOffset, extra.bytes.byteLength);
-      // A longer value is refused unread and closes the connection.
-      const maxValueBytes = this.maxExtraChunkBytes() - 8;
-      if (bytes.length > maxValueBytes) {
-        throw new ChunkProtocolError(
-          `XPUT value of ${bytes.length} bytes exceeds max_extra_chunk_bytes minus 8 (${maxValueBytes})`,
-          { phase: "request", command: "XPUT" },
-        );
-      }
-      this.expectOk(await this.sendCommand("XPUT", [x, y, extra.bitLength, bytes.length], bytes), "XPUT");
-    });
-  }
-
-  /** Deletes a block's extra data; resolves also when it had none. */
-  xdel(x: number, y: number): Promise<void> {
-    return this.enqueue(async () => {
-      this.expectOk(await this.sendCommand("XDEL", [x, y]), "XDEL");
+      return await this.putChunkBytes(cx, cy, Buffer.concat([state.payload, state.presence]), true, options);
     });
   }
 
@@ -896,21 +730,16 @@ export class ChunkClient {
         args.push("IF", versionArgument(options.ifVersion, "CHUNKBATCH"));
       }
       for (const operation of operations) {
-        if (operation.type === "set" || operation.type === "xput") {
+        if (operation.type === "set") {
           if (!isBitString(operation.bits)) {
-            throw new ChunkProtocolError(`chunkBatch ${operation.type} bits must contain only 0 and 1`, {
+            throw new ChunkProtocolError("chunkBatch set bits must contain only 0 and 1", {
               phase: "request",
               command: "CHUNKBATCH",
             });
           }
-          args.push(operation.type === "set" ? "SET" : "XPUT", operation.x, operation.y, operation.bits);
-        } else if (operation.type === "unset" || operation.type === "xdel") {
-          args.push(operation.type === "unset" ? "UNSET" : "XDEL", operation.x, operation.y);
+          args.push("SET", operation.x, operation.y, operation.bits);
         } else {
-          throw new ChunkProtocolError(
-            `unknown chunkBatch operation type: ${String((operation as { type: unknown }).type)}`,
-            { phase: "request", command: "CHUNKBATCH" },
-          );
+          args.push("UNSET", operation.x, operation.y);
         }
       }
       return await this.versionedWrite("CHUNKBATCH", args);
@@ -947,31 +776,27 @@ export class ChunkClient {
     return this.geometryInfo;
   }
 
-  // XPUT and CHUNKPUT ... EXTRA carry bytes after the request line, which a
-  // server without extra data would misread, so they go only to a server
-  // that lists the capability.
-  private requireExtraData(command: string): void {
-    if (this.helloInfo?.capabilities.includes("extra-data") !== true) {
-      throw new ChunkProtocolError(`${command} needs a server with extra data (capability "extra-data")`, {
-        phase: "request",
-        command,
-      });
-    }
-  }
-
-  private maxExtraChunkBytes(): number {
-    return this.helloInfo?.maxExtraChunkBytes ?? 0;
-  }
-
   private async putChunkBytes(
     cx: number,
     cy: number,
     bytes: Buffer,
-    form: Array<"STATE" | "EXTRA">,
+    state: boolean,
     options: ChunkPutOptions,
   ): Promise<ChunkMutationResult> {
-    checkSafeIntegers("CHUNKPUT", [["cx", cx], ["cy", cy]]);
-    const args: Array<string | number> = [cx, cy, ...form];
+    // A CHUNKPUT header the server cannot parse is refused without reading
+    // the bytes and the connection closes, so check the arguments first.
+    for (const [name, value] of [["cx", cx], ["cy", cy]] as const) {
+      if (!Number.isSafeInteger(value)) {
+        throw new ChunkProtocolError(`CHUNKPUT ${name} must be a safe integer`, {
+          phase: "request",
+          command: "CHUNKPUT",
+        });
+      }
+    }
+    const args: Array<string | number> = [cx, cy];
+    if (state) {
+      args.push("STATE");
+    }
     let body = bytes;
     if (options.zrle === true) {
       const compressed = zrleCompress(bytes);
@@ -1050,19 +875,14 @@ export class ChunkClient {
       const run = () => {
         this.activeOps += 1;
         this.exclusiveRunning = exclusive;
-        let releaseTurn!: () => void;
-        const turnDone = new Promise<void>((resolveTurn) => { releaseTurn = resolveTurn; });
-        const turn: SendTurn = { previous: this.lastSendTurn, release: releaseTurn };
-        this.lastSendTurn = turnDone;
         const finish = () => {
-          turn.release();
           this.activeOps -= 1;
           if (exclusive) {
             this.exclusiveRunning = false;
           }
           this.releaseEnqueueSlot();
         };
-        this.sendTurns.run(turn, operation).then(
+        operation().then(
           (value) => { finish(); resolve(value); },
           (err: unknown) => { finish(); reject(err); },
         );
@@ -1245,9 +1065,7 @@ export class ChunkClient {
   }
 
   private async ensureConnected(): Promise<void> {
-    // Connecting (HELLO) is not one of the operations being ordered, and an
-    // earlier operation may be waiting for it.
-    await this.sendTurns.exit(() => this.connect());
+    await this.connect();
     if (this.socket === null) {
       throw new ChunkConnectionError("connection is not available", { phase: "connect" });
     }
@@ -1262,22 +1080,9 @@ export class ChunkClient {
     payload?: Buffer,
   ): Promise<ChunkFrame> {
     await this.ensureConnected();
-    const turn = this.sendTurns.getStore();
-    if (turn !== undefined) {
-      await turn.previous;
-    }
     const socket = this.socket;
     if (socket === null) {
       throw new ChunkConnectionError("connection is not available", { phase: "connect", command });
-    }
-    const line = serializeCommand([command, ...args]);
-    const maxLineBytes = this.helloInfo?.maxLineBytes ?? 0;
-    if (maxLineBytes > 0 && line.length > maxLineBytes) {
-      // The server would answer BAD_REQUEST and close the connection.
-      throw new ChunkProtocolError(
-        `${command} request line of ${line.length} bytes exceeds max_line_bytes (${maxLineBytes})`,
-        { phase: "request", command },
-      );
     }
 
     const framePromise = new Promise<ChunkFrame>((resolve, reject) => {
@@ -1297,10 +1102,9 @@ export class ChunkClient {
       this.pendingQueue.push({ command, timer, resolve, reject });
       this.drainFrames();
     });
-    // When the write fails, this promise is rejected too but never awaited.
-    framePromise.catch(() => undefined);
 
     await new Promise<void>((resolve, reject) => {
+      const line = serializeCommand([command, ...args]);
       const wire = payload === undefined ? line : Buffer.concat([line, payload, CRLF]);
       socket.write(wire, (error) => {
         if (!error) { resolve(); return; }
@@ -1308,7 +1112,6 @@ export class ChunkClient {
         this.failAllPending(wrapped);
         reject(wrapped);
       });
-      turn?.release();
     });
 
     const frame = await framePromise;
