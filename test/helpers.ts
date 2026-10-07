@@ -63,8 +63,8 @@ export function resolveServerBinary(
 // `HELLO 2` (which a server without protocol 2 refuses). Deliberately invalid
 // arguments keep the probe side-effect-free while still distinguishing an
 // implemented command (INVALID_ARGUMENT) from an absent one (UNKNOWN_COMMAND).
-// CHUNKPUT and XPUT are not probed: a malformed header closes the
-// connection. Protocol 2 implies CHUNKPUT, and XGET/XDEL imply XPUT.
+// CHUNKPUT is not probed: a malformed CHUNKPUT header closes the connection,
+// and protocol 2 itself implies it.
 export const REQUIRED_COMMAND_PROBES = [
   "PING extra",
   "INFO extra",
@@ -88,8 +88,6 @@ export const REQUIRED_COMMAND_PROBES = [
   "TABLECREATE",
   "TABLESET",
   "TABLEDROP",
-  "XGET",
-  "XDEL",
 ] as const;
 
 export function missingCommandFromProbe(
