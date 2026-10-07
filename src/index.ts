@@ -11,20 +11,25 @@ export {
 } from "./errors";
 export { parseFrame, parseInfoPayload, serializeCommand } from "./protocol";
 export type { ArrayFrame, BulkFrame, ChunkFrame, SimpleFrame, ErrorFrame } from "./protocol";
-export { formatChunkUri, parseChunkUri } from "./uri";
+export { formatChunkUri, parseChunkUri, tableFromUriPath } from "./uri";
 export { zrleCompress, zrleDecompress } from "./zrle";
 export type {
   ChunkBatchOperation,
   ChunkBlockState,
+  ChunkCheckpointCompression,
   ChunkChunkState,
   ChunkChunkStateInput,
   ChunkClientOptions,
   ChunkCoordPair,
+  ChunkDurabilityMode,
   ChunkErrorPhase,
   ChunkInfo,
   ChunkMutationResult,
   ChunkPoolOptions,
   ChunkRangeEntry,
   ChunkScanResult,
+  ChunkTableCreateOptions,
+  ChunkTableInfo,
+  ChunkTableOptions,
   ParsedChunkUri,
 } from "./types";

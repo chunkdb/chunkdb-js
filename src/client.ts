@@ -11,7 +11,7 @@ import {
   type ChunkError,
 } from "./errors";
 import { parseFrame, parseInfoPayload, serializeCommand, type BulkFrame, type ChunkFrame } from "./protocol";
-import { formatChunkUri, parseChunkUri } from "./uri";
+import { formatChunkUri, parseChunkUri, tableFromUriPath } from "./uri";
 import type {
   ChunkBatchOperation,
   ChunkBlockState,
@@ -23,6 +23,9 @@ import type {
   ChunkMutationResult,
   ChunkRangeEntry,
   ChunkScanResult,
+  ChunkTableCreateOptions,
+  ChunkTableInfo,
+  ChunkTableOptions,
   ParsedChunkUri,
 } from "./types";
 import { zrleDecompress } from "./zrle";
@@ -44,6 +47,7 @@ interface ResolvedOptions {
   key?: string | Buffer;
   uri: ParsedChunkUri;
   pipelineDepth: number;
+  table: string | null;
 }
 
 interface PendingRequest {
@@ -107,6 +111,10 @@ function resolveOptions(options: ChunkClientOptions = {}): ResolvedOptions {
   const autoAuth = options.autoAuth ?? token !== "";
   const connectTimeoutMs = options.connectTimeoutMs ?? DEFAULT_TIMEOUT_MS;
   const commandTimeoutMs = options.commandTimeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const table =
+    options.table !== undefined && options.table !== ""
+      ? options.table
+      : tableFromUriPath(parsed?.path ?? "/");
 
   return {
     host,
@@ -122,18 +130,85 @@ function resolveOptions(options: ChunkClientOptions = {}): ResolvedOptions {
     cert: options.cert,
     key: options.key,
     pipelineDepth: Math.max(1, options.pipelineDepth ?? 1),
+    table,
     uri: {
       scheme: secure ? "chunks" : "chunk",
       secure,
       host,
       port,
       token,
-      path: parsed?.path ?? "/",
+      path: table === null ? "/" : `/${encodeURIComponent(table)}`,
     },
   };
 }
 
+const TABLE_OPTION_KEYS: Array<[keyof ChunkTableOptions, string]> = [
+  ["durabilityMode", "durability_mode"],
+  ["checkpointUpdates", "checkpoint_updates"],
+  ["checkpointWalBytes", "checkpoint_wal_bytes"],
+  ["walGroupCommitUpdates", "wal_group_commit_updates"],
+  ["checkpointCompression", "checkpoint_compression"],
+];
+
+function tableOptionArgs(options: ChunkTableOptions): Array<string | number> {
+  const args: Array<string | number> = [];
+  for (const [field, key] of TABLE_OPTION_KEYS) {
+    const value = options[field];
+    if (value !== undefined) {
+      args.push(key, value);
+    }
+  }
+  return args;
+}
+
+function parseTableInfo(payload: Buffer, command: string): ChunkTableInfo {
+  const values = parseInfoPayload(payload);
+  const integer = (key: string): number => {
+    const parsed = Number(values[key]);
+    if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+      throw new ChunkProtocolError(`${command} missing valid ${key}`, {
+        phase: "protocol",
+        command,
+      });
+    }
+    return parsed;
+  };
+  const text = (key: string): string => {
+    const value = values[key];
+    if (value === undefined || value === "") {
+      throw new ChunkProtocolError(`${command} missing ${key}`, { phase: "protocol", command });
+    }
+    return value;
+  };
+  return {
+    name: text("table"),
+    storeId: text("store_id"),
+    blockBits: integer("block_bits"),
+    chunkWidthBlocks: integer("chunk_width_blocks"),
+    chunkHeightBlocks: integer("chunk_height_blocks"),
+    largeChunkWidthChunks: integer("large_chunk_width_chunks"),
+    largeChunkHeightChunks: integer("large_chunk_height_chunks"),
+    durabilityMode: text("durability_mode"),
+    checkpointUpdates: integer("checkpoint_updates"),
+    checkpointWalBytes: integer("checkpoint_wal_bytes"),
+    walGroupCommitUpdates: integer("wal_group_commit_updates"),
+    checkpointCompression: text("checkpoint_compression"),
+    values,
+  };
+}
+
+function geometryOf(info: { blockBits: number; chunkWidthBlocks: number; chunkHeightBlocks: number }): ChunkGeometryInfo {
+  const chunkBlockCount = info.chunkWidthBlocks * info.chunkHeightBlocks;
+  return {
+    chunkPayloadBits: chunkBlockCount * info.blockBits,
+    chunkBlockCount,
+    chunkPayloadBytes: Math.ceil((chunkBlockCount * info.blockBits) / 8),
+    presenceBytes: Math.ceil(chunkBlockCount / 8),
+  };
+}
+
 export class ChunkClient {
+  private readonly clientOptions: ChunkClientOptions;
   private readonly options: ResolvedOptions;
   private socket: TransportSocket | null = null;
   private pendingQueue: PendingRequest[] = [];
@@ -142,6 +217,8 @@ export class ChunkClient {
   private connected = false;
   private disposed = false;
   private geometryInfo: ChunkGeometryInfo | null = null;
+  // The table this connection works on; null means the server's `default`.
+  private selectedTable: string | null;
 
   // Pipeline concurrency tracking
   private activeOps = 0;
@@ -149,12 +226,98 @@ export class ChunkClient {
   private readonly opWaiters: Array<{ run: () => void; reject: (err: Error) => void }> = [];
 
   constructor(options: ChunkClientOptions = {}) {
+    this.clientOptions = { ...options };
     this.options = resolveOptions(options);
     this.maxPipeline = this.options.pipelineDepth;
+    this.selectedTable = this.options.table;
   }
 
   uri(): string {
-    return formatChunkUri(this.options.uri);
+    return formatChunkUri({
+      ...this.options.uri,
+      path: this.selectedTable === null ? "/" : `/${encodeURIComponent(this.selectedTable)}`,
+    });
+  }
+
+  /** The table this connection works on (`"default"` unless one was selected). */
+  currentTable(): string {
+    return this.selectedTable ?? "default";
+  }
+
+  /** Table names, in ascending order. */
+  tables(): Promise<string[]> {
+    return this.enqueue(async () => {
+      const frame = await this.sendCommand("TABLES", []);
+      return this.expectArray(frame, "TABLES").map((item) => item.value.toString("utf8"));
+    });
+  }
+
+  tableInfo(name: string): Promise<ChunkTableInfo> {
+    return this.enqueue(async () => {
+      const frame = await this.sendCommand("TABLEINFO", [name]);
+      return parseTableInfo(this.expectBulk(frame, "TABLEINFO"), "TABLEINFO");
+    });
+  }
+
+  /**
+   * Selects the table for this connection (kept across reconnects). An unknown
+   * name fails with `NO_TABLE` and keeps the current table.
+   */
+  use(name: string): Promise<ChunkTableInfo> {
+    return this.enqueue(async () => await this.useTable(name));
+  }
+
+  /** Creates a table. Its geometry is fixed; options can change later. */
+  createTable(name: string, options: ChunkTableCreateOptions): Promise<void> {
+    return this.enqueue(async () => {
+      const args: Array<string | number> = [name, "block_bits", options.blockBits];
+      const geometry: Array<[number | undefined, string]> = [
+        [options.chunkWidthBlocks, "chunk_width_blocks"],
+        [options.chunkHeightBlocks, "chunk_height_blocks"],
+        [options.largeChunkWidthChunks, "large_chunk_width_chunks"],
+        [options.largeChunkHeightChunks, "large_chunk_height_chunks"],
+      ];
+      for (const [value, key] of geometry) {
+        if (value !== undefined) {
+          args.push(key, value);
+        }
+      }
+      args.push(...tableOptionArgs(options));
+      this.expectOk(await this.sendCommand("TABLECREATE", args), "TABLECREATE");
+    });
+  }
+
+  /** Changes table options; the server reopens the table. */
+  setTableOptions(name: string, options: ChunkTableOptions): Promise<void> {
+    return this.enqueue(async () => {
+      const args = tableOptionArgs(options);
+      if (args.length === 0) {
+        throw new TypeError("setTableOptions needs at least one option");
+      }
+      this.expectOk(await this.sendCommand("TABLESET", [name, ...args]), "TABLESET");
+    });
+  }
+
+  /** Deletes a table and its data. Irreversible. */
+  dropTable(name: string): Promise<void> {
+    return this.enqueue(async () => {
+      this.expectOk(await this.sendCommand("TABLEDROP", [name]), "TABLEDROP");
+    });
+  }
+
+  /**
+   * A new connected client for `name`, with this client's connection options.
+   * Each client has its own connection; close it when done.
+   */
+  async table(name: string): Promise<ChunkClient> {
+    const client = new ChunkClient({ ...this.clientOptions, table: name });
+    try {
+      await client.connect();
+    } catch (error) {
+      await client.close();
+      throw error;
+    }
+    return client;
   }
 
   async connect(): Promise<this> {
@@ -839,11 +1002,42 @@ export class ChunkClient {
       }
     });
 
-    if (this.options.autoAuth && this.options.token !== "") {
-      await this.auth(this.options.token);
+    // A failed handshake (bad token, missing table) must not leave the
+    // socket open behind a client the caller never received.
+    try {
+      if (this.options.autoAuth && this.options.token !== "") {
+        await this.auth(this.options.token);
+      }
+      if (this.selectedTable !== null) {
+        await this.enqueue(async () => await this.useTable(this.selectedTable!));
+      }
+    } catch (error) {
+      if (this.socket === socket) {
+        this.clearConnectionState();
+      }
+      socket.destroy();
+      throw error;
     }
 
     return this;
+  }
+
+  private async useTable(name: string): Promise<ChunkTableInfo> {
+    const frame = await this.sendCommand("USE", [name]);
+    const info = parseTableInfo(this.expectBulk(frame, "USE"), "USE");
+    this.selectedTable = info.name;
+    this.geometryInfo = geometryOf(info);
+    return info;
+  }
+
+  private expectOk(frame: ChunkFrame, command: string): void {
+    const text = this.expectSimple(frame, command);
+    if (text !== "OK") {
+      throw new ChunkProtocolError(`unexpected ${command} response: ${text}`, {
+        phase: "protocol",
+        command,
+      });
+    }
   }
 
   private async openSocket(): Promise<TransportSocket> {

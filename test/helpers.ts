@@ -85,6 +85,12 @@ export const REQUIRED_COMMAND_PROBES = [
   "CHUNKBINC",
   "WALFLUSH extra",
   "METRICS extra",
+  "TABLES extra",
+  "TABLEINFO",
+  "USE",
+  "TABLECREATE",
+  "TABLESET",
+  "TABLEDROP",
 ] as const;
 
 export function missingCommandFromProbe(

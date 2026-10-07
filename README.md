@@ -29,6 +29,9 @@ This package is intentionally small:
 - optimistic concurrency: `chunkVersion`, `chunkCompareAndSet`, and atomic
   single-chunk `chunkBatch`
 - `walFlush` durability barrier and `metrics` (Prometheus text format)
+- tables (chunkdb 2.0+): `createTable`, `dropTable`, `tables`, `tableInfo`,
+  `setTableOptions`, `use`, per-table handles (`client.table(name)`), and the
+  table named in the URI path (`chunk://host:4242/terrain`)
 - batch `mset` / `mget` (single round-trip for many blocks) and configurable request pipelining (`pipelineDepth`) for high-latency links
 - persistent socket reuse for low-concurrency callers and opt-in pooled concurrency for Node services
 - typed error classes
@@ -89,6 +92,45 @@ const client = await connectUri("chunk://chunk-token@127.0.0.1:4242/", {
 - Use one shared `ChunkPool` for concurrent Node.js workloads. It keeps several warm `ChunkClient` instances and leases them per operation.
 - True single-socket multiplexing is intentionally out of scope for protocol v1. Parallelism comes from multiple sockets, not request IDs on one socket.
 
+## Tables
+
+A chunkdb 2.0 server holds named tables, each with its own geometry and
+options. A connection works on one table: the one named by the `table` option
+or the URI path, otherwise the server's `default` table. The client selects it
+again after every reconnect.
+
+```ts
+import { connectUri } from "@chunkdb/client";
+
+const admin = await connectUri("chunk://chunk-token@127.0.0.1:4242/");
+await admin.createTable("terrain", {
+  blockBits: 4,
+  chunkWidthBlocks: 32,
+  chunkHeightBlocks: 32,
+  durabilityMode: "fsync-wal",
+});
+
+// A handle is a separate connection on that table.
+const terrain = await admin.table("terrain");
+await terrain.set(0, 0, "1011");
+
+// Or name the table in the URI.
+const sameTable = await connectUri("chunk://chunk-token@127.0.0.1:4242/terrain");
+console.log(await sameTable.get(0, 0)); // "1011"
+
+await Promise.all([terrain.close(), sameTable.close(), admin.close()]);
+```
+
+- Geometry is fixed when a table is created; `setTableOptions` changes
+  `durabilityMode`, `checkpointUpdates`, `checkpointWalBytes`,
+  `walGroupCommitUpdates` and `checkpointCompression`.
+- A pool works on one table: `connectPool({ uri: "chunk://...:4242/terrain", ... })`.
+  Use one pool per table, and do not call `use` on a client from
+  `withClient`: the pooled connection would keep that table for later work.
+- After `dropTable`, commands from connections on that table fail with a
+  `ChunkServerError` whose `code` is `NO_TABLE`, even if a table of the same
+  name is created again; `use(name)` selects a table again.
+
 ## Pooling
 
 ```ts
@@ -143,6 +185,7 @@ const client = await connectUri("chunks://chunk-token@127.0.0.1:4242/", {
 - `connectPool(options)`
 - `parseChunkUri(uri)`
 - `formatChunkUri(parsed)`
+- `tableFromUriPath(path)` — the table a URI path names (`null` for `/`)
 - `serializeCommand(parts)`, `parseFrame(buffer)`, `parseInfoPayload(buffer)`
 - `zrleCompress(buffer)`, `zrleDecompress(buffer, expectedSize)`
 - `ChunkClient`
@@ -152,7 +195,16 @@ const client = await connectUri("chunks://chunk-token@127.0.0.1:4242/", {
 
 - `connect()`
 - `close()`
-- `uri()`
+- `uri()` — includes the selected table as its path
+- `currentTable()` — the table this connection works on
+- `tables(): Promise<string[]>`
+- `tableInfo(name): Promise<ChunkTableInfo>` — geometry, options and store id
+- `use(name): Promise<ChunkTableInfo>` — selects a table for this connection;
+  an unknown name fails with `NO_TABLE` and keeps the current one
+- `table(name): Promise<ChunkClient>` — a new connected client on `name`
+- `createTable(name, { blockBits, chunkWidthBlocks?, chunkHeightBlocks?,
+  largeChunkWidthChunks?, largeChunkHeightChunks?, ...options })`
+- `setTableOptions(name, options)` / `dropTable(name)`
 - `auth(token?)`
 - `ping()`
 - `info()`
