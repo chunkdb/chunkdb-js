@@ -39,10 +39,15 @@ speaks the `chunkdb` 1.x protocol, version 2.x speaks protocol 2 (chunkdb
   table, `currentTable()` reports it, and `tableFromUriPath` is exported.
   Chunk sizes for binary reads and writes follow the selected table's
   geometry
+- Per-block extra data (chunkdb 2.0+): `xget`, `xput` and `xdel`; `chunkBatch` operations `{ type: "xput", x, y, bits }` and `{ type: "xdel", x, y }`; `getChunkState(cx, cy, { extra: true })` adds the chunk's values by block index as `extra`, and `putChunkState` with `extra` replaces them. The table options `extraMaxBlockBits` and `extraMaxChunkBytes` are accepted by `createTable` / `setTableOptions` and reported in `ChunkTableInfo`; `serverInfo().maxExtraChunkBytes` reports the server's cap. `encodeExtraSection` / `decodeExtraSection` are exported, and `ChunkPool` mirrors the new methods
 
 ### Fixed
 - a connection whose `AUTH` or table selection failed during `connect` was
   left open behind a client the caller never received; it is closed now
+- `chunkBatch` rejects an operation of unknown `type` instead of sending it as `UNSET`
+- with `pipelineDepth` above 1, a call could reach the server after a call made later: methods that check the table's sizes first (`putChunk`, `putChunkState`, `xput`) were overtaken by quicker ones, so `putChunk` followed by `get` without awaiting read the old state. Requests now reach the server in call order
+- a request line longer than the server's `max_line_bytes` (for example a long `chunkBatch` value) is refused before sending; the server answered `BAD_REQUEST` and closed the connection
+- a failed socket write left a rejected promise unhandled, which could end the Node.js process
 
 ## 1.2.0 - 2026-09-03
 
