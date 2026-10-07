@@ -245,3 +245,30 @@ test("extra data: a pool and a pipelined client", async () => {
     await server.stop();
   }
 });
+
+test("extra data: pipelined requests reach the server in call order", async () => {
+  const server = await startServer();
+  try {
+    const admin = await connectUri(server.uri);
+    await createThings(admin);
+    await admin.close();
+    const client = await connectUri(server.uri.replace(/\/$/, "/things"), { pipelineDepth: 4 });
+    const bytes = (await client.getChunk(0, 0)).length;
+    for (let i = 0; i < 20; i++) {
+      // Each pair is called without awaiting the first: the read sees the write.
+      const fill = i % 2 === 0 ? 0xff : 0x00;
+      const [, bits] = await Promise.all([client.putChunk(0, 0, Buffer.alloc(bytes, fill)), client.get(0, 0)]);
+      assert.equal(bits, fill === 0xff ? "1111" : "0000");
+      const [, read] = await Promise.all([client.xput(0, 0, value(8, [i])), client.xget(0, 0)]);
+      assert.deepEqual(read, value(8, [i]));
+      const [, gone] = await Promise.all([client.xdel(0, 0), client.xget(0, 0)]);
+      assert.equal(gone, null);
+    }
+    // Character n of batch bits is bit n: "110" is 0x03.
+    await client.chunkBatch(0, 0, [{ type: "xput", x: 1, y: 0, bits: "110" }]);
+    assert.deepEqual(await client.xget(1, 0), value(3, [0x03]));
+    await client.close();
+  } finally {
+    await server.stop();
+  }
+});

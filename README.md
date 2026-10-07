@@ -11,7 +11,7 @@ It does not connect to 1.x servers: use `@chunkdb/client` 1.x with those.
 This package is intentionally small:
 
 - `ChunkClient` = one long-lived socket
-- sequential request/response per client by default, with opt-in pipelining (`pipelineDepth`)
+- sequential request/response per client by default, with opt-in pipelining (`pipelineDepth`); pipelined requests reach the server in call order
 - opt-in pooling via `ChunkPool`
 - no automatic retries or background reconnect loops
 - no browser transport

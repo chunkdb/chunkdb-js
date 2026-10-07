@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import net from "node:net";
 import tls from "node:tls";
 
@@ -368,6 +369,14 @@ function parseHelloInfo(payload: Buffer): ChunkHelloInfo {
   };
 }
 
+
+// The place of one operation in the order requests are written (see
+// ChunkClient.sendTurns).
+interface SendTurn {
+  previous: Promise<void>;
+  release: () => void;
+}
+
 export class ChunkClient {
   private readonly clientOptions: ChunkClientOptions;
   private readonly options: ResolvedOptions;
@@ -385,6 +394,11 @@ export class ChunkClient {
   // Pipeline concurrency tracking
   private activeOps = 0;
   private readonly maxPipeline: number;
+  // Requests reach the wire in the order their operations started, whatever
+  // each awaits before sending: an operation writes its first request only
+  // after the operation started before it wrote its own (or ended).
+  private readonly sendTurns = new AsyncLocalStorage<SendTurn>();
+  private lastSendTurn: Promise<void> = Promise.resolve();
   private readonly opWaiters: Array<{ run: () => void; reject: (err: Error) => void; exclusive: boolean }> = [];
   // An exclusive operation (USE) runs alone: nothing else is in flight.
   private exclusiveRunning = false;
@@ -1036,14 +1050,19 @@ export class ChunkClient {
       const run = () => {
         this.activeOps += 1;
         this.exclusiveRunning = exclusive;
+        let releaseTurn!: () => void;
+        const turnDone = new Promise<void>((resolveTurn) => { releaseTurn = resolveTurn; });
+        const turn: SendTurn = { previous: this.lastSendTurn, release: releaseTurn };
+        this.lastSendTurn = turnDone;
         const finish = () => {
+          turn.release();
           this.activeOps -= 1;
           if (exclusive) {
             this.exclusiveRunning = false;
           }
           this.releaseEnqueueSlot();
         };
-        operation().then(
+        this.sendTurns.run(turn, operation).then(
           (value) => { finish(); resolve(value); },
           (err: unknown) => { finish(); reject(err); },
         );
@@ -1226,7 +1245,9 @@ export class ChunkClient {
   }
 
   private async ensureConnected(): Promise<void> {
-    await this.connect();
+    // Connecting (HELLO) is not one of the operations being ordered, and an
+    // earlier operation may be waiting for it.
+    await this.sendTurns.exit(() => this.connect());
     if (this.socket === null) {
       throw new ChunkConnectionError("connection is not available", { phase: "connect" });
     }
@@ -1241,6 +1262,10 @@ export class ChunkClient {
     payload?: Buffer,
   ): Promise<ChunkFrame> {
     await this.ensureConnected();
+    const turn = this.sendTurns.getStore();
+    if (turn !== undefined) {
+      await turn.previous;
+    }
     const socket = this.socket;
     if (socket === null) {
       throw new ChunkConnectionError("connection is not available", { phase: "connect", command });
@@ -1272,6 +1297,8 @@ export class ChunkClient {
       this.pendingQueue.push({ command, timer, resolve, reject });
       this.drainFrames();
     });
+    // When the write fails, this promise is rejected too but never awaited.
+    framePromise.catch(() => undefined);
 
     await new Promise<void>((resolve, reject) => {
       const wire = payload === undefined ? line : Buffer.concat([line, payload, CRLF]);
@@ -1281,6 +1308,7 @@ export class ChunkClient {
         this.failAllPending(wrapped);
         reject(wrapped);
       });
+      turn?.release();
     });
 
     const frame = await framePromise;

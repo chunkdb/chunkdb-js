@@ -607,11 +607,13 @@ test("extra-data commands pipeline", async () => {
         client.xdel(3, 3),
       ]);
       assert.deepEqual(results, [value(12, [0xab, 0x0c]), undefined, null, undefined]);
-      assert.deepEqual(server.requests.map((request) => request.line).sort(), [
-        "XDEL 3 3",
+      // In call order: XPUT waits for the table's sizes, yet the XGET called
+      // after it must not overtake it.
+      assert.deepEqual(server.requests.map((request) => request.line), [
         "XGET 0 0",
-        "XGET 1 1",
         "XPUT 2 2 3 1",
+        "XGET 1 1",
+        "XDEL 3 3",
       ]);
     },
     { batch: 4, pipelineDepth: 4 },
