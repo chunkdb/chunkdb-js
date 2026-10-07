@@ -90,6 +90,9 @@ export const REQUIRED_COMMAND_PROBES = [
   "TABLEDROP",
   "XGET",
   "XDEL",
+  "HISTORY",
+  "CHUNKHISTORY",
+  "RANGEHISTORY",
 ] as const;
 
 export function missingCommandFromProbe(

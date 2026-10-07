@@ -51,4 +51,17 @@ export class ChunkServerError extends ChunkError {
 
 export class ChunkAuthError extends ChunkServerError {}
 
+/**
+ * `NOT_RETAINED`: a history read reaches before what the table keeps, which
+ * starts at revision `start`.
+ */
+export class ChunkNotRetainedError extends ChunkServerError {
+  readonly start: bigint;
+
+  constructor(serverMessage: string, start: bigint, options: Omit<ChunkErrorOptions, "code">) {
+    super("NOT_RETAINED", serverMessage, options);
+    this.start = start;
+  }
+}
+
 export class ChunkTlsError extends ChunkError {}

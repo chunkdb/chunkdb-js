@@ -3,7 +3,7 @@ import {
   ChunkTimeoutError,
   ChunkTlsError,
 } from "./errors";
-import { ChunkClient } from "./client";
+import { ChunkClient, followHistory } from "./client";
 import type {
   ChunkBatchOperation,
   ChunkChunkState,
@@ -15,12 +15,17 @@ import type {
   ChunkExtraValue,
   ChunkGetOptions,
   ChunkGetStateOptions,
+  ChunkHistoryEvent,
+  ChunkHistoryOptions,
+  ChunkHistoryPage,
   ChunkInfo,
   ChunkMutationResult,
   ChunkPoolOptions,
   ChunkPutOptions,
   ChunkRangeEntry,
+  ChunkReadOptions,
   ChunkScanResult,
+  ChunkWriteOptions,
 } from "./types";
 
 interface ResolvedPoolOptions {
@@ -187,20 +192,20 @@ export class ChunkPool {
     return this.withClient(async (client) => await client.info());
   }
 
-  get(x: number, y: number): Promise<string | null> {
-    return this.withClient(async (client) => await client.get(x, y));
+  get(x: number, y: number, options: ChunkReadOptions = {}): Promise<string | null> {
+    return this.withClient(async (client) => await client.get(x, y, options));
   }
 
-  set(x: number, y: number, bits: string): Promise<void> {
-    return this.withClient(async (client) => await client.set(x, y, bits));
+  set(x: number, y: number, bits: string, options: ChunkWriteOptions = {}): Promise<void> {
+    return this.withClient(async (client) => await client.set(x, y, bits, options));
   }
 
-  unset(x: number, y: number): Promise<void> {
-    return this.withClient(async (client) => await client.unset(x, y));
+  unset(x: number, y: number, options: ChunkWriteOptions = {}): Promise<void> {
+    return this.withClient(async (client) => await client.unset(x, y, options));
   }
 
-  mset(blocks: Array<{ x: number; y: number; bits: string }>): Promise<void> {
-    return this.withClient(async (client) => await client.mset(blocks));
+  mset(blocks: Array<{ x: number; y: number; bits: string }>, options: ChunkWriteOptions = {}): Promise<void> {
+    return this.withClient(async (client) => await client.mset(blocks, options));
   }
 
   mget(blocks: Array<{ x: number; y: number }>): Promise<Array<string | null>> {
@@ -238,12 +243,12 @@ export class ChunkPool {
     return this.withClient(async (client) => await client.xget(x, y));
   }
 
-  xput(x: number, y: number, value: ChunkExtraValue | Uint8Array): Promise<void> {
-    return this.withClient(async (client) => await client.xput(x, y, value));
+  xput(x: number, y: number, value: ChunkExtraValue | Uint8Array, options: ChunkWriteOptions = {}): Promise<void> {
+    return this.withClient(async (client) => await client.xput(x, y, value, options));
   }
 
-  xdel(x: number, y: number): Promise<void> {
-    return this.withClient(async (client) => await client.xdel(x, y));
+  xdel(x: number, y: number, options: ChunkWriteOptions = {}): Promise<void> {
+    return this.withClient(async (client) => await client.xdel(x, y, options));
   }
 
   chunkScan(limit: number, cursor?: ChunkCoordPair): Promise<ChunkScanResult> {
@@ -277,9 +282,47 @@ export class ChunkPool {
     cx: number,
     cy: number,
     operations: ChunkBatchOperation[],
-    options: { ifVersion?: bigint } = {},
+    options: { ifVersion?: bigint; tag?: Uint8Array } = {},
   ): Promise<ChunkMutationResult> {
     return this.withClient(async (client) => await client.chunkBatch(cx, cy, operations, options));
+  }
+
+  history(x: number, y: number, options: ChunkHistoryOptions = {}): Promise<ChunkHistoryPage> {
+    return this.withClient(async (client) => await client.history(x, y, options));
+  }
+
+  chunkHistory(cx: number, cy: number, options: ChunkHistoryOptions = {}): Promise<ChunkHistoryPage> {
+    return this.withClient(async (client) => await client.chunkHistory(cx, cy, options));
+  }
+
+  rangeHistory(
+    cx0: number,
+    cy0: number,
+    cx1: number,
+    cy1: number,
+    options: ChunkHistoryOptions = {},
+  ): Promise<ChunkHistoryPage> {
+    return this.withClient(async (client) => await client.rangeHistory(cx0, cy0, cx1, cy1, options));
+  }
+
+  // Each page leases a client of its own, so iterating holds no connection
+  // between pages.
+  historyEvents(x: number, y: number, options: ChunkHistoryOptions = {}): AsyncIterableIterator<ChunkHistoryEvent> {
+    return followHistory(async (page) => await this.history(x, y, page), options);
+  }
+
+  chunkHistoryEvents(cx: number, cy: number, options: ChunkHistoryOptions = {}): AsyncIterableIterator<ChunkHistoryEvent> {
+    return followHistory(async (page) => await this.chunkHistory(cx, cy, page), options);
+  }
+
+  rangeHistoryEvents(
+    cx0: number,
+    cy0: number,
+    cx1: number,
+    cy1: number,
+    options: ChunkHistoryOptions = {},
+  ): AsyncIterableIterator<ChunkHistoryEvent> {
+    return followHistory(async (page) => await this.rangeHistory(cx0, cy0, cx1, cy1, page), options);
   }
 
   walFlush(): Promise<void> {

@@ -59,6 +59,14 @@ export interface ChunkTableOptions {
    * Server default 65536; can only be raised.
    */
   extraMaxChunkBytes?: number;
+  /** Keep the history of every block change. Turning it on is permanent. */
+  history?: boolean;
+  /** History older than this may be removed; 0 (default) keeps it. */
+  historyMaxAgeMs?: number;
+  /** The most history one chunk keeps on disk; 0 (default) keeps it all. */
+  historyMaxChunkBytes?: number;
+  /** The longest tag a write may carry, 1 to 255 bytes. Server default 32. */
+  historyMaxTagBytes?: number;
 }
 
 /** Geometry and options of a new table. Geometry is fixed once created. */
@@ -92,6 +100,18 @@ export interface ChunkTableInfo {
   extraMaxBlockBits: number;
   /** Most extra data one chunk can hold, in bytes; 0 when the table has no extra data. */
   extraMaxChunkBytes: number;
+  /** True when the table keeps block history. */
+  history: boolean;
+  /** The revision history starts at; 0n without history. */
+  historyStart: bigint;
+  /** The time history was enabled, in ms since the Unix epoch; 0 without history. */
+  historyStartTimeMs: number;
+  /** 0 when history is kept regardless of age (or the table has none). */
+  historyMaxAgeMs: number;
+  /** 0 when a chunk keeps all of its history (or the table has none). */
+  historyMaxChunkBytes: number;
+  /** The longest tag a write may carry; 0 when the table has no history. */
+  historyMaxTagBytes: number;
   /** Every key/value line of the reply. */
   values: Record<string, string>;
 }
@@ -100,7 +120,7 @@ export interface ChunkTableInfo {
 export interface ChunkHelloInfo {
   protocol: number;
   serverVersion: string;
-  /** Optional features, for example `"zrle"` and `"extra-data"`. */
+  /** Optional features, for example `"zrle"`, `"extra-data"` and `"history"`. */
   capabilities: string[];
   maxLineBytes: number;
   /** Most chunks one `chunkRange` / `chunkRadius` call may cover. */
@@ -114,6 +134,10 @@ export interface ChunkHelloInfo {
    * EXTRA sections. 0 when the server has no extra data.
    */
   maxExtraChunkBytes: number;
+  /** The longest tag any table takes, in bytes; 0 when the server has no history. */
+  maxTagBytes: number;
+  /** The most events one history page can hold; 0 when the server has no history. */
+  maxHistoryLimit: number;
   /** The connection's table, or null when it has none (no `default`). */
   table: ChunkTableInfo | null;
   /** Every key/value line of the reply. */
@@ -139,9 +163,26 @@ export interface ChunkChunkState extends ChunkChunkStateInput {
   exists: boolean;
 }
 
-export interface ChunkGetOptions {
+/**
+ * A point in a table's history: after every mutation at or below a revision,
+ * or per chunk after its mutations committed at or before a time (ms since
+ * the Unix epoch).
+ */
+export type ChunkHistoryPoint = { revision: bigint } | { timeMs: number };
+
+export interface ChunkReadOptions {
+  /** Read the data as it was at this point (a table with history only). */
+  at?: ChunkHistoryPoint;
+}
+
+export interface ChunkGetOptions extends ChunkReadOptions {
   /** Transfer the chunk zrle-compressed; the result is decompressed. */
   zrle?: boolean;
+}
+
+export interface ChunkWriteOptions {
+  /** 1 to `historyMaxTagBytes` bytes kept with the write's history events (a table with history only). */
+  tag?: Uint8Array;
 }
 
 export interface ChunkGetStateOptions extends ChunkGetOptions {
@@ -171,7 +212,7 @@ export interface ChunkChunkStateExtra extends ChunkChunkState {
   extra: Map<number, ChunkExtraValue>;
 }
 
-export interface ChunkPutOptions {
+export interface ChunkPutOptions extends ChunkWriteOptions {
   /** Write only if the chunk's current version equals this one. */
   ifVersion?: bigint;
   /** Send the chunk zrle-compressed when that is smaller. */
@@ -210,6 +251,53 @@ export interface ChunkMutationResult {
    * survive eviction and restart.
    */
   version: bigint;
+}
+
+export interface ChunkHistoryOptions {
+  /** Events per page, 1 to `serverInfo().maxHistoryLimit` (1024). Server default 100. */
+  limit?: number;
+  /** `"desc"` (default) lists the newest first. */
+  order?: "asc" | "desc";
+  /** Only events after this cursor (exclusive); a revision such as a chunk version also works. */
+  after?: string | bigint;
+  /** Only events before this cursor (exclusive). */
+  before?: string | bigint;
+  /** Only events committed at or after this time, in ms since the Unix epoch. */
+  since?: number;
+  /** Only events committed at or before this time, in ms since the Unix epoch. */
+  until?: number;
+  /** Only events of writes with this tag. */
+  tag?: Uint8Array;
+}
+
+/** One change of one block. */
+export interface ChunkHistoryEvent {
+  /** The mutation's revision; a chunk write's version is its revision. */
+  revision: bigint;
+  /** Commit time, in ms since the Unix epoch. */
+  timeMs: number;
+  x: number;
+  y: number;
+  /** The block's bits before the change, as `get` returns them; null when it was unset. */
+  before: string | null;
+  /** The block's bits after the change; null when it is unset. */
+  after: string | null;
+  /** The block's extra data before the change; null when it had none. */
+  beforeExtra: ChunkExtraValue | null;
+  /** The block's extra data after the change; null when it has none. */
+  afterExtra: ChunkExtraValue | null;
+  /** The tag the write carried; null when it had none. */
+  tag: Uint8Array | null;
+}
+
+export interface ChunkHistoryPage {
+  events: ChunkHistoryEvent[];
+  /**
+   * Pass back as `after` (ascending) or `before` (descending) for the next
+   * page; null when the window is done. A page can be short, even empty, and
+   * still have a cursor.
+   */
+  cursor: string | null;
 }
 
 export type ChunkErrorPhase =

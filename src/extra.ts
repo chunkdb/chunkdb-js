@@ -166,3 +166,20 @@ export function decodeExtraValue(reply: Buffer, command: string): ChunkExtraValu
   }
   return { bitLength, bytes };
 }
+
+// A history event's extra data: `<bit_length>:<hex>`.
+export function decodeExtraText(text: string, command: string): ChunkExtraValue {
+  const match = /^([0-9]+):((?:[0-9a-fA-F]{2})+)$/.exec(text);
+  const bitLength = match === null ? 0 : Number(match[1]);
+  if (match === null || !Number.isSafeInteger(bitLength) || bitLength < 1 || bitLength > EXTRA_MAX_BLOCK_BITS) {
+    throw responseError(`returned invalid extra data: ${text}`, command);
+  }
+  const bytes = Buffer.from(match[2], "hex");
+  if (bytes.length !== Math.ceil(bitLength / 8)) {
+    throw responseError(`returned ${bytes.length} extra data bytes for ${bitLength} bits`, command);
+  }
+  if ((bytes[bytes.length - 1] & ~lastByteMask(bitLength)) !== 0) {
+    throw responseError("returned extra data with set bits past its bit length", command);
+  }
+  return { bitLength, bytes };
+}

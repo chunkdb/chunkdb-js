@@ -5,6 +5,7 @@ import tls from "node:tls";
 import {
   ChunkAuthError,
   ChunkConnectionError,
+  ChunkNotRetainedError,
   ChunkProtocolError,
   ChunkServerError,
   ChunkTimeoutError,
@@ -20,7 +21,7 @@ import {
   type NullFrame,
 } from "./protocol";
 import { formatChunkUri, parseChunkUri, tableFromUriPath } from "./uri";
-import { checkExtraValue, decodeExtraValue, decodeSection, encodeSection } from "./extra";
+import { checkExtraValue, decodeExtraText, decodeExtraValue, decodeSection, encodeSection } from "./extra";
 import type {
   ChunkBatchOperation,
   ChunkChunkState,
@@ -33,14 +34,20 @@ import type {
   ChunkGetOptions,
   ChunkGetStateOptions,
   ChunkHelloInfo,
+  ChunkHistoryEvent,
+  ChunkHistoryOptions,
+  ChunkHistoryPage,
+  ChunkHistoryPoint,
   ChunkInfo,
   ChunkMutationResult,
   ChunkPutOptions,
   ChunkRangeEntry,
+  ChunkReadOptions,
   ChunkScanResult,
   ChunkTableCreateOptions,
   ChunkTableInfo,
   ChunkTableOptions,
+  ChunkWriteOptions,
   ParsedChunkUri,
 } from "./types";
 import { zrleCompress, zrleDecompress } from "./zrle";
@@ -74,8 +81,10 @@ interface PendingRequest {
 const CRLF = Buffer.from("\r\n", "utf8");
 const PROTOCOL_VERSION = 2;
 const MAX_VERSION = (1n << 64n) - 1n;
+const MAX_BLOCK_INDEX = 2 ** 32 - 1;
 
 interface ChunkGeometryInfo {
+  blockBits: number;
   chunkPayloadBytes: number;
   presenceBytes: number;
   blockCount: number;
@@ -99,6 +108,17 @@ function bulkText(item: BulkFrame | NullFrame, command: string): string {
   return item.value.toString("utf8");
 }
 
+function parseCoordinate(token: string, command: string): number {
+  const value = Number.parseInt(token, 10);
+  if (!Number.isSafeInteger(value) || String(value) !== token) {
+    throw new ChunkProtocolError(`invalid coordinate in ${command} response: ${token}`, {
+      phase: "protocol",
+      command,
+    });
+  }
+  return value;
+}
+
 function parseCoordPair(text: string, command: string): ChunkCoordPair {
   const parts = text.split(" ");
   if (parts.length !== 2) {
@@ -107,17 +127,7 @@ function parseCoordPair(text: string, command: string): ChunkCoordPair {
       command,
     });
   }
-  const coord = (token: string): number => {
-    const value = Number.parseInt(token, 10);
-    if (!Number.isSafeInteger(value) || String(value) !== token) {
-      throw new ChunkProtocolError(`invalid coordinate in ${command} response: ${token}`, {
-        phase: "protocol",
-        command,
-      });
-    }
-    return value;
-  };
-  return { cx: coord(parts[0]), cy: coord(parts[1]) };
+  return { cx: parseCoordinate(parts[0], command), cy: parseCoordinate(parts[1], command) };
 }
 
 // Payload commands (CHUNKPUT, XPUT) whose header the server cannot parse are
@@ -134,9 +144,9 @@ function checkSafeIntegers(command: string, values: Array<readonly [string, numb
   }
 }
 
-function parseVersionText(text: string, command: string): bigint {
+function parseVersionText(text: string, command: string, name = "version"): bigint {
   if (!/^[0-9]+$/.test(text)) {
-    throw new ChunkProtocolError(`invalid version in ${command} response: ${text}`, {
+    throw new ChunkProtocolError(`invalid ${name} in ${command} response: ${text}`, {
       phase: "protocol",
       command,
     });
@@ -144,14 +154,178 @@ function parseVersionText(text: string, command: string): bigint {
   return BigInt(text);
 }
 
-function versionArgument(version: bigint, command: string): string {
+function versionArgument(version: bigint, command: string, name = "ifVersion"): string {
   if (typeof version !== "bigint" || version < 0n || version > MAX_VERSION) {
-    throw new ChunkProtocolError(`${command} ifVersion must be an unsigned 64-bit bigint`, {
+    throw new ChunkProtocolError(`${command} ${name} must be an unsigned 64-bit bigint`, {
       phase: "request",
       command,
     });
   }
   return version.toString();
+}
+
+function requestError(message: string, command: string): ChunkProtocolError {
+  return new ChunkProtocolError(`${command} ${message}`, { phase: "request", command });
+}
+
+function responseError(message: string, command: string): ChunkProtocolError {
+  return new ChunkProtocolError(message, { phase: "protocol", command });
+}
+
+// A history cursor: `<revision>` or `<revision>:<block_index>`.
+function isHistoryCursor(text: string): boolean {
+  const match = /^([0-9]+)(?::([0-9]+))?$/.exec(text);
+  return (
+    match !== null &&
+    BigInt(match[1]) <= MAX_VERSION &&
+    (match[2] === undefined || Number(match[2]) <= MAX_BLOCK_INDEX)
+  );
+}
+
+function cursorArgument(cursor: string | bigint, name: string, command: string): string {
+  if (typeof cursor === "bigint") {
+    return versionArgument(cursor, command, name);
+  }
+  // Checked in full: a cursor is a single argument of the request line.
+  if (typeof cursor !== "string" || !isHistoryCursor(cursor)) {
+    throw requestError(`${name} must be a cursor (<revision> or <revision>:<block_index>) or a bigint revision`, command);
+  }
+  return cursor;
+}
+
+function timeArgument(ms: number, name: string, command: string): number {
+  if (!Number.isSafeInteger(ms) || ms < 0) {
+    throw requestError(`${name} must be a non-negative integer of milliseconds`, command);
+  }
+  return ms;
+}
+
+// TAG <hex>: 1 to `maxTagBytes` (the server's max_tag_bytes) bytes. The
+// table's own limit is checked by the server.
+function tagHex(tag: Uint8Array, maxTagBytes: number, command: string): string {
+  if (!(tag instanceof Uint8Array) || tag.length < 1 || tag.length > maxTagBytes) {
+    throw requestError(`tag must be a Uint8Array of 1 to ${maxTagBytes} bytes`, command);
+  }
+  return Buffer.from(tag.buffer, tag.byteOffset, tag.byteLength).toString("hex");
+}
+
+// AT <revision> | AT TIME <ms>
+function historyPointArgs(at: ChunkHistoryPoint, command: string): string[] {
+  const { revision, timeMs } = (at ?? {}) as { revision?: bigint; timeMs?: number };
+  if ((revision === undefined) === (timeMs === undefined)) {
+    throw requestError("at must be { revision } or { timeMs }", command);
+  }
+  return revision !== undefined
+    ? ["AT", versionArgument(revision, command, "at.revision")]
+    : ["AT", "TIME", String(timeArgument(timeMs!, "at.timeMs", command))];
+}
+
+function historyOptionArgs(options: ChunkHistoryOptions, info: ChunkHelloInfo, command: string): Array<string | number> {
+  const args: Array<string | number> = [];
+  if (options.limit !== undefined) {
+    if (!Number.isSafeInteger(options.limit) || options.limit < 1 || options.limit > info.maxHistoryLimit) {
+      throw requestError(`limit must be an integer from 1 to ${info.maxHistoryLimit}`, command);
+    }
+    args.push("LIMIT", options.limit);
+  }
+  if (options.order !== undefined) {
+    if (options.order !== "asc" && options.order !== "desc") {
+      throw requestError('order must be "asc" or "desc"', command);
+    }
+    args.push(options.order === "asc" ? "ASC" : "DESC");
+  }
+  if (options.after !== undefined) {
+    args.push("AFTER", cursorArgument(options.after, "after", command));
+  }
+  if (options.before !== undefined) {
+    args.push("BEFORE", cursorArgument(options.before, "before", command));
+  }
+  if (options.since !== undefined) {
+    args.push("SINCE", timeArgument(options.since, "since", command));
+  }
+  if (options.until !== undefined) {
+    args.push("UNTIL", timeArgument(options.until, "until", command));
+  }
+  if (options.tag !== undefined) {
+    args.push("TAG", tagHex(options.tag, info.maxTagBytes, command));
+  }
+  return args;
+}
+
+// One event: `<revision> <time_ms> <x> <y> <before> <after> <before_extra>
+// <after_extra> <tag>`, `-` for an absent block, no extra data or no tag.
+function parseHistoryEvent(text: string, blockBits: number, command: string): ChunkHistoryEvent {
+  const fields = text.split(" ");
+  if (fields.length !== 9) {
+    throw responseError(`unexpected ${command} event: ${text}`, command);
+  }
+  const [revision, timeMs, x, y, before, after, beforeExtra, afterExtra, tag] = fields;
+  const time = Number(timeMs);
+  if (!/^[0-9]+$/.test(timeMs) || !Number.isSafeInteger(time)) {
+    throw responseError(`invalid time in ${command} response: ${timeMs}`, command);
+  }
+  const bits = (field: string): string | null => {
+    if (field === "-") {
+      return null;
+    }
+    if (field.length !== blockBits || !isBitString(field)) {
+      throw responseError(`invalid block bits in ${command} response: ${field}`, command);
+    }
+    return field;
+  };
+  const extra = (field: string) => (field === "-" ? null : decodeExtraText(field, command));
+  if (tag !== "-" && !/^(?:[0-9a-fA-F]{2})+$/.test(tag)) {
+    throw responseError(`invalid tag in ${command} response: ${tag}`, command);
+  }
+  return {
+    revision: parseVersionText(revision, command, "revision"),
+    timeMs: time,
+    x: parseCoordinate(x, command),
+    y: parseCoordinate(y, command),
+    before: bits(before),
+    after: bits(after),
+    beforeExtra: extra(beforeExtra),
+    afterExtra: extra(afterExtra),
+    tag: tag === "-" ? null : Buffer.from(tag, "hex"),
+  };
+}
+
+// `END` or `CURSOR <cursor>`, then one item per event.
+function parseHistoryPage(items: string[], blockBits: number, command: string): ChunkHistoryPage {
+  if (items.length === 0) {
+    throw responseError(`empty ${command} response`, command);
+  }
+  const header = items[0];
+  let cursor: string | null = null;
+  if (header.startsWith("CURSOR ")) {
+    cursor = header.slice("CURSOR ".length);
+    if (!isHistoryCursor(cursor)) {
+      throw responseError(`invalid cursor in ${command} response: ${cursor}`, command);
+    }
+  } else if (header !== "END") {
+    throw responseError(`unexpected ${command} header: ${header}`, command);
+  }
+  return { events: items.slice(1).map((item) => parseHistoryEvent(item, blockBits, command)), cursor };
+}
+
+/**
+ * Every event of a history window, page by page until `END`: each cursor
+ * moves the window's edge in the listing direction (`after` ascending,
+ * `before` descending). Pages may be short or empty.
+ */
+export async function* followHistory(
+  read: (options: ChunkHistoryOptions) => Promise<ChunkHistoryPage>,
+  options: ChunkHistoryOptions,
+): AsyncGenerator<ChunkHistoryEvent, void, undefined> {
+  let next: ChunkHistoryOptions = { ...options };
+  for (;;) {
+    const page = await read(next);
+    yield* page.events;
+    if (page.cursor === null) {
+      return;
+    }
+    next = options.order === "asc" ? { ...next, after: page.cursor } : { ...next, before: page.cursor };
+  }
 }
 
 // Chunk bytes from the server, checked against the table's sizes.
@@ -265,9 +439,13 @@ const TABLE_OPTION_KEYS: Array<[keyof ChunkTableOptions, string]> = [
   ["checkpointCompression", "checkpoint_compression"],
   ["extraMaxBlockBits", "extra_max_block_bits"],
   ["extraMaxChunkBytes", "extra_max_chunk_bytes"],
+  ["history", "history"],
+  ["historyMaxAgeMs", "history_max_age_ms"],
+  ["historyMaxChunkBytes", "history_max_chunk_bytes"],
+  ["historyMaxTagBytes", "history_max_tag_bytes"],
 ];
 
-// A count a server without extra data does not report: 0 when absent.
+// A count a server without extra data or history does not report: 0 when absent.
 function optionalCount(values: Record<string, string>, key: string, command: string): number {
   const text = values[key];
   if (text === undefined) {
@@ -280,12 +458,36 @@ function optionalCount(values: Record<string, string>, key: string, command: str
   return parsed;
 }
 
+// `history` is `on` or `off`; a server without history does not report it.
+function historySwitch(values: Record<string, string>, command: string): boolean {
+  const text = values.history;
+  if (text === undefined || text === "off") {
+    return false;
+  }
+  if (text !== "on") {
+    throw new ChunkProtocolError(`${command} has invalid history: ${text}`, { phase: "protocol", command });
+  }
+  return true;
+}
+
+// A revision a server without history does not report: 0n when absent.
+function optionalRevision(values: Record<string, string>, key: string, command: string): bigint {
+  const text = values[key];
+  if (text === undefined) {
+    return 0n;
+  }
+  if (!/^[0-9]+$/.test(text)) {
+    throw new ChunkProtocolError(`${command} has invalid ${key}: ${text}`, { phase: "protocol", command });
+  }
+  return BigInt(text);
+}
+
 function tableOptionArgs(options: ChunkTableOptions): Array<string | number> {
   const args: Array<string | number> = [];
   for (const [field, key] of TABLE_OPTION_KEYS) {
     const value = options[field];
     if (value !== undefined) {
-      args.push(key, value);
+      args.push(key, typeof value === "boolean" ? (value ? "on" : "off") : value);
     }
   }
   return args;
@@ -325,6 +527,12 @@ function parseTableInfo(payload: Buffer, command: string): ChunkTableInfo {
     checkpointCompression: text("checkpoint_compression"),
     extraMaxBlockBits: optionalCount(values, "extra_max_block_bits", command),
     extraMaxChunkBytes: optionalCount(values, "extra_max_chunk_bytes", command),
+    history: historySwitch(values, command),
+    historyStart: optionalRevision(values, "history_start", command),
+    historyStartTimeMs: optionalCount(values, "history_start_time_ms", command),
+    historyMaxAgeMs: optionalCount(values, "history_max_age_ms", command),
+    historyMaxChunkBytes: optionalCount(values, "history_max_chunk_bytes", command),
+    historyMaxTagBytes: optionalCount(values, "history_max_tag_bytes", command),
     values,
   };
 }
@@ -332,6 +540,7 @@ function parseTableInfo(payload: Buffer, command: string): ChunkTableInfo {
 function geometryOf(info: { blockBits: number; chunkWidthBlocks: number; chunkHeightBlocks: number }): ChunkGeometryInfo {
   const chunkBlockCount = info.chunkWidthBlocks * info.chunkHeightBlocks;
   return {
+    blockBits: info.blockBits,
     chunkPayloadBytes: Math.ceil((chunkBlockCount * info.blockBits) / 8),
     presenceBytes: Math.ceil(chunkBlockCount / 8),
     blockCount: chunkBlockCount,
@@ -363,6 +572,8 @@ function parseHelloInfo(payload: Buffer): ChunkHelloInfo {
     maxScanLimit: integer("max_scan_limit"),
     maxBatchOps: integer("max_batch_ops"),
     maxExtraChunkBytes: optionalCount(values, "max_extra_chunk_bytes", "HELLO"),
+    maxTagBytes: optionalCount(values, "max_tag_bytes", "HELLO"),
+    maxHistoryLimit: optionalCount(values, "max_history_limit", "HELLO"),
     // Without a `default` table and without TABLE, the connection has none.
     table: values.table === undefined ? null : parseTableInfo(payload, "HELLO"),
     values,
@@ -577,15 +788,16 @@ export class ChunkClient {
     });
   }
 
-  /** A block's bits, or null when the block is unset. */
-  get(x: number, y: number): Promise<string | null> {
+  /** A block's bits, or null when the block is unset. With `at`, as they were then. */
+  get(x: number, y: number, options: ChunkReadOptions = {}): Promise<string | null> {
     return this.enqueue(async () => {
-      const frame = await this.sendCommand("GET", [x, y]);
+      const at = await this.atArgs(options.at, "GET");
+      const frame = await this.sendCommand("GET", [x, y, ...at]);
       return this.expectBulkOrNull(frame, "GET")?.toString("utf8") ?? null;
     });
   }
 
-  set(x: number, y: number, bits: string): Promise<void> {
+  set(x: number, y: number, bits: string, options: ChunkWriteOptions = {}): Promise<void> {
     return this.enqueue(async () => {
       if (!isBitString(bits)) {
         throw new ChunkProtocolError("SET bits must contain only 0 and 1", {
@@ -593,17 +805,20 @@ export class ChunkClient {
           command: "SET",
         });
       }
-      this.expectOk(await this.sendCommand("SET", [x, y, bits]), "SET");
+      const tag = await this.tagArgs(options.tag, "SET");
+      this.expectOk(await this.sendCommand("SET", [x, y, bits, ...tag]), "SET");
     });
   }
 
-  unset(x: number, y: number): Promise<void> {
+  unset(x: number, y: number, options: ChunkWriteOptions = {}): Promise<void> {
     return this.enqueue(async () => {
-      this.expectOk(await this.sendCommand("UNSET", [x, y]), "UNSET");
+      const tag = await this.tagArgs(options.tag, "UNSET");
+      this.expectOk(await this.sendCommand("UNSET", [x, y, ...tag]), "UNSET");
     });
   }
 
-  mset(blocks: Array<{ x: number; y: number; bits: string }>): Promise<void> {
+  /** With `tag`, every block's event carries it. */
+  mset(blocks: Array<{ x: number; y: number; bits: string }>, options: ChunkWriteOptions = {}): Promise<void> {
     return this.enqueue(async () => {
       if (blocks.length === 0) return;
       const args: Array<string | number> = [];
@@ -616,6 +831,7 @@ export class ChunkClient {
         }
         args.push(x, y, bits);
       }
+      args.push(...(await this.tagArgs(options.tag, "MSET")));
       this.expectOk(await this.sendCommand("MSET", args), "MSET");
     });
   }
@@ -659,21 +875,24 @@ export class ChunkClient {
 
   /**
    * The chunk's packed block payload. An absent chunk reads as zeros; use
-   * `getChunkState` or `chunkExists` to tell it from an all-zero chunk.
+   * `getChunkState` or `chunkExists` to tell it from an all-zero chunk. With
+   * `at`, as it was then.
    */
   getChunk(cx: number, cy: number, options: ChunkGetOptions = {}): Promise<Buffer> {
     return this.enqueue(async () => {
       await this.ensureConnected();
       const geometry = this.requireGeometry("CHUNKGET");
       const zrle = options.zrle === true;
-      const frame = await this.sendCommand("CHUNKGET", zrle ? [cx, cy, "ZRLE"] : [cx, cy]);
+      const at = await this.atArgs(options.at, "CHUNKGET");
+      const frame = await this.sendCommand("CHUNKGET", [cx, cy, ...(zrle ? ["ZRLE"] : []), ...at]);
       return decodeChunkBytes(this.expectBulk(frame, "CHUNKGET"), geometry.chunkPayloadBytes, zrle, "CHUNKGET");
     });
   }
 
   /**
    * The chunk's payload and presence bitmap. With `extra`, also all of its
-   * extra data by block index (a table with extra data only).
+   * extra data by block index (a table with extra data only). With `at`, as
+   * it was then.
    */
   getChunkState(cx: number, cy: number, options: ChunkGetStateOptions & { extra: true }): Promise<ChunkChunkStateExtra>;
   getChunkState(cx: number, cy: number, options?: ChunkGetStateOptions): Promise<ChunkChunkState>;
@@ -690,6 +909,7 @@ export class ChunkClient {
       if (zrle) {
         args.push("ZRLE");
       }
+      args.push(...(await this.atArgs(options.at, "CHUNKGET")));
       const body = this.expectBulk(await this.sendCommand("CHUNKGET", args), "CHUNKGET");
       const stateBytes = geometry.chunkPayloadBytes + geometry.presenceBytes;
       if (!extra) {
@@ -790,7 +1010,7 @@ export class ChunkClient {
    * Sets the extra data of a present block: `bitLength` bits in
    * `ceil(bitLength / 8)` bytes, or every bit of a byte array.
    */
-  xput(x: number, y: number, value: ChunkExtraValue | Uint8Array): Promise<void> {
+  xput(x: number, y: number, value: ChunkExtraValue | Uint8Array, options: ChunkWriteOptions = {}): Promise<void> {
     return this.enqueue(async () => {
       await this.ensureConnected();
       this.requireGeometry("XPUT");
@@ -810,14 +1030,16 @@ export class ChunkClient {
           { phase: "request", command: "XPUT" },
         );
       }
-      this.expectOk(await this.sendCommand("XPUT", [x, y, extra.bitLength, bytes.length], bytes), "XPUT");
+      const tag = await this.tagArgs(options.tag, "XPUT");
+      this.expectOk(await this.sendCommand("XPUT", [x, y, extra.bitLength, ...tag, bytes.length], bytes), "XPUT");
     });
   }
 
   /** Deletes a block's extra data; resolves also when it had none. */
-  xdel(x: number, y: number): Promise<void> {
+  xdel(x: number, y: number, options: ChunkWriteOptions = {}): Promise<void> {
     return this.enqueue(async () => {
-      this.expectOk(await this.sendCommand("XDEL", [x, y]), "XDEL");
+      const tag = await this.tagArgs(options.tag, "XDEL");
+      this.expectOk(await this.sendCommand("XDEL", [x, y, ...tag]), "XDEL");
     });
   }
 
@@ -850,7 +1072,7 @@ export class ChunkClient {
     });
   }
 
-  /** Populated chunks in the rectangle, with payload and presence. */
+  /** Populated chunks in the rectangle, with payload and presence. With `at`, as they were then. */
   chunkRange(
     cx0: number,
     cy0: number,
@@ -861,7 +1083,7 @@ export class ChunkClient {
     return this.enqueue(async () => await this.readArea("CHUNKRANGE", [cx0, cy0, cx1, cy1], options));
   }
 
-  /** Populated chunks within `radiusChunks` of a chunk, with payload and presence. */
+  /** Populated chunks within `radiusChunks` of a chunk, with payload and presence. With `at`, as they were then. */
   chunkRadius(
     cx: number,
     cy: number,
@@ -882,7 +1104,7 @@ export class ChunkClient {
     cx: number,
     cy: number,
     operations: ChunkBatchOperation[],
-    options: { ifVersion?: bigint } = {},
+    options: { ifVersion?: bigint; tag?: Uint8Array } = {},
   ): Promise<ChunkMutationResult> {
     return this.enqueue(async () => {
       if (operations.length === 0) {
@@ -895,6 +1117,7 @@ export class ChunkClient {
       if (options.ifVersion !== undefined) {
         args.push("IF", versionArgument(options.ifVersion, "CHUNKBATCH"));
       }
+      args.push(...(await this.tagArgs(options.tag, "CHUNKBATCH")));
       for (const operation of operations) {
         if (operation.type === "set" || operation.type === "xput") {
           if (!isBitString(operation.bits)) {
@@ -915,6 +1138,52 @@ export class ChunkClient {
       }
       return await this.versionedWrite("CHUNKBATCH", args);
     });
+  }
+
+  /**
+   * One page of a block's history, newest first unless `order` is `"asc"`.
+   * Pass `cursor` back as `after` (ascending) or `before` (descending) for
+   * the next page; null ends the window.
+   */
+  history(x: number, y: number, options: ChunkHistoryOptions = {}): Promise<ChunkHistoryPage> {
+    return this.enqueue(async () => await this.readHistory("HISTORY", [x, y], options));
+  }
+
+  /** One page of a chunk's history; see `history`. */
+  chunkHistory(cx: number, cy: number, options: ChunkHistoryOptions = {}): Promise<ChunkHistoryPage> {
+    return this.enqueue(async () => await this.readHistory("CHUNKHISTORY", [cx, cy], options));
+  }
+
+  /** One page of the history of the chunks in a rectangle (at most 256); see `history`. */
+  rangeHistory(
+    cx0: number,
+    cy0: number,
+    cx1: number,
+    cy1: number,
+    options: ChunkHistoryOptions = {},
+  ): Promise<ChunkHistoryPage> {
+    return this.enqueue(async () => await this.readHistory("RANGEHISTORY", [cx0, cy0, cx1, cy1], options));
+  }
+
+  /** Every event of a block's history in the window `options` sets, read page by page. */
+  historyEvents(x: number, y: number, options: ChunkHistoryOptions = {}): AsyncIterableIterator<ChunkHistoryEvent> {
+    return followHistory(async (page) => await this.history(x, y, page), options);
+  }
+
+  /** Every event of a chunk's history in the window `options` sets, read page by page. */
+  chunkHistoryEvents(cx: number, cy: number, options: ChunkHistoryOptions = {}): AsyncIterableIterator<ChunkHistoryEvent> {
+    return followHistory(async (page) => await this.chunkHistory(cx, cy, page), options);
+  }
+
+  /** Every event of a rectangle's history in the window `options` sets, read page by page. */
+  rangeHistoryEvents(
+    cx0: number,
+    cy0: number,
+    cx1: number,
+    cy1: number,
+    options: ChunkHistoryOptions = {},
+  ): AsyncIterableIterator<ChunkHistoryEvent> {
+    return followHistory(async (page) => await this.rangeHistory(cx0, cy0, cx1, cy1, page), options);
   }
 
   walFlush(): Promise<void> {
@@ -963,6 +1232,51 @@ export class ChunkClient {
     return this.helloInfo?.maxExtraChunkBytes ?? 0;
   }
 
+  // A tag in a CHUNKPUT or XPUT header is something a server without history
+  // cannot parse, so it refuses the bytes unread and closes the connection.
+  // Tags, AT and history listings go only to a server that lists the
+  // capability.
+  private requireHistory(command: string): ChunkHelloInfo {
+    const info = this.helloInfo;
+    if (info === null || !info.capabilities.includes("history")) {
+      throw new ChunkProtocolError(`${command} needs a server with block history (capability "history")`, {
+        phase: "request",
+        command,
+      });
+    }
+    return info;
+  }
+
+  private async tagArgs(tag: Uint8Array | undefined, command: string): Promise<string[]> {
+    if (tag === undefined) {
+      return [];
+    }
+    await this.ensureConnected();
+    return ["TAG", tagHex(tag, this.requireHistory(command).maxTagBytes, command)];
+  }
+
+  private async atArgs(at: ChunkHistoryPoint | undefined, command: string): Promise<string[]> {
+    if (at === undefined) {
+      return [];
+    }
+    const args = historyPointArgs(at, command);
+    await this.ensureConnected();
+    this.requireHistory(command);
+    return args;
+  }
+
+  private async readHistory(
+    command: "HISTORY" | "CHUNKHISTORY" | "RANGEHISTORY",
+    coords: number[],
+    options: ChunkHistoryOptions,
+  ): Promise<ChunkHistoryPage> {
+    await this.ensureConnected();
+    const geometry = this.requireGeometry(command);
+    const args = [...coords, ...historyOptionArgs(options, this.requireHistory(command), command)];
+    const items = this.expectArray(await this.sendCommand(command, args), command).map((item) => bulkText(item, command));
+    return parseHistoryPage(items, geometry.blockBits, command);
+  }
+
   private async putChunkBytes(
     cx: number,
     cy: number,
@@ -971,6 +1285,7 @@ export class ChunkClient {
     options: ChunkPutOptions,
   ): Promise<ChunkMutationResult> {
     checkSafeIntegers("CHUNKPUT", [["cx", cx], ["cy", cy]]);
+    const tag = await this.tagArgs(options.tag, "CHUNKPUT");
     const args: Array<string | number> = [cx, cy, ...form];
     let body = bytes;
     if (options.zrle === true) {
@@ -983,7 +1298,7 @@ export class ChunkClient {
     if (options.ifVersion !== undefined) {
       args.push("IF", versionArgument(options.ifVersion, "CHUNKPUT"));
     }
-    args.push(body.length);
+    args.push(...tag, body.length);
     return await this.versionedWrite("CHUNKPUT", args, body);
   }
 
@@ -1024,6 +1339,7 @@ export class ChunkClient {
     if (zrle) {
       args.push("ZRLE");
     }
+    args.push(...(await this.atArgs(options.at, command)));
     const items = this.expectArray(await this.sendCommand(command, args), command);
     if (items.length % 2 !== 0) {
       throw new ChunkProtocolError(`${command} returned an odd number of items`, {
@@ -1318,6 +1634,16 @@ export class ChunkClient {
           phase: command === "HELLO" ? "auth" : "response",
           command,
         });
+      }
+      if (frame.code === "NOT_RETAINED") {
+        const match = /^start=([0-9]+)$/.exec(frame.message);
+        if (match === null) {
+          throw new ChunkProtocolError(`unexpected NOT_RETAINED payload for ${command}`, {
+            phase: "protocol",
+            command,
+          });
+        }
+        throw new ChunkNotRetainedError(frame.message, BigInt(match[1]), { phase: "response", command });
       }
       throw new ChunkServerError(frame.code, frame.message, {
         phase: "response",

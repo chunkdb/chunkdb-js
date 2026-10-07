@@ -32,6 +32,7 @@ This package is intentionally small:
   `setTableOptions`, `use`, per-table handles (`client.table(name)`), and the
   table named in the URI path (`chunk://host:4242/terrain`)
 - per-block extra data: `xget`, `xput`, `xdel`, in `chunkBatch`, and with the chunk state in `getChunkState` / `putChunkState`
+- block history: `history`, `chunkHistory`, `rangeHistory` and their iterators, tags on writes, and reads at a past revision or time
 - configurable request pipelining (`pipelineDepth`) for high-latency links
 - persistent socket reuse for low-concurrency callers and opt-in pooled concurrency for Node services
 - typed error classes
@@ -162,7 +163,7 @@ console.log(await sameTable.get(0, 0)); // "1011"
 await Promise.all([terrain.close(), sameTable.close(), admin.close()]);
 ```
 
-- Geometry is fixed when a table is created; `setTableOptions` changes `durabilityMode`, `checkpointUpdates`, `checkpointWalBytes`, `walGroupCommitUpdates`, `checkpointCompression` and the extra-data limits (see [Extra Data](#extra-data)).
+- Geometry is fixed when a table is created; `setTableOptions` changes `durabilityMode`, `checkpointUpdates`, `checkpointWalBytes`, `walGroupCommitUpdates`, `checkpointCompression`, the extra-data limits (see [Extra Data](#extra-data)) and the history options (see [History](#history)).
 - A pool works on one table: `connectPool({ uri: "chunk://...:4242/terrain", ... })`.
   Use one pool per table, and do not call `use` on a client from
   `withClient`: the pooled connection would keep that table for later work.
@@ -213,6 +214,47 @@ await Promise.all([things.close(), admin.close()]);
 - Needs a server whose `serverInfo().capabilities` include `"extra-data"`. One value has at most 134217664 bits, and no table limit lets a chunk hold more than `serverInfo().maxExtraChunkBytes` (16 MiB).
 - `putChunk` and `mset` keep the values of blocks that stay present, like `set`.
 - `chunkBatch` sends its operations as one text line, so long values count against `serverInfo().maxLineBytes` (64 KiB by default); the client refuses a longer line before sending. Write long values with `xput` or `putChunkState`.
+
+## History
+
+A table with history keeps every change of every block: its revision and commit time, the block before and after (bits and extra data), and an optional tag the writer attached. You can list the changes of a block, a chunk or a rectangle, and read data as it was at a past revision or time.
+
+History is a table option, off by default; `history: true` turns it on for good, and history starts then. `historyMaxAgeMs` and `historyMaxChunkBytes` bound what a chunk keeps (`0`, the default, keeps everything), `historyMaxTagBytes` (1 to 255, default 32) is the longest tag. `tableInfo(name)` and `serverInfo().table` report them with `history`, `historyStart` (the revision history starts at) and `historyStartTimeMs`.
+
+```ts
+import { connectUri } from "@chunkdb/client";
+
+const admin = await connectUri("chunk://chunk-token@127.0.0.1:4242/");
+await admin.createTable("world", { blockBits: 4, history: true });
+// On an existing table: await admin.setTableOptions("terrain", { history: true });
+
+const world = await admin.table("world");
+const since = await world.chunkVersion(0, 0);
+await world.set(10, 4, "0101", { tag: Buffer.from("job-17") });
+await world.set(10, 4, "1111");
+
+// One page of a block's changes, newest first.
+const page = await world.history(10, 4, { limit: 20 });
+console.log(page.events[0].before, page.events[0].after); // "0101" "1111"
+
+// Every change of a chunk since a version, oldest first, page by page.
+for await (const event of world.chunkHistoryEvents(0, 0, { order: "asc", after: since })) {
+  console.log(event.revision, event.x, event.y, event.after, event.tag);
+}
+
+// Reads as they were at a revision, or at a time with { timeMs }.
+console.log(await world.get(10, 4, { at: { revision: page.events[1].revision } })); // "0101"
+await Promise.all([world.close(), admin.close()]);
+```
+
+- An event is `{ revision, timeMs, x, y, before, after, beforeExtra, afterExtra, tag }`: the bits as `get` returns them (`null` when the block was or is unset), extra data as `xget` returns it or `null`, and the tag's bytes or `null`. Events are ordered by revision, the events of one chunk write by block index; a chunk write's version is its revision.
+- `history`, `chunkHistory` and `rangeHistory` (at most 256 chunks) return one page, `{ events, cursor }`: newest first unless `order: "asc"`, at most `limit` events (1 to 1024, default 100). Pass `cursor` back as `after` (ascending) or `before` (descending) for the next page. A page can be short, even empty, and still have a cursor; only `cursor: null` ends the window. `historyEvents`, `chunkHistoryEvents` and `rangeHistoryEvents` follow the cursors for you.
+- `after` and `before` (exclusive) take a cursor or a `bigint` revision, such as a chunk version; `since` and `until` (inclusive) bound commit times in ms; `tag` lists only that tag's events.
+- `set`, `unset`, `mset`, `putChunk`, `putChunkState`, `chunkBatch`, `xput` and `xdel` take `{ tag }`: 1 to `historyMaxTagBytes` bytes kept with every event of the write. A write that changes nothing records nothing.
+- `get`, `getChunk`, `getChunkState`, `chunkRange` and `chunkRadius` take `{ at: { revision } }` (after every mutation at or below it) or `{ at: { timeMs } }` (each chunk after its mutations committed at or before it). Revisions are ordered across the table, commit times only within a chunk.
+- A point not settled yet (a revision at or above the next one, a time not in the past) fails with a `ChunkServerError` whose `code` is `OUT_OF_RANGE`. A read before what the table keeps (before history started, or removed by retention) fails with a `ChunkNotRetainedError` whose `start` is the revision history is kept from; newest first, the kept pages come first.
+- Retention removes a chunk's oldest history when the server checkpoints the chunk; a chunk that is not written keeps what it has.
+- A tag on a table without history or over its limit fails with `INVALID_ARGUMENT`, and the connection stays usable. Needs a server whose `serverInfo().capabilities` include `"history"`; the client checks that, tag lengths (`serverInfo().maxTagBytes`), `limit` (`serverInfo().maxHistoryLimit`), cursors and points before sending.
 
 ## Pooling
 
@@ -279,7 +321,7 @@ const client = await connectUri("chunks://chunk-token@127.0.0.1:4242/", {
 
 - `connect()`
 - `close()`
-- `serverInfo(): ChunkHelloInfo | null` — the `HELLO` reply of the current connection: `serverVersion`, `capabilities`, `maxLineBytes`, `maxAreaChunks`, `maxResponseBytes`, `maxScanLimit`, `maxBatchOps`, `maxExtraChunkBytes`, and `table` (geometry and options, or `null`)
+- `serverInfo(): ChunkHelloInfo | null` — the `HELLO` reply of the current connection: `serverVersion`, `capabilities`, `maxLineBytes`, `maxAreaChunks`, `maxResponseBytes`, `maxScanLimit`, `maxBatchOps`, `maxExtraChunkBytes`, `maxTagBytes`, `maxHistoryLimit`, and `table` (geometry and options, or `null`)
 - `uri()` — includes the selected table as its path
 - `currentTable()` — the table this connection works on
 - `tables(): Promise<string[]>`
@@ -292,28 +334,30 @@ const client = await connectUri("chunks://chunk-token@127.0.0.1:4242/", {
 - `setTableOptions(name, options)` / `dropTable(name)`
 - `ping()`
 - `info()` — runtime statistics of the selected table
-- `get(x, y): Promise<string | null>` — the block's bits, `null` when unset
-- `set(x, y, bits)`
-- `unset(x, y)`
-- `mset(blocks: { x, y, bits }[])` — batch write, one round-trip; items apply in order and are not atomic as a group (on error, earlier items may already be applied) — use `chunkBatch` for an atomic single-chunk update
+- `get(x, y, { at? }): Promise<string | null>` — the block's bits, `null` when unset
+- `set(x, y, bits, { tag? })`
+- `unset(x, y, { tag? })`
+- `mset(blocks: { x, y, bits }[], { tag? })` — batch write, one round-trip; items apply in order and are not atomic as a group (on error, earlier items may already be applied) — use `chunkBatch` for an atomic single-chunk update
 - `mget(blocks: { x, y }[]): Promise<Array<string | null>>` — batch read, one round-trip
 - `chunkExists(cx, cy)`
-- `getChunk(cx, cy, { zrle? }): Promise<Buffer>` — the payload
-- `getChunkState(cx, cy, { zrle?, extra? }): Promise<{ exists, payload, presence, extra? }>`
-- `putChunk(cx, cy, payload, { ifVersion?, zrle? }): Promise<{ ok, version }>`
-- `putChunkState(cx, cy, { payload, presence, extra? }, { ifVersion?, zrle? }): Promise<{ ok, version }>`
+- `getChunk(cx, cy, { zrle?, at? }): Promise<Buffer>` — the payload
+- `getChunkState(cx, cy, { zrle?, extra?, at? }): Promise<{ exists, payload, presence, extra? }>`
+- `putChunk(cx, cy, payload, { ifVersion?, zrle?, tag? }): Promise<{ ok, version }>`
+- `putChunkState(cx, cy, { payload, presence, extra? }, { ifVersion?, zrle?, tag? }): Promise<{ ok, version }>`
 - `xget(x, y): Promise<{ bitLength, bytes } | null>` — the block's extra data
-- `xput(x, y, { bitLength, bytes } | Uint8Array)` / `xdel(x, y)`
+- `xput(x, y, { bitLength, bytes } | Uint8Array, { tag? })` / `xdel(x, y, { tag? })`
 - `chunkScan(limit, cursor?)` — enumerate populated chunks in deterministic
   `(cx, cy)` order; returns `{ coords, nextCursor }`, pass `nextCursor` back
   to continue (limit 1..1024 per page)
-- `chunkRange(cx0, cy0, cx1, cy1, { zrle? })` — bounded rectangular
+- `chunkRange(cx0, cy0, cx1, cy1, { zrle?, at? })` — bounded rectangular
   multi-chunk read (max 256 chunks, 64 MiB response cap); returns
   `{ cx, cy, payload, presence }` for populated chunks only
-- `chunkRadius(cx, cy, radiusChunks, { zrle? })` — bounded radius/disc
+- `chunkRadius(cx, cy, radiusChunks, { zrle?, at? })` — bounded radius/disc
   multi-chunk read with the same limits and result shape as `chunkRange`
 - `chunkVersion(cx, cy): Promise<bigint>` — opaque chunk version token
-- `chunkBatch(cx, cy, operations, { ifVersion? })` — atomic single-chunk batch of `{ type: "set", x, y, bits }`, `{ type: "unset", x, y }`, `{ type: "xput", x, y, bits }` and `{ type: "xdel", x, y }` operations; same `{ ok, version }` result
+- `chunkBatch(cx, cy, operations, { ifVersion?, tag? })` — atomic single-chunk batch of `{ type: "set", x, y, bits }`, `{ type: "unset", x, y }`, `{ type: "xput", x, y, bits }` and `{ type: "xdel", x, y }` operations; same `{ ok, version }` result
+- `history(x, y, options?)`, `chunkHistory(cx, cy, options?)`, `rangeHistory(cx0, cy0, cx1, cy1, options?): Promise<{ events, cursor }>` — one page of history; options `{ limit?, order?, after?, before?, since?, until?, tag? }`
+- `historyEvents(...)`, `chunkHistoryEvents(...)`, `rangeHistoryEvents(...)` — the same arguments; an async iterator over every event of the window
 - `walFlush()` — explicit durability barrier: resolves once every previously
   acknowledged write is durable, even when the server runs in `relaxed` mode
 - `metrics()` — Prometheus text-format runtime metrics
@@ -347,6 +391,7 @@ type ChunkInfo = {
   (chunkdb 1.x; with a token, or without one when the server needs none)
 - `ChunkServerError`
 - `ChunkAuthError` — a wrong (`AUTH_FAILED`) or missing (`AUTH_REQUIRED`) token
+- `ChunkNotRetainedError` — `NOT_RETAINED`: a history read before what the table keeps; `start` is the revision history is kept from
 - `ChunkTlsError`
 
 Server `-ERR ...` responses are surfaced as typed errors. A wrong token or an
