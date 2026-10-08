@@ -4,14 +4,23 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import {
-  missingCommandFromProbe,
-  REQUIRED_COMMAND_PROBES,
-  resolveServerBinary,
-  workspaceServerBinary,
-} from "./helpers";
+import { helloProbeFailure, resolveServerBinary, workspaceServerBinary } from "./helpers";
 
-test("plain and TLS resolution fail clearly when the dedicated build is missing", () => {
+// Resolution without CHUNKDB_SERVER_BIN / CHUNKDB_SERVER_BIN_TLS, which win
+// when set.
+function withoutServerEnv(run: () => void): void {
+  const saved = [process.env.CHUNKDB_SERVER_BIN, process.env.CHUNKDB_SERVER_BIN_TLS];
+  delete process.env.CHUNKDB_SERVER_BIN;
+  delete process.env.CHUNKDB_SERVER_BIN_TLS;
+  try {
+    run();
+  } finally {
+    if (saved[0] !== undefined) process.env.CHUNKDB_SERVER_BIN = saved[0];
+    if (saved[1] !== undefined) process.env.CHUNKDB_SERVER_BIN_TLS = saved[1];
+  }
+}
+
+test("plain and TLS resolution fail clearly when the dedicated build is missing", () => withoutServerEnv(() => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "chunkdb-helper-missing-"));
   try {
     for (const tlsEnabled of [false, true]) {
@@ -23,9 +32,9 @@ test("plain and TLS resolution fail clearly when the dedicated build is missing"
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
-});
+}));
 
-test("plain and TLS server resolution use the same dedicated build", () => {
+test("plain and TLS server resolution use the same dedicated build", () => withoutServerEnv(() => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "chunkdb-helper-current-"));
   try {
     const binary = workspaceServerBinary(root);
@@ -36,24 +45,10 @@ test("plain and TLS server resolution use the same dedicated build", () => {
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
-});
+}));
 
-test("a fully stale server is rejected by every required capability probe", () => {
-  for (const probe of REQUIRED_COMMAND_PROBES) {
-    assert.equal(
-      missingCommandFromProbe(probe, "-ERR UNKNOWN_COMMAND unsupported"),
-      probe.split(" ", 1)[0],
-    );
-  }
-});
-
-test("a partially stale server with CHUNKVER but without CHUNKBATCH is rejected", () => {
-  assert.equal(missingCommandFromProbe("CHUNKVER", "$1"), undefined);
-  assert.equal(
-    missingCommandFromProbe(
-      "CHUNKBATCH",
-      "-ERR UNKNOWN_COMMAND unknown command",
-    ),
-    "CHUNKBATCH",
-  );
+test("the compatibility probe accepts only a HELLO 3 map", () => {
+  assert.equal(helloProbeFailure("%7"), undefined);
+  assert.match(helloProbeFailure("-ERR PROTOCOL expected HELLO 2") ?? "", /does not speak protocol 3/);
+  assert.match(helloProbeFailure("$120") ?? "", /does not speak protocol 3/);
 });

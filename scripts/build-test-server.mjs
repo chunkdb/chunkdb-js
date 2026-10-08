@@ -8,6 +8,12 @@ import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+// An explicitly given server binary (test/helpers.ts) needs no build.
+if (process.env.CHUNKDB_SERVER_BIN && process.env.CHUNKDB_SERVER_BIN_TLS) {
+  console.log("CHUNKDB_SERVER_BIN and CHUNKDB_SERVER_BIN_TLS are set; not building a test server");
+  process.exit(0);
+}
+
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const chunkdbRoot =
   process.env.CHUNKDB_REPO_ROOT ?? path.resolve(packageRoot, "../chunkdb");

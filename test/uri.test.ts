@@ -41,14 +41,16 @@ test("URI path names the table", () => {
   assert.throws(() => tableFromUriPath("/a/b"), /one table/);
 });
 
-test("client URI reflects the selected table", () => {
-  assert.equal(new ChunkClient({ uri: "chunk://t@127.0.0.1:4242/" }).currentTable(), "default");
+test("the client's table comes from the option, then the URI path", () => {
+  const plain = new ChunkClient({ uri: "chunk://t@127.0.0.1:4242/" });
+  assert.equal(plain.defaultTable(), "default");
+  assert.equal(plain.uri(), "chunk://t@127.0.0.1:4242/");
   const fromPath = new ChunkClient({ uri: "chunk://t@127.0.0.1:4242/terrain" });
-  assert.equal(fromPath.currentTable(), "terrain");
+  assert.equal(fromPath.defaultTable(), "terrain");
   assert.equal(fromPath.uri(), "chunk://t@127.0.0.1:4242/terrain");
   // An explicit option wins over the path.
   const explicit = new ChunkClient({ uri: "chunk://t@127.0.0.1:4242/terrain", table: "sky" });
-  assert.equal(explicit.currentTable(), "sky");
+  assert.equal(explicit.defaultTable(), "sky");
   assert.equal(explicit.uri(), "chunk://t@127.0.0.1:4242/sky");
 });
 

@@ -3,46 +3,59 @@
 All notable changes to this project will be documented in this file.
 
 This client follows [Semantic Versioning](https://semver.org/). Version 1.x
-speaks the `chunkdb` 1.x protocol, version 2.x speaks protocol 2 (chunkdb
-2.0); see the engine's
+speaks the `chunkdb` 1.x protocol; the next major version speaks protocol 3
+(CQL); see the engine's
 [compatibility policy](https://github.com/chunkdb/chunkdb/blob/main/docs/COMPATIBILITY.md).
 
 ## Unreleased
 
 ### Breaking
-- Protocol 2 (chunkdb 2.0). Connecting sends `HELLO 2` with the token and
-  table; a 1.x server is refused with a `ChunkProtocolError`. The reply is
-  available as `serverInfo()` (server version, capabilities, limits, table
-  geometry and options). A wrong or missing token fails `connect()` with
-  `ChunkAuthError` (`AUTH_FAILED` / `AUTH_REQUIRED`). Removed: `auth()` and
-  the `autoAuth` option
-- `get` and `mget` return `null` for an unset block; `readBlock` and
-  `exists` are removed
-- chunks are binary only. `getChunk` / `getChunkState` replace `chunk`,
-  `readChunk`, `chunkbin`, `chunkbinState`, `chunkbinCompressed` and
-  `chunkbinStateCompressed`; `putChunk` / `putChunkState` replace
-  `setChunk`, `setChunkState`, `setChunkBin`, `setChunkBinState` and
-  `chunkCompareAndSet` (`{ ifVersion }`). `ChunkChunkState` and
-  `ChunkChunkStateInput` hold `payload` / `presence` buffers. `{ zrle: true }`
-  compresses a read or write on the wire. Writes resolve `{ ok, version }`
-- `chunkRange` / `chunkRadius` entries hold `payload` / `presence` buffers
-  instead of bit strings and take `{ zrle }`
-- `parseFrame` returns `{ type: "null" }` for `$-1`, and array items may be
-  nulls (`NullFrame`)
+- Protocol 3 (CQL) only. Connecting sends `HELLO 3` with the token; a server
+  of an earlier protocol fails `connect()` with a `ChunkProtocolError` that
+  says so. `serverInfo()` returns the reply: server version, `maxLineBytes`,
+  `maxParameters`, `maxAreaChunks`, `maxResponseBytes`, `maxScanLimit`. A
+  wrong or missing token fails `connect()` with `ChunkAuthError`
+- Every call names its table (`table` option), defaulting to the client's
+  table: the `table` client option, the URI path, or `default`
+- Removed the 1.x and protocol 2 API: `get`, `set`, `unset`, `mget`, `mset`,
+  `getChunk` / `getChunkState` / `putChunk` / `putChunkState` on bit
+  payloads, `chunkExists`, `chunkVersion`, `chunkBatch`, `chunkScan`,
+  `chunkRange`, `chunkRadius`, `info`, `walFlush`, `tables`, `tableInfo`,
+  `use`, `table(name)`, `setTableOptions`, `currentTable`, zrle transfers
+  (`zrleCompress`, `zrleDecompress`), bit-string block values,
+  `serializeCommand`, `parseFrame`, `parseInfoPayload` and their types
+- Conditional writes reject with `ChunkVersionMismatchError` (with
+  `currentVersion`) instead of resolving `{ ok: false }`
 
 ### Added
-- Tables (chunkdb 2.0+): `createTable`, `dropTable`, `tables`, `tableInfo`,
-  `setTableOptions` and `use`; `table(name)` returns a new client on a table;
-  the `table` option or the URI path (`chunk://host:4242/terrain`) selects
-  the table at connect, and the selection is repeated after a reconnect.
-  `ChunkPool` connections use the pool's table. `uri()` includes the selected
-  table, `currentTable()` reports it, and `tableFromUriPath` is exported.
-  Chunk sizes for binary reads and writes follow the selected table's
-  geometry
+- Typed blocks: `getBlock`, `setBlock`, `deleteBlock`, with values by column
+  type (`number` / `bigint`, `boolean`, `ChunkBits`, `string`, `Uint8Array`,
+  `null`) sent as parameters and checked before sending; writes resolve the
+  chunk version and take `ifVersion`
+- Chunks: `getChunk` decodes the chunk form by the table's schema
+  (version, schema version, presence, per-column values), `setChunk`
+  encodes every column for the cached schema version and, on
+  `SCHEMA_MISMATCH`, refreshes the schema and encodes again once;
+  `getChunkRaw` / `setChunkRaw` move the form as bytes (`setChunkRaw` rejects
+  a form of another schema version with `ChunkSchemaMismatchError`);
+  `emptyChunk(schema)`
+- Areas and scans: `getArea` / `getAreaRaw` (box or radius),
+  `scanChunks` pages and the `scanAllChunks` iterator
+- Tables: `createTable` (columns, chunk and large sizes, options),
+  `alterTable` (add, drop, rename, change type, set option), `dropTable`,
+  `listTables`, `describe`
+- A per-client schema cache, refreshed by `describe`, cleared by table
+  statements the client sends, and refreshed once (with one retry) when a
+  reply shows the table changed
+- `flushWal`, `metrics`, and `execute(statement, parameters)` with the RESP3
+  reply types (`parseReply`, `encodeStatement`, `encodeParameter`,
+  `parseColumnType`, `formatColumnType`)
 
 ### Fixed
-- a connection whose `AUTH` or table selection failed during `connect` was
-  left open behind a client the caller never received; it is closed now
+- a connection whose `HELLO` failed during `connect` was left open behind a
+  client the caller never received; it is closed now
+- a command timeout closes the connection at once, so the next call
+  reconnects instead of writing to the closed socket
 
 ## 1.2.0 - 2026-09-03
 

@@ -1,160 +1,147 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { ChunkProtocolError, ChunkServerError, connectPool, connectUri } from "../src/index";
+import { ChunkServerError, connectUri } from "../src/index";
 import { startServer } from "./helpers";
 
-function serverError(code: string) {
-  return (error: unknown) => error instanceof ChunkServerError && error.code === code;
+function serverError(code: string, message?: RegExp) {
+  return (error: unknown) =>
+    error instanceof ChunkServerError && error.serverCode === code && (message === undefined || message.test(error.serverMessage));
 }
 
-test("tables: create, select, use their geometry, change options, drop", async () => {
+test("tables: create, describe, alter, list, drop", async () => {
   const server = await startServer();
   try {
     const client = await connectUri(server.uri);
-    assert.equal(client.currentTable(), "default");
-    assert.equal(client.serverInfo()?.table?.name, "default");
-    assert.deepEqual(await client.tables(), ["default"]);
-
-    await client.createTable("terrain", {
-      blockBits: 4,
-      chunkWidthBlocks: 8,
-      chunkHeightBlocks: 2,
-      durabilityMode: "fsync-wal",
+    await client.createTable("land", {
+      columns: [
+        { name: "id", type: "u10", required: true },
+        { name: "light", type: "u4", default: 15 },
+        { name: "sign", type: "text(8)", nullable: true },
+        { name: "h", type: { kind: "f32" }, default: 1.5 },
+      ],
+      chunk: { width: 4, height: 2 },
+      large: { width: 2, height: 2 },
+      options: { durabilityMode: "fsync-wal", varMaxChunkBytes: 4096, checkpointUpdates: 128 },
     });
-    await assert.rejects(client.createTable("terrain", { blockBits: 4 }), serverError("TABLE_EXISTS"));
-    await assert.rejects(client.createTable("Bad", { blockBits: 4 }), serverError("INVALID_ARGUMENT"));
-    assert.deepEqual(await client.tables(), ["default", "terrain"]);
+    await assert.rejects(
+      client.createTable("land", { columns: [{ name: "a", type: "u8" }], chunk: { width: 4, height: 4 } }),
+      serverError("TABLE_EXISTS"),
+    );
+    assert.deepEqual(await client.listTables(), ["default", "land"]);
 
-    const info = await client.tableInfo("terrain");
-    assert.equal(info.name, "terrain");
-    assert.equal(info.blockBits, 4);
-    assert.equal(info.chunkWidthBlocks, 8);
-    assert.equal(info.chunkHeightBlocks, 2);
-    assert.equal(info.largeChunkWidthChunks, 8);
-    assert.equal(info.durabilityMode, "fsync-wal");
-    assert.equal(info.storeId.length, 32);
+    const schema = await client.describe("land");
+    assert.deepEqual(schema, {
+      table: "land",
+      version: 1,
+      columns: [
+        { name: "id", type: { kind: "u", bits: 10 }, typeName: "u10", nullable: false, required: true, default: null },
+        { name: "light", type: { kind: "u", bits: 4 }, typeName: "u4", nullable: false, required: false, default: 15 },
+        { name: "sign", type: { kind: "text", maxBytes: 8 }, typeName: "text(8)", nullable: true, required: false, default: null },
+        { name: "h", type: { kind: "f32" }, typeName: "f32", nullable: false, required: false, default: 1.5 },
+      ],
+      chunk: { width: 4, height: 2 },
+      large: { width: 2, height: 2 },
+      options: {
+        durabilityMode: "fsync-wal",
+        checkpointUpdates: 128,
+        checkpointWalBytes: schema.options.checkpointWalBytes,
+        walGroupCommitUpdates: schema.options.walGroupCommitUpdates,
+        checkpointCompression: "none",
+        varMaxChunkBytes: 4096,
+      },
+    });
 
-    // A handle is its own connection on the table.
-    const terrain = await client.table("terrain");
-    assert.equal(terrain.currentTable(), "terrain");
-    await terrain.set(1, 1, "1010");
-    await client.set(1, 1, "1111000011110000");
-    assert.equal(await terrain.get(1, 1), "1010");
-    assert.equal(await client.get(1, 1), "1111000011110000");
+    await client.setBlock(0, 0, { id: 7, sign: "hi" }, { table: "land" });
+    await client.alterTable("land", { kind: "addColumn", column: { name: "depth", type: "i8", nullable: true } });
+    assert.deepEqual(await client.getBlock(0, 0, { table: "land", columns: ["depth", "id"] }), { depth: null, id: 7 });
+    await client.setBlock(0, 0, { depth: 100 }, { table: "land" });
+    await assert.rejects(
+      client.alterTable("land", { kind: "alterColumnType", column: "depth", type: "i4" }),
+      serverError("INVALID_ARGUMENT", /holds 100/),
+    );
+    await client.alterTable("land", { kind: "alterColumnType", column: "depth", type: "i4", using: "clamp" });
+    await client.alterTable("land", { kind: "renameColumn", column: "sign", to: "label" });
+    await client.alterTable("land", { kind: "setOption", option: "checkpointUpdates", value: 64 });
+    assert.deepEqual(await client.getBlock(0, 0, { table: "land" }), { id: 7, light: 15, label: "hi", h: 1.5, depth: 7 });
+    await client.alterTable("land", { kind: "dropColumn", column: "label" });
+    const altered = await client.describe("land");
+    assert.deepEqual(altered.columns.map((column) => column.name), ["id", "light", "h", "depth"]);
+    assert.equal(altered.options.checkpointUpdates, 64);
+    assert.ok(altered.version > 1);
 
-    // Binary chunk sizes follow the table's geometry: 8x2 blocks of 4 bits.
-    assert.equal(terrain.serverInfo()?.table?.blockBits, 4);
-    const payload = Buffer.from([1, 2, 3, 4, 5, 6, 7, 8]);
-    await terrain.putChunk(3, 3, payload);
-    assert.deepEqual(await terrain.getChunk(3, 3), payload);
-    const state = await terrain.getChunkState(3, 3);
-    assert.deepEqual(state.presence, Buffer.from([0xff, 0xff]));
-    await assert.rejects(client.putChunk(3, 3, payload), /CHUNKPUT payload must be/);
-
-    // use() switches this connection.
-    const used = await client.use("terrain");
-    assert.equal(used.blockBits, 4);
-    assert.equal(client.currentTable(), "terrain");
-    assert.equal(await client.get(1, 1), "1010");
-    assert.deepEqual(await client.getChunk(3, 3), payload);
-    assert.match(client.uri(), /\/terrain$/);
-    await assert.rejects(client.use("missing"), serverError("NO_TABLE"));
-    assert.equal(client.currentTable(), "terrain");
-    assert.equal((await client.info()).values.table, "terrain");
-
-    await client.setTableOptions("terrain", { checkpointUpdates: 3, checkpointCompression: "zrle" });
-    const changed = await client.tableInfo("terrain");
-    assert.equal(changed.checkpointUpdates, 3);
-    assert.equal(changed.checkpointCompression, "zrle");
-    assert.equal(await terrain.get(1, 1), "1010");
-
-    // A drop reaches every connection on the table.
-    await client.use("default");
-    await client.dropTable("terrain");
-    await assert.rejects(terrain.get(1, 1), serverError("NO_TABLE"));
-    assert.deepEqual(await client.tables(), ["default"]);
-
-    await terrain.close();
+    await client.dropTable("land");
+    await assert.rejects(client.getBlock(0, 0, { table: "land" }), serverError("NO_TABLE"));
+    await assert.rejects(client.dropTable("land"), serverError("NO_TABLE"));
+    assert.deepEqual(await client.listTables(), ["default"]);
     await client.close();
   } finally {
     await server.stop();
   }
 });
 
-test("tables: the URI path selects the table, also for a pool", async () => {
-  // The test server runs two workers, one per open connection: keep at most
-  // two connections open at a time.
+test("the schema cache follows changes another client makes", async () => {
   const server = await startServer();
   try {
     const admin = await connectUri(server.uri);
-    await admin.createTable("sky", { blockBits: 2, chunkWidthBlocks: 4, chunkHeightBlocks: 4 });
-    await admin.close();
+    await admin.createTable("t", {
+      columns: [
+        { name: "id", type: "u10" },
+        { name: "h", type: "f32" },
+        { name: "note", type: "text(8)", nullable: true },
+        { name: "data", type: "bytes(4)" },
+      ],
+      chunk: { width: 2, height: 2 },
+    });
+    const client = await connectUri(`${server.uri}t`);
+    await client.setBlock(0, 0, { id: 1, h: 0.5, note: "a", data: Buffer.from("x") });
+    assert.equal((await client.describe()).columns.length, 4);
 
-    const uri = server.uri.replace(/\/$/, "/sky");
-    const client = await connectUri(uri);
-    assert.equal(client.currentTable(), "sky");
-    await client.set(0, 0, "11");
-    await client.close();
+    // A frame of the wrong size: refreshed and retried once.
+    await admin.alterTable("t", { kind: "alterColumnType", column: "h", type: "f64" });
+    await client.setBlock(0, 0, { h: 0.1 });
+    assert.deepEqual(await client.getBlock(0, 0, { columns: ["h"] }), { h: 0.1 });
 
-    const pool = await connectPool({ uri, maxConnections: 2, minConnections: 2 });
-    await Promise.all([pool.set(1, 0, "01"), pool.set(2, 0, "10")]);
-    assert.equal(await pool.get(0, 0), "11");
-    assert.equal(await pool.get(2, 0), "10");
-    await pool.close();
+    // A column the cache does not know.
+    await admin.alterTable("t", { kind: "addColumn", column: { name: "tag", type: "text(4)", nullable: true } });
+    await client.setBlock(0, 0, { tag: "new" });
+    assert.deepEqual(await client.getBlock(0, 0, { columns: ["tag"] }), { tag: "new" });
 
-    const onDefault = await connectUri(server.uri);
-    assert.equal(await onDefault.get(0, 0), null);
-    await onDefault.close();
+    // A renamed and a dropped column: a read of every cached column is
+    // refused, refreshed and retried.
+    await admin.alterTable("t", { kind: "renameColumn", column: "note", to: "label" });
+    await admin.alterTable("t", { kind: "dropColumn", column: "id" });
+    assert.deepEqual(await client.getBlock(0, 0), { h: 0.1, label: "a", data: Buffer.from("x"), tag: "new" });
 
-    await assert.rejects(connectUri(server.uri.replace(/\/$/, "/missing")), serverError("NO_TABLE"));
-    await assert.rejects(connectUri(server.uri.replace(/\/$/, "/missing")), serverError("NO_TABLE"));
-    // The failed handshakes closed their sockets: both workers are free.
-    const first = await connectUri(server.uri);
-    const second = await connectUri(server.uri);
-    assert.equal(await second.ping(), "PONG");
-    await first.close();
-    await second.close();
-  } finally {
-    await server.stop();
-  }
-});
+    // After DROP and ADD the text and bytes columns have ids that are not
+    // their positions; chunk forms are decoded by the ids DESCRIBE reports.
+    await admin.alterTable("t", { kind: "dropColumn", column: "label" });
+    await admin.alterTable("t", { kind: "addColumn", column: { name: "label", type: "text(8)", nullable: true } });
+    await client.setBlock(1, 0, { h: 2, label: "b1", data: Buffer.from("y"), tag: "t1" });
+    const chunk = await client.getChunk(0, 0);
+    assert.deepEqual(Object.keys(chunk.columns), ["h", "data", "tag", "label"]);
+    assert.deepEqual(chunk.columns.label.slice(0, 2), [null, "b1"]);
+    assert.deepEqual(chunk.columns.tag.slice(0, 2), ["new", "t1"]);
+    assert.deepEqual(chunk.columns.data.slice(0, 2), [Buffer.from("x"), Buffer.from("y")]);
+    chunk.columns.label[0] = "b0";
+    await client.setChunk(0, 0, chunk, { ifVersion: chunk.version });
+    assert.deepEqual(await client.getBlock(0, 0, { columns: ["label", "tag"] }), { label: "b0", tag: "new" });
 
-test("tables: use() is exclusive with pipelined chunk writes", async () => {
-  // Each write runs entirely on the old or the new table: it either succeeds
-  // or fails the client-side size check, and none reaches the server framed
-  // for the wrong table, which would close the connection under every
-  // request in flight.
-  const server = await startServer();
-  try {
-    const client = await connectUri(server.uri, { pipelineDepth: 8 });
-    await client.createTable("small", { blockBits: 1, chunkWidthBlocks: 2, chunkHeightBlocks: 2 });
-    const payload = Buffer.alloc(512, 0x5a);
-    const failures: unknown[] = [];
-    let stop = false;
-    const writer = async (w: number) => {
-      for (let i = 0; !stop; i += 1) {
-        try {
-          await client.putChunk(w, i % 16, payload);
-        } catch (error) {
-          failures.push(error);
-        }
-      }
-    };
-    const writers = Array.from({ length: 8 }, async (_, w) => await writer(w));
-    for (let round = 0; round < 20; round += 1) {
-      await client.use(round % 2 === 0 ? "small" : "default");
-    }
-    stop = true;
-    await Promise.all(writers);
-    for (const failure of failures) {
-      assert.ok(
-        failure instanceof ChunkProtocolError && failure.phase === "request",
-        `a pipelined write failed with ${String(failure)}`,
-      );
-    }
-    assert.equal(await client.ping(), "PONG");
-    await client.close();
+    // A write naming a column dropped since: the server refuses it and
+    // closes the connection; the next call reconnects with a fresh schema.
+    await client.describe();
+    await admin.alterTable("t", { kind: "dropColumn", column: "tag" });
+    await assert.rejects(client.setBlock(0, 0, { tag: "x" }), serverError("INVALID_ARGUMENT", /no column tag/));
+    assert.deepEqual(await client.getBlock(0, 0, { columns: ["label"] }), { label: "b0" });
+    await assert.rejects(client.setBlock(0, 0, { tag: "x" }), /no column tag/);
+
+    // A table dropped and created again with other columns.
+    await admin.dropTable("t");
+    await admin.createTable("t", { columns: [{ name: "flag", type: "bool" }], chunk: { width: 2, height: 2 } });
+    assert.equal(await client.getBlock(0, 0), null);
+    await client.setBlock(0, 0, { flag: true });
+    assert.deepEqual(await client.getBlock(0, 0), { flag: true });
+    await Promise.all([admin.close(), client.close()]);
   } finally {
     await server.stop();
   }
