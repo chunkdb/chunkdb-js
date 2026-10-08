@@ -1,21 +1,24 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { connectUri } from "../src/index";
+import { ChunkBits, ChunkTlsError, connectUri } from "../src/index";
 import { startServer } from "./helpers";
 
-test("tls ping, info, and a binary chunk round trip", async () => {
+test("TLS: HELLO, typed blocks and a chunk round trip", async () => {
   const server = await startServer({ tls: true });
   try {
     const client = await connectUri(server.uri, { tlsInsecure: true });
+    assert.equal(client.serverInfo()?.protocol, 3);
     assert.equal(await client.ping(), "PONG");
-    const info = await client.info();
-    assert.equal(info.values.table, "default");
-    assert.equal(client.serverInfo()?.table?.durabilityMode, "relaxed");
-    const payload = Buffer.alloc(512, 0xa5);
-    assert.equal((await client.putChunk(0, 0, payload)).ok, true);
-    assert.deepEqual(await client.getChunk(0, 0), payload);
+    await client.setBlock(3, 4, { bits: ChunkBits.from("1".repeat(16)) });
+    assert.equal((await client.getBlock(3, 4))?.bits?.toString(), "1".repeat(16));
+    const raw = await client.getChunkRaw(0, 0);
+    await client.setChunkRaw(1, 0, raw);
+    assert.deepEqual((await client.getChunkRaw(1, 0)).subarray(8), raw.subarray(8));
     await client.close();
+
+    // Without tlsInsecure the self-signed certificate is refused.
+    await assert.rejects(connectUri(server.uri), ChunkTlsError);
   } finally {
     await server.stop();
   }

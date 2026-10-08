@@ -3,20 +3,26 @@ import {
   ChunkTimeoutError,
   ChunkTlsError,
 } from "./errors";
-import { ChunkClient } from "./client";
+import { ChunkClient, tableOfStatement } from "./client";
+import type { ChunkParameter, ChunkReply } from "./protocol";
 import type {
-  ChunkBatchOperation,
-  ChunkChunkState,
-  ChunkChunkStateInput,
+  ChunkArea,
+  ChunkAreaEntry,
+  ChunkAreaRawEntry,
   ChunkClientOptions,
-  ChunkCoordPair,
-  ChunkGetOptions,
-  ChunkInfo,
-  ChunkMutationResult,
+  ChunkCoord,
   ChunkPoolOptions,
-  ChunkPutOptions,
-  ChunkRangeEntry,
-  ChunkScanResult,
+  ChunkReadOptions,
+  ChunkRow,
+  ChunkScanOptions,
+  ChunkScanPage,
+  ChunkState,
+  ChunkStateInput,
+  ChunkTableChange,
+  ChunkTableDefinition,
+  ChunkTableSchema,
+  ChunkValue,
+  ChunkWriteOptions,
 } from "./types";
 
 interface ResolvedPoolOptions {
@@ -175,101 +181,117 @@ export class ChunkPool {
     }
   }
 
+  /** `ChunkClient.execute` on a pooled connection. */
+  async execute(statement: string, parameters: readonly ChunkParameter[] = []): Promise<ChunkReply> {
+    const table = tableOfStatement(statement);
+    try {
+      return await this.withClient(async (client) => await client.execute(statement, parameters));
+    } finally {
+      if (table !== null) {
+        this.clearSchemaCache(table.toLowerCase());
+      }
+    }
+  }
+
+  describe(table?: string): Promise<ChunkTableSchema> {
+    return this.withClient(async (client) => await client.describe(table));
+  }
+
+  /** Forgets cached schemas on every pooled connection. */
+  clearSchemaCache(table?: string): void {
+    for (const client of this.clients) {
+      client.clearSchemaCache(table);
+    }
+  }
+
+  listTables(): Promise<string[]> {
+    return this.withClient(async (client) => await client.listTables());
+  }
+
+  createTable(name: string, definition: ChunkTableDefinition): Promise<void> {
+    return this.tableStatement(name, async (client) => await client.createTable(name, definition));
+  }
+
+  alterTable(name: string, change: ChunkTableChange): Promise<void> {
+    return this.tableStatement(name, async (client) => await client.alterTable(name, change));
+  }
+
+  dropTable(name: string): Promise<void> {
+    return this.tableStatement(name, async (client) => await client.dropTable(name));
+  }
+
+  getBlock(x: number, y: number, options: ChunkReadOptions = {}): Promise<ChunkRow | null> {
+    return this.withClient(async (client) => await client.getBlock(x, y, options));
+  }
+
+  setBlock(x: number, y: number, values: Readonly<Record<string, ChunkValue>>, options: ChunkWriteOptions = {}): Promise<bigint> {
+    return this.withClient(async (client) => await client.setBlock(x, y, values, options));
+  }
+
+  deleteBlock(x: number, y: number, options: ChunkWriteOptions = {}): Promise<bigint> {
+    return this.withClient(async (client) => await client.deleteBlock(x, y, options));
+  }
+
+  getChunk(cx: number, cy: number, options: ChunkReadOptions = {}): Promise<ChunkState> {
+    return this.withClient(async (client) => await client.getChunk(cx, cy, options));
+  }
+
+  getChunkRaw(cx: number, cy: number, options: ChunkReadOptions = {}): Promise<Buffer> {
+    return this.withClient(async (client) => await client.getChunkRaw(cx, cy, options));
+  }
+
+  setChunk(cx: number, cy: number, state: ChunkStateInput, options: ChunkWriteOptions = {}): Promise<bigint> {
+    return this.withClient(async (client) => await client.setChunk(cx, cy, state, options));
+  }
+
+  setChunkRaw(cx: number, cy: number, form: Uint8Array, options: ChunkWriteOptions = {}): Promise<bigint> {
+    return this.withClient(async (client) => await client.setChunkRaw(cx, cy, form, options));
+  }
+
+  getArea(area: ChunkArea, options: ChunkReadOptions = {}): Promise<ChunkAreaEntry[]> {
+    return this.withClient(async (client) => await client.getArea(area, options));
+  }
+
+  getAreaRaw(area: ChunkArea, options: ChunkReadOptions = {}): Promise<ChunkAreaRawEntry[]> {
+    return this.withClient(async (client) => await client.getAreaRaw(area, options));
+  }
+
+  scanChunks(options: ChunkScanOptions = {}): Promise<ChunkScanPage> {
+    return this.withClient(async (client) => await client.scanChunks(options));
+  }
+
+  /** Every chunk that has a present block, one pooled call per page. */
+  async *scanAllChunks(options: Omit<ChunkScanOptions, "after"> = {}): AsyncGenerator<ChunkCoord, void, undefined> {
+    let after: ChunkCoord | undefined;
+    while (true) {
+      const page = await this.scanChunks({ ...options, after });
+      yield* page.chunks;
+      if (!page.more || page.chunks.length === 0) {
+        return;
+      }
+      after = page.chunks[page.chunks.length - 1];
+    }
+  }
+
   ping(): Promise<"PONG"> {
     return this.withClient(async (client) => await client.ping());
   }
 
-  info(): Promise<ChunkInfo> {
-    return this.withClient(async (client) => await client.info());
-  }
-
-  get(x: number, y: number): Promise<string | null> {
-    return this.withClient(async (client) => await client.get(x, y));
-  }
-
-  set(x: number, y: number, bits: string): Promise<void> {
-    return this.withClient(async (client) => await client.set(x, y, bits));
-  }
-
-  unset(x: number, y: number): Promise<void> {
-    return this.withClient(async (client) => await client.unset(x, y));
-  }
-
-  mset(blocks: Array<{ x: number; y: number; bits: string }>): Promise<void> {
-    return this.withClient(async (client) => await client.mset(blocks));
-  }
-
-  mget(blocks: Array<{ x: number; y: number }>): Promise<Array<string | null>> {
-    return this.withClient(async (client) => await client.mget(blocks));
-  }
-
-  chunkExists(cx: number, cy: number): Promise<boolean> {
-    return this.withClient(async (client) => await client.chunkExists(cx, cy));
-  }
-
-  getChunk(cx: number, cy: number, options: ChunkGetOptions = {}): Promise<Buffer> {
-    return this.withClient(async (client) => await client.getChunk(cx, cy, options));
-  }
-
-  getChunkState(cx: number, cy: number, options: ChunkGetOptions = {}): Promise<ChunkChunkState> {
-    return this.withClient(async (client) => await client.getChunkState(cx, cy, options));
-  }
-
-  putChunk(cx: number, cy: number, payload: Buffer, options: ChunkPutOptions = {}): Promise<ChunkMutationResult> {
-    return this.withClient(async (client) => await client.putChunk(cx, cy, payload, options));
-  }
-
-  putChunkState(
-    cx: number,
-    cy: number,
-    state: ChunkChunkStateInput,
-    options: ChunkPutOptions = {},
-  ): Promise<ChunkMutationResult> {
-    return this.withClient(async (client) => await client.putChunkState(cx, cy, state, options));
-  }
-
-  chunkScan(limit: number, cursor?: ChunkCoordPair): Promise<ChunkScanResult> {
-    return this.withClient(async (client) => await client.chunkScan(limit, cursor));
-  }
-
-  chunkRange(
-    cx0: number,
-    cy0: number,
-    cx1: number,
-    cy1: number,
-    options: ChunkGetOptions = {},
-  ): Promise<ChunkRangeEntry[]> {
-    return this.withClient(async (client) => await client.chunkRange(cx0, cy0, cx1, cy1, options));
-  }
-
-  chunkRadius(
-    cx: number,
-    cy: number,
-    radiusChunks: number,
-    options: ChunkGetOptions = {},
-  ): Promise<ChunkRangeEntry[]> {
-    return this.withClient(async (client) => await client.chunkRadius(cx, cy, radiusChunks, options));
-  }
-
-  chunkVersion(cx: number, cy: number): Promise<bigint> {
-    return this.withClient(async (client) => await client.chunkVersion(cx, cy));
-  }
-
-  chunkBatch(
-    cx: number,
-    cy: number,
-    operations: ChunkBatchOperation[],
-    options: { ifVersion?: bigint } = {},
-  ): Promise<ChunkMutationResult> {
-    return this.withClient(async (client) => await client.chunkBatch(cx, cy, operations, options));
-  }
-
-  walFlush(): Promise<void> {
-    return this.withClient(async (client) => await client.walFlush());
+  flushWal(): Promise<void> {
+    return this.withClient(async (client) => await client.flushWal());
   }
 
   metrics(): Promise<string> {
     return this.withClient(async (client) => await client.metrics());
+  }
+
+  // A table statement changes the schema every pooled connection cached.
+  private async tableStatement(name: string, statement: (client: ChunkClient) => Promise<void>): Promise<void> {
+    try {
+      await this.withClient(statement);
+    } finally {
+      this.clearSchemaCache(name);
+    }
   }
 
   private createClient(): ChunkClient {

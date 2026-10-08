@@ -1,181 +1,243 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import net from "node:net";
 
 import {
   ChunkAuthError,
+  ChunkBits,
   ChunkClient,
   ChunkProtocolError,
-  ChunkTimeoutError,
-  connect,
+  ChunkServerError,
+  ChunkVersionMismatchError,
   connectUri,
+  type ChunkClient as Client,
 } from "../src/index";
 import { startServer } from "./helpers";
 
-// A listener that answers every line with `reply` (or never, when null).
-async function fakeServer(reply: string | null): Promise<{ port: number; close(): void }> {
-  const holder = net.createServer((socket) => {
-    socket.on("data", () => {
-      if (reply !== null) {
-        socket.write(reply);
-      }
-    });
-  });
-  const port = await new Promise<number>((resolve, reject) => {
-    holder.once("error", reject);
-    holder.listen(0, "127.0.0.1", () => {
-      const address = holder.address();
-      if (address === null || typeof address === "string") {
-        reject(new Error("failed to get dummy server address"));
-        return;
-      }
-      resolve(address.port);
-    });
-  });
-  return { port, close: () => holder.close() };
+function serverError(code: string, message?: RegExp) {
+  return (error: unknown) =>
+    error instanceof ChunkServerError && error.serverCode === code && (message === undefined || message.test(error.serverMessage));
 }
 
-test("ping, close, and the HELLO reply", async () => {
+// A table of every column type.
+async function createKinds(client: Client): Promise<void> {
+  await client.createTable("kinds", {
+    columns: [
+      { name: "id", type: "u10", required: true },
+      { name: "temp", type: "i8", nullable: true },
+      { name: "solid", type: "bool" },
+      { name: "h", type: "f32" },
+      { name: "d", type: "f64" },
+      { name: "wide", type: "u64" },
+      { name: "neg", type: "i64" },
+      { name: "mask", type: "bits(3)", nullable: true },
+      { name: "name", type: "text(16)", nullable: true },
+      { name: "blob", type: "bytes(8)" },
+      { name: "light", type: "u4", default: 15 },
+    ],
+    chunk: { width: 4, height: 4 },
+  });
+}
+
+test("HELLO 3, ping, FLUSH WAL, SHOW METRICS and the default table", async () => {
   const server = await startServer();
   try {
     const client = await connectUri(server.uri);
+    const info = client.serverInfo();
+    assert.ok(info !== null);
+    assert.equal(info.protocol, 3);
+    assert.equal(info.maxParameters, 65535);
+    assert.equal(info.maxAreaChunks, 256);
+    assert.equal(info.maxScanLimit, 1024);
+    assert.ok(info.maxLineBytes > 0 && info.maxResponseBytes > 0 && info.serverVersion !== "");
     assert.equal(await client.ping(), "PONG");
-    const hello = client.serverInfo();
-    assert.ok(hello !== null);
-    assert.equal(hello.protocol, 2);
-    assert.ok(hello.capabilities.includes("zrle"));
-    assert.equal(hello.maxAreaChunks, 256);
-    assert.equal(hello.maxBatchOps, 1024);
-    assert.ok(hello.table !== null);
-    assert.equal(hello.table.name, "default");
-    assert.equal(hello.table.blockBits, 16);
+    await client.flushWal();
+    assert.match(await client.metrics(), /^# (HELP|TYPE) /m);
+    assert.deepEqual(await client.listTables(), ["default"]);
+    assert.equal(client.defaultTable(), "default");
+
+    // The default table: one bits(16) column.
+    const schema = await client.describe();
+    assert.equal(schema.table, "default");
+    assert.deepEqual(schema.columns.map((column) => column.typeName), ["bits(16)"]);
+    const version = await client.setBlock(0, 0, { bits: ChunkBits.from("1011001110110011") });
+    assert.equal(typeof version, "bigint");
+    const row = await client.getBlock(0, 0);
+    assert.ok(row !== null && row.bits instanceof ChunkBits);
+    assert.equal(row.bits.toString(), "1011001110110011");
+    assert.equal(await client.getBlock(1, 0), null);
     await client.close();
   } finally {
     await server.stop();
   }
 });
 
-test("get and mget return null for unset blocks and bits for explicit zero", async () => {
+test("typed values round-trip through blocks", async () => {
   const server = await startServer();
   try {
-    const client = await connectUri(server.uri);
+    const client = await connectUri(`${server.uri}kinds`);
+    await createKinds(client);
+    assert.equal(client.defaultTable(), "kinds");
 
-    assert.equal(await client.get(0, 0), null);
-    await client.set(0, 0, "1011001110110011");
-    assert.equal(await client.get(0, 0), "1011001110110011");
+    const values = {
+      id: 1023,
+      temp: -128,
+      solid: true,
+      h: 0.1,
+      d: -2e-300,
+      wide: (1n << 64n) - 1n,
+      neg: -(1n << 63n),
+      mask: ChunkBits.from("101"),
+      name: "it's ünïcødé",
+      blob: Buffer.from([0x00, 0x0d, 0x0a, 0x24, 0x2d, 0x31, 0x0d, 0x0a]),
+    };
+    await client.setBlock(-5, 7, values);
+    const row = await client.getBlock(-5, 7);
+    assert.deepEqual(row, { ...values, h: Math.fround(0.1), light: 15 });
 
-    await client.set(1, 0, "0000000000000000");
-    assert.equal(await client.get(1, 0), "0000000000000000");
-    assert.deepEqual(await client.mget([{ x: 0, y: 0 }, { x: 2, y: 0 }, { x: 1, y: 0 }]), [
-      "1011001110110011",
-      null,
-      "0000000000000000",
-    ]);
-
-    await client.unset(1, 0);
-    assert.equal(await client.get(1, 0), null);
-    await client.close();
-  } finally {
-    await server.stop();
-  }
-});
-
-test("getChunk, getChunkState, and putChunk round-trip binary chunks", async () => {
-  const server = await startServer();
-  try {
-    const client = await connectUri(server.uri);
-    const table = client.serverInfo()!.table!;
-    const blockCount = table.chunkWidthBlocks * table.chunkHeightBlocks;
-    const payloadBytes = Math.ceil((blockCount * table.blockBits) / 8);
-    const presenceBytes = Math.ceil(blockCount / 8);
-
-    // An absent chunk reads as zeros with an empty presence bitmap.
-    assert.deepEqual(await client.getChunk(2, 3), Buffer.alloc(payloadBytes));
-    const absent = await client.getChunkState(2, 3);
-    assert.equal(absent.exists, false);
-    assert.deepEqual(absent.presence, Buffer.alloc(presenceBytes));
-
-    const payload = Buffer.alloc(payloadBytes);
-    for (let i = 0; i < payloadBytes; i += 1) payload[i] = (i * 37 + 11) & 0xff;
-    const written = await client.putChunk(2, 3, payload);
-    assert.equal(written.ok, true);
-    assert.equal(written.version, await client.chunkVersion(2, 3));
-    assert.equal(await client.chunkExists(2, 3), true);
-    assert.deepEqual(await client.getChunk(2, 3), payload);
-    const state = await client.getChunkState(2, 3);
-    assert.equal(state.exists, true);
-    assert.deepEqual(state.payload, payload);
-    assert.deepEqual(state.presence, Buffer.alloc(presenceBytes, 0xff));
-    assert.equal(await client.get(table.chunkWidthBlocks * 2, table.chunkHeightBlocks * 3), payload.subarray(0, 2).reduce(
-      (bits, byte) => bits + [...Array(8).keys()].map((bit) => (byte >> bit) & 1).join(""),
-      "",
-    ));
-
-    // An empty presence bitmap leaves the chunk absent even though payload
-    // bytes were sent (they are stored as zero).
-    await client.putChunkState(4, 3, { payload, presence: Buffer.alloc(presenceBytes) });
-    assert.equal(await client.chunkExists(4, 3), false);
-    assert.deepEqual(await client.getChunk(4, 3), Buffer.alloc(payloadBytes));
-
-    // Writing back what getChunkState returned reproduces the state.
-    const sparse = { payload: Buffer.from(payload), presence: Buffer.alloc(presenceBytes) };
-    sparse.presence[0] = 0b00000001;
-    sparse.payload.fill(0, 2);
-    await client.putChunkState(5, 3, sparse);
-    const sparseBack = await client.getChunkState(5, 3);
-    assert.deepEqual(sparseBack.payload, sparse.payload);
-    assert.deepEqual(sparseBack.presence, sparse.presence);
-    assert.equal(await client.get(table.chunkWidthBlocks * 5 + 1, table.chunkHeightBlocks * 3), null);
-
-    // Sizes are checked before anything is sent; the connection stays usable.
-    await assert.rejects(client.putChunk(6, 3, Buffer.alloc(payloadBytes + 1)), /CHUNKPUT payload must be/);
-    await assert.rejects(
-      client.putChunkState(6, 3, { payload, presence: Buffer.alloc(1) }),
-      /CHUNKPUT STATE presence must be/,
-    );
-    await assert.rejects(client.putChunk(0.5, 3, payload), /CHUNKPUT cx must be a safe integer/);
-    assert.equal(await client.ping(), "PONG");
-
-    await client.close();
-  } finally {
-    await server.stop();
-  }
-});
-
-test("zrle transfers decode to the same bytes", async () => {
-  const server = await startServer();
-  try {
-    const client = await connectUri(server.uri);
-    const table = client.serverInfo()!.table!;
-    const blockCount = table.chunkWidthBlocks * table.chunkHeightBlocks;
-    const payloadBytes = Math.ceil((blockCount * table.blockBits) / 8);
-
-    // A sparse chunk compresses; a dense one is sent uncompressed.
-    const sparse = Buffer.alloc(payloadBytes);
-    sparse[7] = 0x5a;
-    const dense = Buffer.alloc(payloadBytes);
-    for (let i = 0; i < payloadBytes; i += 1) dense[i] = (i * 131 + 7) | 1;
-    await client.putChunk(0, 0, sparse, { zrle: true });
-    await client.putChunk(1, 0, dense, { zrle: true });
-
-    assert.deepEqual(await client.getChunk(0, 0, { zrle: true }), sparse);
-    assert.deepEqual(await client.getChunk(1, 0, { zrle: true }), dense);
-    const state = await client.getChunkState(0, 0, { zrle: true });
-    assert.deepEqual(state, await client.getChunkState(0, 0));
-    await client.close();
-  } finally {
-    await server.stop();
-  }
-});
-
-test("connectUri explicit overrides win over URI values", async () => {
-  const server = await startServer();
-  try {
-    const client = await connectUri("chunk://wrong-token@127.0.0.1:1/", {
-      host: server.host,
-      port: server.port,
-      token: server.token,
+    // A new block takes defaults: NULL, zero or empty, and DEFAULT.
+    await client.setBlock(1, 1, { id: 1 });
+    assert.deepEqual(await client.getBlock(1, 1), {
+      id: 1,
+      temp: null,
+      solid: false,
+      h: 0,
+      d: 0,
+      wide: 0n,
+      neg: 0n,
+      mask: null,
+      name: null,
+      blob: Buffer.alloc(0),
+      light: 15,
     });
+
+    // NULL, inf and nan; text with CR and LF; bytes of zeros.
+    await client.setBlock(1, 1, {
+      temp: null,
+      h: Number.NEGATIVE_INFINITY,
+      d: Number.NaN,
+      name: "a\r\nb",
+      blob: Buffer.alloc(8),
+    });
+    const special = await client.getBlock(1, 1, { columns: ["d", "h", "name", "blob", "temp"] });
+    assert.ok(special !== null);
+    assert.deepEqual(Object.keys(special), ["d", "h", "name", "blob", "temp"]);
+    assert.ok(Number.isNaN(special.d));
+    assert.equal(special.h, Number.NEGATIVE_INFINITY);
+    assert.equal(special.name, "a\r\nb");
+    assert.deepEqual(special.blob, Buffer.alloc(8));
+    assert.equal(special.temp, null);
+
+    // An empty text value of a NULL column stays empty.
+    await client.setBlock(1, 1, { name: "" });
+    assert.deepEqual(await client.getBlock(1, 1, { columns: ["name"] }), { name: "" });
+
+    // deleteBlock answers the chunk version; the block reads as absent.
+    const deleted = await client.deleteBlock(-5, 7);
+    assert.equal(typeof deleted, "bigint");
+    assert.equal(await client.getBlock(-5, 7), null);
+
+    // The server refuses what the client cannot check, and the connection
+    // stays usable.
+    await assert.rejects(client.setBlock(2, 2, { temp: 1 }), serverError("INVALID_ARGUMENT", /REQUIRED/));
+    await assert.rejects(client.getBlock(0, 0, { table: "nowhere" }), serverError("NO_TABLE"));
+    // The client refuses values that do not fit before sending them.
+    await assert.rejects(client.setBlock(2, 2, { id: 1024 }), ChunkProtocolError);
+    await assert.rejects(client.setBlock(2, 2, { name: "x".repeat(17) }), /at most 16 bytes/);
+    await assert.rejects(client.setBlock(2, 2, { id: 1, solid: null }), /cannot be NULL/);
+    await assert.rejects(client.setBlock(2, 2, { nope: 1 }), /no column nope/);
+    assert.equal(await client.ping(), "PONG");
+    await client.close();
+  } finally {
+    await server.stop();
+  }
+});
+
+test("IF VERSION writes only at the version, else VERSION_MISMATCH", async () => {
+  const server = await startServer();
+  try {
+    const client = await connectUri(server.uri);
+    await createKinds(client);
+    const options = { table: "kinds" };
+    const first = await client.setBlock(0, 0, { id: 1 }, options);
+    // Another block of the chunk changes its version.
+    const second = await client.setBlock(3, 3, { id: 2 }, options);
+    assert.notEqual(second, first);
+
+    await assert.rejects(client.setBlock(0, 0, { id: 9 }, { ...options, ifVersion: first }), (error: unknown) => {
+      assert.ok(error instanceof ChunkVersionMismatchError);
+      assert.equal(error.currentVersion, second);
+      return true;
+    });
+    assert.deepEqual(await client.getBlock(0, 0, { ...options, columns: ["id"] }), { id: 1 });
+    const third = await client.setBlock(0, 0, { id: 9 }, { ...options, ifVersion: second });
+    await assert.rejects(client.deleteBlock(0, 0, { ...options, ifVersion: second }), ChunkVersionMismatchError);
+    await client.deleteBlock(0, 0, { ...options, ifVersion: third });
+    assert.equal(await client.getBlock(0, 0, options), null);
+    await client.close();
+  } finally {
+    await server.stop();
+  }
+});
+
+test("pipelined statements keep their order and replies", async () => {
+  const server = await startServer();
+  try {
+    const client = new ChunkClient({ uri: `${server.uri}kinds`, pipelineDepth: 16 });
+    await createKinds(client);
+    client.clearSchemaCache();
+    // Writes and reads issued without awaiting, from a cold schema cache.
+    const pending: Array<Promise<unknown>> = [];
+    for (let i = 0; i < 40; i += 1) {
+      pending.push(client.setBlock(i, 0, { id: i, name: `n${i}` }));
+      pending.push(client.getBlock(i, 0, { columns: ["id", "name"] }));
+      if (i % 5 === 0) {
+        pending.push(client.deleteBlock(i, 0));
+        pending.push(client.getBlock(i, 0));
+      }
+    }
+    const results = await Promise.all(pending);
+    let at = 0;
+    for (let i = 0; i < 40; i += 1) {
+      assert.equal(typeof results[at], "bigint");
+      assert.deepEqual(results[at + 1], { id: i, name: `n${i}` });
+      at += 2;
+      if (i % 5 === 0) {
+        assert.equal(typeof results[at], "bigint");
+        assert.equal(results[at + 1], null);
+        at += 2;
+      }
+    }
+    await client.close();
+  } finally {
+    await server.stop();
+  }
+});
+
+test("execute sends a statement with parameter frames", async () => {
+  const server = await startServer();
+  try {
+    const client = await connectUri(server.uri);
+    await createKinds(client);
+    const reply = await client.execute("SET BLOCK 4 4 IN kinds id = $1, name = $2, blob = $3", [
+      Buffer.from("0700000000000000", "hex"),
+      null,
+      Uint8Array.of(0x0d, 0x0a, 0x00),
+    ]);
+    assert.equal(reply.type, "integer");
+    assert.deepEqual(await client.execute("GET BLOCK 4 4 FROM kinds COLUMNS id, name, blob"), {
+      type: "array",
+      items: [{ type: "integer", value: 7n }, { type: "null" }, { type: "bulk", value: Buffer.from([0x0d, 0x0a, 0x00]) }],
+    });
+    // A parameter is never part of the statement.
+    await client.execute("SET BLOCK 4 4 IN kinds name = $1", [Buffer.from("'; DROP TABLE t")]);
+    assert.deepEqual(await client.listTables(), ["default", "kinds"]);
+    await assert.rejects(client.execute("GET BLOCK 0 0 FROM kinds;"), serverError("SYNTAX"));
+    // A frame longer than its column holds is refused unread and the server
+    // closes the connection; the next statement reconnects.
+    await assert.rejects(
+      client.execute("SET BLOCK 4 4 IN kinds name = $1", [Buffer.alloc(17)]),
+      serverError("BAD_REQUEST", /longer than its column holds/),
+    );
     assert.equal(await client.ping(), "PONG");
     await client.close();
   } finally {
@@ -188,66 +250,22 @@ test("a wrong or missing token fails the connect with a typed auth error", async
   try {
     for (const [token, code] of [["wrong-token", "AUTH_FAILED"], [undefined, "AUTH_REQUIRED"]] as const) {
       const client = new ChunkClient({ host: server.host, port: server.port, token });
-      await assert.rejects(() => client.connect(), (error: unknown) => {
+      await assert.rejects(client.connect(), (error: unknown) => {
         assert.ok(error instanceof ChunkAuthError);
-        assert.equal((error as ChunkAuthError).serverCode, code);
-        assert.equal((error as ChunkAuthError).phase, "auth");
+        assert.equal(error.serverCode, code);
+        assert.equal(error.phase, "auth");
         return true;
       });
       await client.close();
     }
+    const overridden = await connectUri("chunk://wrong-token@127.0.0.1:1/", {
+      host: server.host,
+      port: server.port,
+      token: server.token,
+    });
+    assert.equal(await overridden.ping(), "PONG");
+    await overridden.close();
   } finally {
     await server.stop();
-  }
-});
-
-test("a server without protocol 2 is reported as such", async () => {
-  const fake = await fakeServer("-ERR UNKNOWN_COMMAND HELLO\r\n");
-  try {
-    await assert.rejects(
-      () => connect({ host: "127.0.0.1", port: fake.port, connectTimeoutMs: 1000 }),
-      (error: unknown) => {
-        assert.ok(error instanceof ChunkProtocolError);
-        assert.match((error as Error).message, /does not speak protocol 2/);
-        return true;
-      },
-    );
-  } finally {
-    fake.close();
-  }
-});
-
-test("a 1.x server that requires a token is reported as such", async () => {
-  // It answers every command before AUTH with AUTH_REQUIRED, also a HELLO
-  // that carries the token.
-  const fake = await fakeServer("-ERR AUTH_REQUIRED use AUTH <token>\r\n");
-  try {
-    await assert.rejects(
-      () => connect({ host: "127.0.0.1", port: fake.port, token: "tok", connectTimeoutMs: 1000 }),
-      (error: unknown) => error instanceof ChunkProtocolError && /does not speak protocol 2/.test((error as Error).message),
-    );
-    // Without a token the reply is ambiguous: it stays an auth error.
-    await assert.rejects(
-      () => connect({ host: "127.0.0.1", port: fake.port, connectTimeoutMs: 1000 }),
-      (error: unknown) => error instanceof ChunkAuthError && error.serverCode === "AUTH_REQUIRED",
-    );
-  } finally {
-    fake.close();
-  }
-});
-
-test("command timeout rejects and closes hanging connection", async () => {
-  const fake = await fakeServer(null);
-  try {
-    await assert.rejects(
-      () => connect({ host: "127.0.0.1", port: fake.port, commandTimeoutMs: 100, connectTimeoutMs: 1000 }),
-      (error: unknown) => {
-        assert.ok(error instanceof ChunkTimeoutError);
-        assert.equal((error as ChunkTimeoutError).command, "HELLO");
-        return true;
-      },
-    );
-  } finally {
-    fake.close();
   }
 });

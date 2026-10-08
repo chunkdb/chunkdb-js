@@ -9,14 +9,7 @@ import {
   ChunkPool,
   connectPool,
 } from "../src/index";
-
-// The HELLO reply of a server with no default table.
-const FAKE_HELLO = (() => {
-  const body =
-    "protocol=2\nserver_version=test\ncapabilities=zrle\nmax_line_bytes=65536\n" +
-    "max_area_chunks=256\nmax_response_bytes=67108864\nmax_scan_limit=1024\nmax_batch_ops=1024\n";
-  return `$${Buffer.byteLength(body)}\r\n${body}\r\n`;
-})();
+import { FAKE_HELLO } from "./fake-server";
 
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -92,7 +85,7 @@ async function startPingServer(options: { autoRespond?: boolean } = {}): Promise
           }
           continue;
         }
-        if (line.startsWith("HELLO 2")) {
+        if (line.startsWith("HELLO 3")) {
           socket.write(FAKE_HELLO);
           continue;
         }
@@ -369,7 +362,7 @@ test("ChunkClient clears stale buffered data after forced disconnect and can rec
         }
         const line = buffer.slice(0, lineEnd).replace(/\r$/, "");
         buffer = buffer.slice(lineEnd + 1);
-        if (line.startsWith("HELLO 2")) {
+        if (line.startsWith("HELLO 3")) {
           socket.write(FAKE_HELLO);
           continue;
         }

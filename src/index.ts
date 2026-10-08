@@ -1,37 +1,63 @@
 export { ChunkClient, connect, connectUri } from "./client";
 export { ChunkPool, connectPool } from "./pool";
+export { emptyChunk } from "./chunk-form";
 export {
   ChunkAuthError,
   ChunkConnectionError,
   ChunkError,
   ChunkProtocolError,
+  ChunkSchemaMismatchError,
   ChunkServerError,
   ChunkTimeoutError,
   ChunkTlsError,
+  ChunkVersionMismatchError,
 } from "./errors";
-export { parseFrame, parseInfoPayload, serializeCommand } from "./protocol";
-export type { ArrayFrame, BulkFrame, ChunkFrame, SimpleFrame, ErrorFrame, NullFrame } from "./protocol";
-export { formatChunkUri, parseChunkUri, tableFromUriPath } from "./uri";
-export { zrleCompress, zrleDecompress } from "./zrle";
+export { encodeStatement, parseReply } from "./protocol";
 export type {
-  ChunkBatchOperation,
+  ArrayReply,
+  BooleanReply,
+  BulkReply,
+  ChunkParameter,
+  ChunkReply,
+  DoubleReply,
+  ErrorReply,
+  IntegerReply,
+  MapReply,
+  NullReply,
+  SimpleReply,
+} from "./protocol";
+export { ChunkBits, encodeParameter, formatColumnType, parseColumnType } from "./values";
+export { formatChunkUri, parseChunkUri, tableFromUriPath } from "./uri";
+export type {
+  ChunkArea,
+  ChunkAreaEntry,
+  ChunkAreaRawEntry,
   ChunkCheckpointCompression,
-  ChunkChunkState,
-  ChunkChunkStateInput,
   ChunkClientOptions,
-  ChunkCoordPair,
+  ChunkColumn,
+  ChunkColumnDefinition,
+  ChunkColumnType,
+  ChunkCoord,
   ChunkDurabilityMode,
   ChunkErrorPhase,
-  ChunkGetOptions,
-  ChunkHelloInfo,
-  ChunkInfo,
-  ChunkMutationResult,
   ChunkPoolOptions,
-  ChunkPutOptions,
-  ChunkRangeEntry,
-  ChunkScanResult,
-  ChunkTableCreateOptions,
-  ChunkTableInfo,
+  ChunkReadOptions,
+  ChunkRow,
+  ChunkScanOptions,
+  ChunkScanPage,
+  ChunkServerInfo,
+  ChunkSetOption,
+  ChunkSize,
+  ChunkState,
+  ChunkStateInput,
+  ChunkTableChange,
+  ChunkTableDefinition,
+  ChunkTableOption,
   ChunkTableOptions,
+  ChunkTableOptionValues,
+  ChunkTableSchema,
+  ChunkTypeConversion,
+  ChunkValue,
+  ChunkWriteOptions,
   ParsedChunkUri,
 } from "./types";

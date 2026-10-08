@@ -4,32 +4,34 @@ import assert from "node:assert/strict";
 import { connectPool } from "../src/index";
 import { startServer } from "./helpers";
 
-test("ChunkPool handles concurrent authenticated operations against chunkdb_server", async () => {
+test("ChunkPool runs concurrent typed operations against chunkdb_server", async () => {
   const server = await startServer();
   try {
-    const pool = await connectPool({
-      uri: server.uri,
-      maxConnections: 2,
-      minConnections: 1,
+    const pool = await connectPool({ uri: `${server.uri}cells`, maxConnections: 2, minConnections: 1 });
+    await pool.createTable("cells", {
+      columns: [
+        { name: "n", type: "u16" },
+        { name: "label", type: "text(8)", nullable: true },
+      ],
+      chunk: { width: 8, height: 8 },
     });
+    await Promise.all(Array.from({ length: 16 }, async (_, i) => await pool.setBlock(i, 0, { n: i, label: `c${i}` })));
+    const rows = await Promise.all(Array.from({ length: 16 }, async (_, i) => await pool.getBlock(i, 0)));
+    rows.forEach((row, i) => assert.deepEqual(row, { n: i, label: `c${i}` }));
+    assert.equal(await pool.getBlock(16, 0), null);
 
-    const bitsFor = (index: number) => `${String(index % 2).repeat(8)}${String((index + 1) % 2).repeat(8)}`;
+    // A table statement through the pool clears every pooled connection's
+    // cached schema.
+    await pool.alterTable("cells", { kind: "renameColumn", column: "label", to: "name" });
+    const renamed = await Promise.all(Array.from({ length: 6 }, async (_, i) => await pool.getBlock(i, 0)));
+    renamed.forEach((row, i) => assert.deepEqual(row, { n: i, name: `c${i}` }));
 
-    await Promise.all(
-      Array.from({ length: 8 }, async (_, index) => {
-        await pool.set(index, 0, bitsFor(index));
-      }),
-    );
-
-    const blocks = await Promise.all(
-      Array.from({ length: 8 }, async (_, index) => await pool.get(index, 0)),
-    );
-
-    for (const [index, block] of blocks.entries()) {
-      assert.equal(block, bitsFor(index));
+    const chunks = [];
+    for await (const coord of pool.scanAllChunks({ limit: 1 })) {
+      chunks.push(coord);
     }
-    assert.equal(await pool.get(8, 0), null);
-
+    assert.deepEqual(chunks, [{ cx: 0, cy: 0 }, { cx: 1, cy: 0 }]);
+    assert.equal((await pool.getChunk(1, 0)).columns.name[0], "c8");
     assert.equal(await pool.ping(), "PONG");
     await pool.close();
   } finally {

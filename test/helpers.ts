@@ -59,127 +59,41 @@ export function resolveServerBinary(
   );
 }
 
-// Every command family exercised by the integration suite, probed after
-// `HELLO 2` (which a server without protocol 2 refuses). Deliberately invalid
-// arguments keep the probe side-effect-free while still distinguishing an
-// implemented command (INVALID_ARGUMENT) from an absent one (UNKNOWN_COMMAND).
-// CHUNKPUT is not probed: a malformed CHUNKPUT header closes the connection,
-// and protocol 2 itself implies it.
-export const REQUIRED_COMMAND_PROBES = [
-  "PING extra",
-  "INFO extra",
-  "GET",
-  "SET",
-  "UNSET",
-  "MGET",
-  "MSET",
-  "CHUNKEXISTS",
-  "CHUNKGET",
-  "CHUNKSCAN",
-  "CHUNKRANGE",
-  "CHUNKRADIUS",
-  "CHUNKVER",
-  "CHUNKBATCH",
-  "WALFLUSH extra",
-  "METRICS extra",
-  "TABLES extra",
-  "TABLEINFO",
-  "USE",
-  "TABLECREATE",
-  "TABLESET",
-  "TABLEDROP",
-] as const;
-
-export function missingCommandFromProbe(
-  probe: string,
-  responseLine: string,
-): string | undefined {
-  return responseLine.startsWith("-ERR UNKNOWN_COMMAND")
-    ? probe.split(" ", 1)[0]
-    : undefined;
+/**
+ * Why the first reply line of a `HELLO 3` makes a server unusable for the
+ * suite, or undefined when it answered the HELLO map.
+ */
+export function helloProbeFailure(firstLine: string): string | undefined {
+  if (firstLine.startsWith("%")) {
+    return undefined;
+  }
+  return (
+    `server refused HELLO 3 during the compatibility probe (${firstLine}); it does not speak protocol 3. ` +
+    "Rebuild the current workspace server with `npm run test:server`, or set CHUNKDB_SERVER_BIN."
+  );
 }
 
-async function assertServerSupportsRequiredCommands(
-  host: string,
-  port: number,
-  token: string,
-): Promise<void> {
+async function assertServerSpeaksProtocol3(host: string, port: number, token: string): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     const socket = net.connect({ host, port });
     let buffer = "";
-    let greeted = false;
-    let probeIndex = 0;
-    let pendingBulkBytes: number | undefined;
-    const fail = (message: string) => {
-      socket.destroy();
-      reject(new Error(message));
-    };
-    socket.setEncoding("utf8");
+    socket.setEncoding("latin1");
     socket.once("error", reject);
     socket.once("connect", () => {
-      socket.write(`HELLO 2 AUTH ${token}\r\n`);
+      socket.write(`HELLO 3 AUTH ${token}\r\n`);
     });
     socket.on("data", (chunk: string) => {
       buffer += chunk;
-      while (true) {
-        if (pendingBulkBytes !== undefined) {
-          if (buffer.length < pendingBulkBytes + 2) {
-            return;
-          }
-          buffer = buffer.slice(pendingBulkBytes + 2);
-          pendingBulkBytes = undefined;
-          if (!greeted) {
-            greeted = true;
-            socket.write(`${REQUIRED_COMMAND_PROBES[probeIndex]}\r\n`);
-            continue;
-          }
-          probeIndex += 1;
-          if (probeIndex === REQUIRED_COMMAND_PROBES.length) {
-            socket.end();
-            resolve();
-            return;
-          }
-          socket.write(`${REQUIRED_COMMAND_PROBES[probeIndex]}\r\n`);
-          continue;
-        }
-        const newline = buffer.indexOf("\n");
-        if (newline === -1) {
-          return;
-        }
-        const line = buffer.slice(0, newline).replace(/\r$/, "");
-        buffer = buffer.slice(newline + 1);
-        if (!greeted && !line.startsWith("$")) {
-          fail(
-            `server refused HELLO 2 during compatibility probe (${line}); it does not speak ` +
-              "protocol 2. Rebuild the current workspace server with `npm run test:server`.",
-          );
-          return;
-        }
-        const probe = REQUIRED_COMMAND_PROBES[probeIndex];
-        const missing = missingCommandFromProbe(probe, line);
-        if (missing !== undefined) {
-          fail(
-            "chunkdb server is missing protocol capabilities required by the integration suite " +
-              `(${missing}). Rebuild the current workspace server with \`npm run test:server\`.`,
-          );
-          return;
-        }
-        if (line.startsWith("$")) {
-          const length = Number.parseInt(line.slice(1), 10);
-          if (!Number.isSafeInteger(length) || length < 0) {
-            fail(`invalid bulk response during compatibility probe: ${line}`);
-            return;
-          }
-          pendingBulkBytes = length;
-          continue;
-        }
-        probeIndex += 1;
-        if (probeIndex === REQUIRED_COMMAND_PROBES.length) {
-          socket.end();
-          resolve();
-          return;
-        }
-        socket.write(`${REQUIRED_COMMAND_PROBES[probeIndex]}\r\n`);
+      const newline = buffer.indexOf("\n");
+      if (newline === -1) {
+        return;
+      }
+      socket.destroy();
+      const failure = helloProbeFailure(buffer.slice(0, newline).replace(/\r$/, ""));
+      if (failure === undefined) {
+        resolve();
+      } else {
+        reject(new Error(failure));
       }
     });
   });
@@ -285,7 +199,7 @@ export async function startServer(options: { tls?: boolean; token?: string } = {
   // the same binary, so a TLS-only mismatch still surfaces there.
   if (!tlsEnabled) {
     try {
-      await assertServerSupportsRequiredCommands(host, port, token);
+      await assertServerSpeaksProtocol3(host, port, token);
     } catch (error) {
       child.kill("SIGKILL");
       fs.rmSync(dataDir, { recursive: true, force: true });
