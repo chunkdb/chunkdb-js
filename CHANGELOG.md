@@ -35,6 +35,14 @@ speaks the `chunkdb` 1.x protocol; the next major version speaks protocol 3
   `currentVersion`) instead of resolving `{ ok: false }`
 
 ### Added
+- Transactions: `transaction(async (tx) => { ... }, { retries? })` on
+  `ChunkClient` and `ChunkPool` runs the callback between `BEGIN` and
+  `COMMIT` and resolves the commit version (null when nothing was written).
+  `tx` has the block, chunk and area methods without `ifVersion`; its reads
+  see one snapshot and its writes apply together. A `CONFLICT` runs the
+  callback again, up to `retries` times (5 by default), then rejects with the
+  new `ChunkConflictError` (`reason`); a callback that throws rolls back. The
+  transaction holds the client's connection until it ends
 - Users API on `ChunkClient` and `ChunkPool`: `createUser`, `setPassword`,
   `setManagesUsers`, `dropUser`, `grant`, `revoke`, `listUsers`; passwords
   are sent only as SCRAM verifiers (`verifierIterations`, at least 4096).

@@ -23,6 +23,8 @@ import type {
   ChunkTableChange,
   ChunkTableDefinition,
   ChunkTableSchema,
+  ChunkTransaction,
+  ChunkTransactionOptions,
   ChunkUser,
   ChunkValue,
   ChunkWriteOptions,
@@ -259,6 +261,14 @@ export class ChunkPool {
 
   getAreaRaw(area: ChunkArea, options: ChunkReadOptions = {}): Promise<ChunkAreaRawEntry[]> {
     return this.withClient(async (client) => await client.getAreaRaw(area, options));
+  }
+
+  /**
+   * `ChunkClient.transaction` on one pooled connection, which the
+   * transaction holds until it ends; other calls use other connections.
+   */
+  transaction(fn: (tx: ChunkTransaction) => unknown, options: ChunkTransactionOptions = {}): Promise<bigint | null> {
+    return this.withClient(async (client) => await client.transaction(fn, options));
   }
 
   scanChunks(options: ChunkScanOptions = {}): Promise<ChunkScanPage> {

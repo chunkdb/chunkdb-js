@@ -12,24 +12,7 @@ import {
   ChunkVersionMismatchError,
   connect,
 } from "../src/index";
-import { FAKE_HELLO, scramResponder, startFakeServer, type FakeRequest } from "./fake-server";
-
-// DESCRIBE of `t (id u10 REQUIRED, h <hType>)`, 4 x 4 blocks.
-function describeReply(hType: string): string {
-  const bulk = (text: string) => `$${Buffer.byteLength(text)}\r\n${text}\r\n`;
-  const column = (id: number, name: string, type: string, required: boolean) =>
-    `%6\r\n${bulk("id")}:${id}\r\n${bulk("name")}${bulk(name)}${bulk("type")}${bulk(type)}${bulk("null")}#f\r\n` +
-    `${bulk("required")}${required ? "#t" : "#f"}\r\n${bulk("default")}_\r\n`;
-  return (
-    `%6\r\n${bulk("table")}${bulk("t")}${bulk("version")}:1\r\n${bulk("columns")}*2\r\n` +
-    column(1, "id", "u10", true) +
-    column(2, "h", hType, false) +
-    `${bulk("chunk")}*2\r\n:4\r\n:4\r\n${bulk("large")}*2\r\n:8\r\n:8\r\n${bulk("options")}%6\r\n` +
-    `${bulk("durability_mode")}${bulk("relaxed")}${bulk("checkpoint_updates")}:256\r\n` +
-    `${bulk("checkpoint_wal_bytes")}:1048576\r\n${bulk("wal_group_commit_updates")}:8\r\n` +
-    `${bulk("checkpoint_compression")}${bulk("none")}${bulk("var_max_chunk_bytes")}:1048576\r\n`
-  );
-}
+import { FAKE_HELLO, describeReply, scramResponder, startFakeServer, type FakeRequest } from "./fake-server";
 
 function hello(request: FakeRequest): string | null {
   return request.line.startsWith("HELLO 3") ? FAKE_HELLO : null;
