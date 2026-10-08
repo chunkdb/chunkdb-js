@@ -19,7 +19,7 @@ npm install @chunkdb/client
 ```ts
 import { connectUri } from "@chunkdb/client";
 
-const client = await connectUri("chunk://chunk-token@127.0.0.1:4242/world");
+const client = await connectUri("chunk://admin:change-me@127.0.0.1:4242/world");
 
 await client.createTable("world", {
   columns: [
@@ -36,7 +36,7 @@ console.log(await client.getBlock(11, 4)); // null: the block is absent
 await client.close();
 ```
 
-Connecting sends `HELLO 3` with the URI's token; `client.serverInfo()` holds the reply (server version and limits).
+Connecting logs in as the URI's user with SCRAM-SHA-256: the password never crosses the network, and the client checks that the server holds the user's verifier. `%XX` escapes let a password hold `:`, `@` or `/`; the `user` and `password` options win over the URI. Without a user the client sends `HELLO 3` alone, which only a server started with `--auth none` accepts. `client.serverInfo()` holds the reply (server version, limits and `serverSignature`).
 
 Every call names its table: the `table` option, else the client's table (the `table` client option, the URI path, or `"default"`).
 
@@ -102,6 +102,22 @@ console.log(await client.listTables(), await client.describe("land"));
 await client.dropTable("land");
 ```
 
+## Users
+
+```ts
+await client.createUser("bot", "hunter2"); // { managesUsers: true } lets the user manage users
+await client.grant("READ", "world", "bot"); // READ, WRITE or ADMIN; "*" is every table
+await client.revoke("READ", "world", "bot");
+await client.setPassword("bot", "new-password");
+await client.setManagesUsers("bot", false);
+console.log(await client.listUsers()); // [{ name: "admin", managesUsers: true, grants: { "*": "ADMIN" } }, ...]
+await client.dropUser("bot");
+```
+
+- The client computes the SCRAM verifier from the password and sends only the verifier; `verifierIterations` (at least 4096, the default) sets its PBKDF2 iterations. `scramVerifier(password, { iterations? })` computes one for `execute("CREATE USER bot VERIFIER $1", [Buffer.from(verifier)])`.
+- Users may change their own password; everything else needs `MANAGES USERS`. A client keeps logging in with the password it was given.
+- `ADMIN` includes `WRITE`, which includes `READ`; `revoke` takes away the right and those above it. A table the user has no right on reads as absent (`NO_TABLE`).
+
 ## API
 
 `connect(options)`, `connectUri(uri, overrides?)` and `connectPool(options)` open connections. `ChunkClient` methods:
@@ -114,11 +130,12 @@ await client.dropTable("land");
 - `scanChunks({ table?, after?, limit? }): Promise<{ chunks, more }>`, `scanAllChunks({ table?, limit? }): AsyncGenerator<{ cx, cy }>`
 - `createTable(name, { columns, chunk, large?, options? })`, `alterTable(name, change)`, `dropTable(name)`, `listTables()`
 - `describe(table?): Promise<ChunkTableSchema>`, `clearSchemaCache(table?)`
+- `createUser(name, password, { managesUsers? })`, `setPassword(name, password)`, `setManagesUsers(name, managesUsers)`, `dropUser(name)`, `grant(right, table, user)`, `revoke(right, table, user)`, `listUsers(): Promise<ChunkUser[]>`
 - `ping()`, `flushWal()` (resolves once every write acknowledged before is durable), `metrics()` (Prometheus text)
 - `execute(statement, parameters?): Promise<ChunkReply>`: one CQL statement with `$1`..`$n` parameter frames (`Uint8Array` or `null`); `encodeParameter(column, value)` encodes a typed value
 - `serverInfo()`, `defaultTable()`, `uri()`, `connect()`, `close()`
 
-`ChunkPool` has the same data and table methods, plus `withClient(fn)` and `close()`.
+`ChunkPool` has the same data, table and user methods, plus `withClient(fn)` and `close()`.
 
 Table options: `durabilityMode` (`"relaxed"`, `"fsync-wal"`, `"fsync-checkpoint"`), `checkpointUpdates`, `checkpointWalBytes`, `walGroupCommitUpdates`, `checkpointCompression` (`"none"`, `"zrle"`) and `varMaxChunkBytes`.
 
@@ -135,6 +152,7 @@ Table options: `durabilityMode` (`"relaxed"`, `"fsync-wal"`, `"fsync-checkpoint"
 - `ChunkServerError`: an `-ERR` reply, with `serverCode` (`SYNTAX`, `INVALID_ARGUMENT`, `NO_TABLE`, `TABLE_EXISTS`, ...) and `serverMessage`
 - `ChunkVersionMismatchError`: an `ifVersion` write found another version and changed nothing; `currentVersion` is the chunk's version
 - `ChunkSchemaMismatchError`: a chunk form of another schema version than the table's; nothing changed, and `currentSchemaVersion` is the table's
-- `ChunkAuthError`: a wrong (`AUTH_FAILED`) or missing (`AUTH_REQUIRED`) token
+- `ChunkAuthError`: a wrong password or unknown user (`AUTH_FAILED`), or no user for a server that needs one (`AUTH_REQUIRED`)
+- `ChunkPermissionError`: `PERMISSION_DENIED`, the user lacks the right the statement needs; `serverMessage` names it (`WRITE on world`)
 - `ChunkProtocolError`: a value or statement refused before sending, a reply the client cannot read, or a server of another protocol
-- `ChunkConnectionError`, `ChunkTimeoutError`, `ChunkTlsError`
+- `ChunkConnectionError`, `ChunkTimeoutError`, `ChunkTlsError`; a server whose SCRAM signature does not match fails `connect()` with a `ChunkConnectionError` saying it could not prove it knows the password

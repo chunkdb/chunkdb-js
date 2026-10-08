@@ -7,7 +7,10 @@ export interface ParsedChunkUri {
   secure: boolean;
   host: string;
   port: number;
-  token: string;
+  /** The user, or `""` for none. */
+  user: string;
+  /** The password, or `""` for none. */
+  password: string;
   path: string;
 }
 
@@ -15,8 +18,19 @@ export interface ChunkClientOptions {
   host?: string;
   port?: number;
   uri?: string;
-  /** Sent as `HELLO 3 AUTH <token>` when the connection opens. */
-  token?: string;
+  /**
+   * The user to log in as (SCRAM-SHA-256); wins over the URI's. Without a
+   * user the client sends `HELLO 3` alone, which only a server started with
+   * `--auth none` accepts.
+   */
+  user?: string;
+  /** The user's password; wins over the URI's. It never crosses the network. */
+  password?: string;
+  /**
+   * PBKDF2 iterations of the verifiers `createUser` and `setPassword`
+   * compute: at least 4096 (the default).
+   */
+  verifierIterations?: number;
   connectTimeoutMs?: number;
   commandTimeoutMs?: number;
   tls?: boolean;
@@ -54,6 +68,35 @@ export interface ChunkServerInfo {
   maxResponseBytes: number;
   /** The largest `scanChunks` limit. */
   maxScanLimit: number;
+  /**
+   * The SCRAM server-final message (`v=<signature>`), which the client has
+   * checked; null for a login without a user.
+   */
+  serverSignature: string | null;
+}
+
+/** A right on a table: `ADMIN` includes `WRITE`, which includes `READ`. */
+export type ChunkRight = "READ" | "WRITE" | "ADMIN";
+
+/** A user as `listUsers` reports it. */
+export interface ChunkUser {
+  name: string;
+  /** The user may create, alter and drop users and grant rights. */
+  managesUsers: boolean;
+  /** Rights by table name; `"*"` stands for every table. */
+  grants: Record<string, ChunkRight>;
+}
+
+export interface ChunkCreateUserOptions {
+  /** The user may manage users and rights. Default false. */
+  managesUsers?: boolean;
+}
+
+export interface ChunkVerifierOptions {
+  /** PBKDF2 iterations, at least 4096 (the default). */
+  iterations?: number;
+  /** The salt, at least 16 bytes; 16 random bytes by default. */
+  salt?: Uint8Array;
 }
 
 /**

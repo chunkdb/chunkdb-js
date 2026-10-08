@@ -1,6 +1,6 @@
 import { connectUri } from "../src/index";
 
-const client = await connectUri("chunk://chunk-token@127.0.0.1:4242/");
+const client = await connectUri("chunk://admin:change-me@127.0.0.1:4242/");
 console.log(client.serverInfo());
 
 await client.createTable("world", {

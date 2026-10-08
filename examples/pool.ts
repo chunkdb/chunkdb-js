@@ -1,7 +1,7 @@
 import { connectPool } from "../src/index";
 
 const pool = await connectPool({
-  uri: "chunk://chunk-token@127.0.0.1:4242/world",
+  uri: "chunk://admin:change-me@127.0.0.1:4242/world",
   maxConnections: 4,
   minConnections: 1,
 });

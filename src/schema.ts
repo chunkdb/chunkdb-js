@@ -81,6 +81,7 @@ export function parseServerInfo(reply: ChunkReply): ChunkServerInfo {
   const command = "HELLO";
   const entries = mapOf(reply, command);
   const integer = (key: string) => integerOf(field(entries, key, command), key, command);
+  const signature = field(entries, "server_signature", command);
   return {
     protocol: integer("protocol"),
     serverVersion: textOf(field(entries, "server_version", command), "server_version", command),
@@ -89,6 +90,7 @@ export function parseServerInfo(reply: ChunkReply): ChunkServerInfo {
     maxAreaChunks: integer("max_area_chunks"),
     maxResponseBytes: integer("max_response_bytes"),
     maxScanLimit: integer("max_scan_limit"),
+    serverSignature: signature.type === "null" ? null : textOf(signature, "server_signature", command),
   };
 }
 

@@ -5,6 +5,7 @@ export {
   ChunkAuthError,
   ChunkConnectionError,
   ChunkError,
+  ChunkPermissionError,
   ChunkProtocolError,
   ChunkSchemaMismatchError,
   ChunkServerError,
@@ -28,6 +29,7 @@ export type {
 } from "./protocol";
 export { ChunkBits, encodeParameter, formatColumnType, parseColumnType } from "./values";
 export { formatChunkUri, parseChunkUri, tableFromUriPath } from "./uri";
+export { scramVerifier } from "./scram";
 export type {
   ChunkArea,
   ChunkAreaEntry,
@@ -38,10 +40,12 @@ export type {
   ChunkColumnDefinition,
   ChunkColumnType,
   ChunkCoord,
+  ChunkCreateUserOptions,
   ChunkDurabilityMode,
   ChunkErrorPhase,
   ChunkPoolOptions,
   ChunkReadOptions,
+  ChunkRight,
   ChunkRow,
   ChunkScanOptions,
   ChunkScanPage,
@@ -57,7 +61,9 @@ export type {
   ChunkTableOptionValues,
   ChunkTableSchema,
   ChunkTypeConversion,
+  ChunkUser,
   ChunkValue,
+  ChunkVerifierOptions,
   ChunkWriteOptions,
   ParsedChunkUri,
 } from "./types";

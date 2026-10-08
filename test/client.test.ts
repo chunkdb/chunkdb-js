@@ -5,12 +5,14 @@ import {
   ChunkAuthError,
   ChunkClient,
   ChunkConnectionError,
+  ChunkPermissionError,
   ChunkProtocolError,
+  ChunkServerError,
   ChunkTimeoutError,
   ChunkVersionMismatchError,
   connect,
 } from "../src/index";
-import { FAKE_HELLO, startFakeServer, type FakeRequest } from "./fake-server";
+import { FAKE_HELLO, scramResponder, startFakeServer, type FakeRequest } from "./fake-server";
 
 // DESCRIBE of `t (id u10 REQUIRED, h <hType>)`, 4 x 4 blocks.
 function describeReply(hType: string): string {
@@ -43,7 +45,7 @@ test("an older chunkdb is reported as speaking an older protocol", async () => {
       return null;
     });
     try {
-      await assert.rejects(connect({ port: server.port, token: "secret" }), (error: unknown) => {
+      await assert.rejects(connect({ port: server.port, user: "bot", password: "secret" }), (error: unknown) => {
         assert.ok(error instanceof ChunkProtocolError);
         assert.match(error.message, pattern);
         assert.match(error.message, /needs a chunkdb server of protocol 3/);
@@ -55,12 +57,12 @@ test("an older chunkdb is reported as speaking an older protocol", async () => {
   }
 });
 
-test("HELLO sends the token and exposes the server's limits", async () => {
+test("HELLO without a user exposes the server's limits", async () => {
   const server = await startFakeServer((request) =>
-    request.line === "HELLO 3 AUTH secret" ? FAKE_HELLO : "-ERR AUTH_FAILED wrong token\r\n",
+    request.line === "HELLO 3" ? FAKE_HELLO : "-ERR SYNTAX unexpected\r\n",
   );
   try {
-    const client = await connect({ port: server.port, token: "secret" });
+    const client = await connect({ port: server.port });
     assert.deepEqual(client.serverInfo(), {
       protocol: 3,
       serverVersion: "test",
@@ -69,10 +71,140 @@ test("HELLO sends the token and exposes the server's limits", async () => {
       maxAreaChunks: 256,
       maxResponseBytes: 67108864,
       maxScanLimit: 1024,
+      serverSignature: null,
     });
     await client.close();
-    await assert.rejects(connect({ port: server.port, token: "wrong" }), ChunkAuthError);
-    await assert.rejects(connect({ port: server.port, token: "two words" }), /without spaces/);
+    assert.deepEqual(server.requests.map((request) => request.frames.length), [0]);
+  } finally {
+    await server.close();
+  }
+});
+
+test("a user logs in with SCRAM-SHA-256 and the password never crosses the wire", async () => {
+  const password = "p@ss: word";
+  const server = await startFakeServer(scramResponder("bot", password));
+  try {
+    const client = await connect({ uri: `chunk://bot:${encodeURIComponent(password)}@127.0.0.1:${server.port}/` });
+    assert.match(client.serverInfo()?.serverSignature ?? "", /^v=[A-Za-z0-9+/]+=*$/);
+    await client.close();
+    assert.deepEqual(server.requests.map((request) => request.line), ["HELLO 3 USER bot $1", "AUTH $1"]);
+    const first = server.requests[0].frames[0]?.toString("utf8") ?? "";
+    assert.match(first, /^n,,n=bot,r=[A-Za-z0-9+/]{24}$/);
+    assert.match(server.requests[1].frames[0]?.toString("utf8") ?? "", /^c=biws,r=[^,]+,p=[A-Za-z0-9+/]{43}=$/);
+    for (const request of server.requests) {
+      assert.ok(!request.frames.some((frame) => frame?.includes(password)));
+    }
+
+    await assert.rejects(connect({ port: server.port, user: "bot", password: "wrong" }), (error: unknown) => {
+      assert.ok(error instanceof ChunkAuthError);
+      assert.equal(error.serverCode, "AUTH_FAILED");
+      assert.equal(error.phase, "auth");
+      assert.equal(error.command, "AUTH");
+      return true;
+    });
+  } finally {
+    await server.close();
+  }
+});
+
+test("a server that cannot prove it knows the password is refused", async () => {
+  for (const signature of ["v=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", "v=", "_"]) {
+    const respond = scramResponder("bot", "secret", { signature: signature === "_" ? undefined : signature });
+    const server = await startFakeServer((request) => {
+      const reply = respond(request);
+      // A server signature of null: the HELLO map of a login without a user.
+      return signature === "_" && reply?.startsWith("%") ? FAKE_HELLO : reply;
+    });
+    try {
+      await assert.rejects(connect({ port: server.port, user: "bot", password: "secret" }), (error: unknown) => {
+        assert.ok(error instanceof ChunkConnectionError);
+        assert.equal(error.phase, "auth");
+        assert.match(error.message, /could not prove it knows the password/);
+        return true;
+      });
+    } finally {
+      await server.close();
+    }
+  }
+});
+
+test("a server-first message that does not continue the login is refused", async () => {
+  const server = await startFakeServer((request) =>
+    request.line.startsWith("HELLO") ? "+SCRAM r=someone-else,s=QUJDREVGR0hJSktMTU5PUA==,i=4096\r\n" : null,
+  );
+  try {
+    await assert.rejects(connect({ port: server.port, user: "bot", password: "secret" }), /does not continue the client nonce/);
+  } finally {
+    await server.close();
+  }
+});
+
+test("credentials are checked before connecting", () => {
+  assert.throws(() => new ChunkClient({ user: "Bot", password: "x" }), /a user name must match/);
+  assert.throws(() => new ChunkClient({ user: "bot two" }), /a user name must match/);
+  assert.throws(() => new ChunkClient({ password: "x" }), /a password needs a user/);
+  assert.throws(() => new ChunkClient({ user: "bot", verifierIterations: 1000 }), /at least 4096/);
+});
+
+test("users statements send verifiers and map their errors", async () => {
+  const server = await startFakeServer((request) => {
+    if (request.line.startsWith("HELLO")) {
+      return FAKE_HELLO;
+    }
+    if (request.line === "SHOW USERS") {
+      const bulk = (text: string) => `$${text.length}\r\n${text}\r\n`;
+      return (
+        `*2\r\n%3\r\n${bulk("name")}${bulk("admin")}${bulk("manages_users")}#t\r\n${bulk("grants")}%1\r\n${bulk("*")}${bulk("ADMIN")}` +
+        `%3\r\n${bulk("name")}${bulk("bot")}${bulk("manages_users")}#f\r\n${bulk("grants")}%2\r\n` +
+        `${bulk("__proto__")}${bulk("READ")}${bulk("world")}${bulk("WRITE")}`
+      );
+    }
+    if (request.line === "DROP USER admin") {
+      return "-ERR PERMISSION_DENIED MANAGES USERS\r\n";
+    }
+    if (request.line === "DROP USER ghost") {
+      return "-ERR INVALID_ARGUMENT user ghost does not exist\r\n";
+    }
+    return "+OK\r\n";
+  });
+  try {
+    const client = await connect({ port: server.port, verifierIterations: 5000 });
+    await client.createUser("bot", "hunter2", { managesUsers: true });
+    await client.setPassword("bot", "new");
+    await client.setManagesUsers("bot", false);
+    await client.grant("READ", "world", "bot");
+    await client.revoke("WRITE", "*", "bot");
+    await client.dropUser("bot");
+    assert.deepEqual(await client.listUsers(), [
+      { name: "admin", managesUsers: true, grants: { "*": "ADMIN" } },
+      { name: "bot", managesUsers: false, grants: Object.fromEntries([["__proto__", "READ"], ["world", "WRITE"]]) },
+    ]);
+    await assert.rejects(client.dropUser("admin"), (error: unknown) => {
+      assert.ok(error instanceof ChunkPermissionError && error instanceof ChunkServerError);
+      assert.equal(error.serverCode, "PERMISSION_DENIED");
+      assert.equal(error.serverMessage, "MANAGES USERS");
+      return true;
+    });
+    await assert.rejects(client.dropUser("ghost"), (error: unknown) => !(error instanceof ChunkPermissionError) && error instanceof ChunkServerError);
+    await assert.rejects(client.grant("OWNER" as "READ", "world", "bot"), /a right is READ, WRITE or ADMIN/);
+    await assert.rejects(client.grant("READ", "a b", "bot"), /a table name/);
+    await assert.rejects(client.createUser("Bot", "x"), /a user name must match/);
+    await client.close();
+
+    const lines = server.requests.map((request) => request.line);
+    assert.deepEqual(lines.slice(1, 8), [
+      "CREATE USER bot VERIFIER $1 MANAGES USERS",
+      "ALTER USER bot VERIFIER $1",
+      "ALTER USER bot NO MANAGES USERS",
+      "GRANT READ ON world TO bot",
+      "REVOKE WRITE ON * FROM bot",
+      "DROP USER bot",
+      "SHOW USERS",
+    ]);
+    for (const request of server.requests.slice(1, 3)) {
+      const verifier = request.frames[0]?.toString("utf8") ?? "";
+      assert.match(verifier, /^SCRAM-SHA-256\$5000:[A-Za-z0-9+/]{22}==\$[A-Za-z0-9+/]{43}=:[A-Za-z0-9+/]{43}=$/);
+    }
   } finally {
     await server.close();
   }

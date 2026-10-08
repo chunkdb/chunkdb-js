@@ -5,6 +5,7 @@ import tls from "node:tls";
 import {
   ChunkAuthError,
   ChunkConnectionError,
+  ChunkPermissionError,
   ChunkProtocolError,
   ChunkSchemaMismatchError,
   ChunkServerError,
@@ -15,6 +16,15 @@ import {
 } from "./errors";
 import { chunkFormLimit, decodeChunkForm, encodeChunkForm } from "./chunk-form";
 import { encodeStatement, ReplyReader, type ChunkParameter, type ChunkReply, type ErrorReply } from "./protocol";
+import {
+  MIN_SCRAM_ITERATIONS,
+  finishScramLogin,
+  scramSignatureMatches,
+  scramVerifierAsync,
+  startScramLogin,
+  type ScramFinal,
+  type ScramLogin,
+} from "./scram";
 import { integerOf, mapOf, parseDescribe, parseServerInfo, textOf, type TableLayout } from "./schema";
 import { formatChunkUri, parseChunkUri, tableFromUriPath } from "./uri";
 import type {
@@ -25,7 +35,9 @@ import type {
   ChunkColumnDefinition,
   ChunkColumnType,
   ChunkCoord,
+  ChunkCreateUserOptions,
   ChunkReadOptions,
+  ChunkRight,
   ChunkRow,
   ChunkScanOptions,
   ChunkScanPage,
@@ -37,6 +49,7 @@ import type {
   ChunkTableOption,
   ChunkTableOptions,
   ChunkTableSchema,
+  ChunkUser,
   ChunkValue,
   ChunkWriteOptions,
   ParsedChunkUri,
@@ -59,7 +72,9 @@ type TransportSocket = net.Socket | tls.TLSSocket;
 interface ResolvedOptions {
   host: string;
   port: number;
-  token: string;
+  user: string;
+  password: string;
+  verifierIterations: number;
   secure: boolean;
   connectTimeoutMs: number;
   commandTimeoutMs: number;
@@ -99,6 +114,9 @@ const DEFAULT_TABLE = "default";
 const WRONG_SIZE = /^\$[0-9]+ for column .+ must be [0-9]+ bytes, got [0-9]+$/;
 const NO_COLUMN = /^the table has no column /;
 const TABLE_STATEMENT = /^\s*(?:create|alter|drop)\s+table\s+([a-z_][a-z0-9_]*)/i;
+const RIGHTS: readonly ChunkRight[] = ["READ", "WRITE", "ADMIN"];
+// The statements of the login, sent while connecting.
+const HANDSHAKE = new Set(["HELLO", "AUTH"]);
 
 const TABLE_OPTION_NAMES: Record<keyof ChunkTableOptions, string> = {
   durabilityMode: "durability_mode",
@@ -149,13 +167,26 @@ function resolveOptions(options: ChunkClientOptions = {}): ResolvedOptions {
   const secure = options.tls ?? parsed?.secure ?? false;
   const host = options.host ?? parsed?.host ?? DEFAULT_HOST;
   const port = options.port ?? parsed?.port ?? DEFAULT_PORT;
-  const token = options.token ?? parsed?.token ?? "";
+  const user = options.user ?? parsed?.user ?? "";
+  const password = options.password ?? parsed?.password ?? "";
+  if (user === "" && password !== "") {
+    throw new ChunkConnectionError("a password needs a user", { phase: "connect" });
+  }
+  if (user !== "") {
+    checkName(user, "a user name");
+  }
+  const verifierIterations = options.verifierIterations ?? MIN_SCRAM_ITERATIONS;
+  if (!Number.isSafeInteger(verifierIterations) || verifierIterations < MIN_SCRAM_ITERATIONS) {
+    throw new TypeError(`verifierIterations must be an integer of at least ${MIN_SCRAM_ITERATIONS}`);
+  }
   const named =
     options.table !== undefined && options.table !== "" ? options.table : tableFromUriPath(parsed?.path ?? "/");
   return {
     host,
     port,
-    token,
+    user,
+    password,
+    verifierIterations,
     secure,
     connectTimeoutMs: options.connectTimeoutMs ?? DEFAULT_TIMEOUT_MS,
     commandTimeoutMs: options.commandTimeoutMs ?? DEFAULT_TIMEOUT_MS,
@@ -171,7 +202,9 @@ function resolveOptions(options: ChunkClientOptions = {}): ResolvedOptions {
       secure,
       host,
       port,
-      token,
+      user,
+      // uri() never shows the password.
+      password: "",
       path: named === null ? "/" : `/${encodeURIComponent(named)}`,
     },
   };
@@ -215,6 +248,39 @@ function coordOf(reply: ChunkReply, command: string): ChunkCoord {
     throw new ChunkProtocolError(`expected chunk coordinates in the ${command} reply`, { phase: "protocol", command });
   }
   return { cx: integerOf(reply.items[0], "cx", command), cy: integerOf(reply.items[1], "cy", command) };
+}
+
+function rightOf(right: ChunkRight, command: string): ChunkRight {
+  if (!RIGHTS.includes(right)) {
+    throw requestError(`a right is READ, WRITE or ADMIN, got ${JSON.stringify(right)}`, command);
+  }
+  return right;
+}
+
+function grantTable(table: string, command: string): string {
+  return table === "*" ? table : checkName(table, `a table name (or "*") in ${command}`);
+}
+
+function userOf(reply: ChunkReply, command: string): ChunkUser {
+  const entries = mapOf(reply, command);
+  const name = entries.get("name");
+  const managesUsers = entries.get("manages_users");
+  const grantsReply = entries.get("grants");
+  if (name === undefined || managesUsers?.type !== "boolean" || grantsReply === undefined) {
+    throw new ChunkProtocolError(`malformed ${command} reply`, { phase: "protocol", command });
+  }
+  // fromEntries defines every table as its own key, `__proto__` included.
+  const grants = Object.fromEntries(
+    [...mapOf(grantsReply, command)].map(([table, right]): [string, ChunkRight] => {
+      const text = textOf(right, `the right on ${table}`, command);
+      const known = RIGHTS.find((candidate) => candidate === text);
+      if (known === undefined) {
+        throw new ChunkProtocolError(`malformed ${command} reply: unknown right ${text}`, { phase: "protocol", command });
+      }
+      return [table, known];
+    }),
+  );
+  return { name: textOf(name, "a user name", command), managesUsers: managesUsers.value, grants };
 }
 
 function ifVersionClause(ifVersion: bigint | undefined): string {
@@ -719,6 +785,80 @@ export class ChunkClient {
     return this.enqueue(async () => bulkOf(await this.run("SHOW METRICS", [], "SHOW METRICS"), "SHOW METRICS").toString("utf8"));
   }
 
+  /**
+   * `CREATE USER`. The client computes the SCRAM verifier from the password
+   * and sends only the verifier. Needs `MANAGES USERS`.
+   */
+  createUser(name: string, password: string, options: ChunkCreateUserOptions = {}): Promise<void> {
+    return this.enqueue(async () => {
+      checkName(name, "a user name");
+      const verifier = await this.verifier(password);
+      const manages = options.managesUsers === true ? " MANAGES USERS" : "";
+      expectOk(await this.run(`CREATE USER ${name} VERIFIER $1${manages}`, [verifier], "CREATE USER"), "CREATE USER");
+    });
+  }
+
+  /**
+   * `ALTER USER ... VERIFIER`: a new password, sent as its verifier. Users
+   * may change their own; others need `MANAGES USERS`. The client keeps
+   * logging in with the password it was given.
+   */
+  setPassword(name: string, password: string): Promise<void> {
+    return this.enqueue(async () => {
+      checkName(name, "a user name");
+      const verifier = await this.verifier(password);
+      expectOk(await this.run(`ALTER USER ${name} VERIFIER $1`, [verifier], "ALTER USER"), "ALTER USER");
+    });
+  }
+
+  /** `ALTER USER ... [NO] MANAGES USERS`. */
+  setManagesUsers(name: string, managesUsers: boolean): Promise<void> {
+    return this.enqueue(async () => {
+      checkName(name, "a user name");
+      const clause = managesUsers ? "MANAGES USERS" : "NO MANAGES USERS";
+      expectOk(await this.run(`ALTER USER ${name} ${clause}`, [], "ALTER USER"), "ALTER USER");
+    });
+  }
+
+  /** `DROP USER`. */
+  dropUser(name: string): Promise<void> {
+    return this.enqueue(async () => {
+      checkName(name, "a user name");
+      expectOk(await this.run(`DROP USER ${name}`, [], "DROP USER"), "DROP USER");
+    });
+  }
+
+  /** `GRANT <right> ON <table> TO <user>`; `"*"` stands for every table, those created later included. */
+  grant(right: ChunkRight, table: string, user: string): Promise<void> {
+    return this.enqueue(async () => {
+      const statement = `GRANT ${rightOf(right, "GRANT")} ON ${grantTable(table, "GRANT")} TO ${checkName(user, "a user name")}`;
+      expectOk(await this.run(statement, [], "GRANT"), "GRANT");
+    });
+  }
+
+  /** `REVOKE <right> ON <table> FROM <user>`: takes away the right and those above it. */
+  revoke(right: ChunkRight, table: string, user: string): Promise<void> {
+    return this.enqueue(async () => {
+      const statement = `REVOKE ${rightOf(right, "REVOKE")} ON ${grantTable(table, "REVOKE")} FROM ${checkName(user, "a user name")}`;
+      expectOk(await this.run(statement, [], "REVOKE"), "REVOKE");
+    });
+  }
+
+  /** Users with their rights (`SHOW USERS`). Needs `MANAGES USERS`. */
+  listUsers(): Promise<ChunkUser[]> {
+    return this.enqueue(async () => {
+      const command = "SHOW USERS";
+      return itemsOf(await this.run(command, [], command), command).map((item) => userOf(item, command));
+    });
+  }
+
+  private async verifier(password: string): Promise<Buffer> {
+    if (typeof password !== "string") {
+      throw requestError("a password is a string");
+    }
+    return Buffer.from(await scramVerifierAsync(password, { iterations: this.options.verifierIterations }), "utf8");
+  }
+
   private tableOf(options: ChunkTableOption | undefined): string {
     return checkName(options?.table ?? this.options.table, "a table name");
   }
@@ -893,7 +1033,7 @@ export class ChunkClient {
       }
     });
 
-    // A failed handshake (bad token, older server) must not leave the
+    // A failed handshake (failed login, older server) must not leave the
     // socket open behind a client the caller never received.
     try {
       await this.hello();
@@ -907,23 +1047,26 @@ export class ChunkClient {
     return this;
   }
 
-  // HELLO is the first statement on every connection. It is sent outside the
+  // HELLO is the first statement on every connection; with a user it starts
+  // the SCRAM-SHA-256 login, which AUTH finishes. Both are sent outside the
   // pipeline queue: operations waiting for the connection hold its slots.
   private async hello(): Promise<void> {
-    const token = this.options.token;
-    if (token !== "" && !/^[\x21-\x7e]+$/.test(token)) {
-      throw new ChunkProtocolError("a token is printable ASCII without spaces", { phase: "auth", command: "HELLO" });
+    const user = this.options.user;
+    let login: ScramLogin | null = null;
+    let reply: ChunkReply;
+    if (user === "") {
+      reply = await this.send(`HELLO ${PROTOCOL_VERSION}`, [], "HELLO");
+    } else {
+      login = startScramLogin(user);
+      reply = await this.send(`HELLO ${PROTOCOL_VERSION} USER ${user} $1`, [Buffer.from(login.first, "utf8")], "HELLO");
     }
-    const reply = await this.send(token === "" ? `HELLO ${PROTOCOL_VERSION}` : `HELLO ${PROTOCOL_VERSION} AUTH ${token}`, []);
     if (reply.type === "error") {
       // An older chunkdb answers `-ERR PROTOCOL expected HELLO 2`; a 1.x
-      // server does not know HELLO, and one that requires a token answers
-      // AUTH_REQUIRED although HELLO carried it.
+      // server does not know HELLO.
       const older = /^expected HELLO ([0-9]+)/.exec(reply.message);
       if (
         (reply.code === "PROTOCOL" && older !== null && older[1] !== String(PROTOCOL_VERSION)) ||
-        reply.code === "UNKNOWN_COMMAND" ||
-        (reply.code === "AUTH_REQUIRED" && token !== "")
+        reply.code === "UNKNOWN_COMMAND"
       ) {
         const speaks = older === null ? "an older protocol (chunkdb 1.x)" : `the older protocol ${older[1]}`;
         throw new ChunkProtocolError(
@@ -933,6 +1076,25 @@ export class ChunkClient {
       }
       throw this.serverError(reply, "HELLO");
     }
+    let expected: ScramFinal | null = null;
+    if (login !== null) {
+      if (reply.type !== "simple" || !reply.value.startsWith("SCRAM ")) {
+        throw new ChunkProtocolError(`expected +SCRAM from HELLO, got ${reply.type}`, { phase: "protocol", command: "HELLO" });
+      }
+      try {
+        expected = await finishScramLogin(login, this.options.password, reply.value.slice("SCRAM ".length));
+      } catch (error) {
+        throw new ChunkProtocolError(error instanceof Error ? error.message : String(error), {
+          phase: "protocol",
+          command: "HELLO",
+          cause: error,
+        });
+      }
+      reply = await this.send("AUTH $1", [Buffer.from(expected.message, "utf8")], "AUTH");
+      if (reply.type === "error") {
+        throw this.serverError(reply, "AUTH");
+      }
+    }
     const info = parseServerInfo(reply);
     if (info.protocol !== PROTOCOL_VERSION) {
       throw new ChunkProtocolError(`the server answered protocol ${info.protocol}, expected ${PROTOCOL_VERSION}`, {
@@ -940,15 +1102,26 @@ export class ChunkClient {
         command: "HELLO",
       });
     }
+    // The signature proves the server holds the user's verifier: a server
+    // that does not could otherwise pose as the real one.
+    if (expected !== null && (info.serverSignature === null || !scramSignatureMatches(expected.serverSignature, info.serverSignature))) {
+      throw new ChunkConnectionError(
+        "the server could not prove it knows the password (SCRAM server signature mismatch)",
+        { phase: "auth", command: "AUTH" },
+      );
+    }
     this.info = info;
   }
 
   private serverError(reply: ErrorReply, command: string): ChunkError {
     if (reply.code === "AUTH_FAILED" || reply.code === "AUTH_REQUIRED") {
       return new ChunkAuthError(reply.code, reply.message, {
-        phase: command === "HELLO" ? "auth" : "response",
+        phase: HANDSHAKE.has(command) ? "auth" : "response",
         command,
       });
+    }
+    if (reply.code === "PERMISSION_DENIED") {
+      return new ChunkPermissionError(reply.code, reply.message, { phase: "response", command });
     }
     if (reply.code === "VERSION_MISMATCH") {
       const current = /^current=([0-9]+)$/.exec(reply.message);
@@ -1005,8 +1178,8 @@ export class ChunkClient {
       }
       throw error;
     }
-    // HELLO is sent while connecting, outside the operations' order.
-    const turn = command === "HELLO" ? undefined : this.sendTurns.getStore();
+    // HELLO and AUTH are sent while connecting, outside the operations' order.
+    const turn = HANDSHAKE.has(command) ? undefined : this.sendTurns.getStore();
     if (turn !== undefined) {
       await turn.previous;
     }

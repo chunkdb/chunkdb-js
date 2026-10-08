@@ -33,14 +33,29 @@ export function parseChunkUri(uri: string): ParsedChunkUri {
     });
   }
 
+  const user = decodeUserinfo(parsed.username, "user");
+  const password = decodeUserinfo(parsed.password, "password");
+  if (user === "" && password !== "") {
+    throw new ChunkConnectionError("chunk URI has a password without a user", { phase: "connect" });
+  }
+
   return {
     scheme,
     secure: scheme === "chunks",
     host: parsed.hostname,
     port,
-    token: decodeURIComponent(parsed.username),
+    user,
+    password,
     path: parsed.pathname === "" ? "/" : parsed.pathname,
   };
+}
+
+function decodeUserinfo(text: string, what: string): string {
+  try {
+    return decodeURIComponent(text);
+  } catch (error) {
+    throw new ChunkConnectionError(`chunk URI ${what} has an invalid % escape`, { phase: "connect", cause: error });
+  }
 }
 
 /**
@@ -62,7 +77,14 @@ export function tableFromUriPath(path: string): string | null {
 
 export function formatChunkUri(uri: ParsedChunkUri): string {
   const scheme = uri.secure ? "chunks" : uri.scheme;
-  const auth = uri.token === "" ? "" : `${encodeURIComponent(uri.token)}@`;
+  let auth = "";
+  if (uri.user !== "") {
+    auth = encodeURIComponent(uri.user);
+    if (uri.password !== "") {
+      auth += `:${encodeURIComponent(uri.password)}`;
+    }
+    auth += "@";
+  }
   const host = uri.host.includes(":") ? `[${uri.host}]` : uri.host;
   const path = uri.path === "" ? "/" : uri.path;
   return `${scheme}://${auth}${host}:${uri.port}${path}`;
