@@ -2,7 +2,6 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  ChunkAuthError,
   ChunkBits,
   ChunkClient,
   ChunkProtocolError,
@@ -240,31 +239,6 @@ test("execute sends a statement with parameter frames", async () => {
     );
     assert.equal(await client.ping(), "PONG");
     await client.close();
-  } finally {
-    await server.stop();
-  }
-});
-
-test("a wrong or missing token fails the connect with a typed auth error", async () => {
-  const server = await startServer({ token: "expected-token" });
-  try {
-    for (const [token, code] of [["wrong-token", "AUTH_FAILED"], [undefined, "AUTH_REQUIRED"]] as const) {
-      const client = new ChunkClient({ host: server.host, port: server.port, token });
-      await assert.rejects(client.connect(), (error: unknown) => {
-        assert.ok(error instanceof ChunkAuthError);
-        assert.equal(error.serverCode, code);
-        assert.equal(error.phase, "auth");
-        return true;
-      });
-      await client.close();
-    }
-    const overridden = await connectUri("chunk://wrong-token@127.0.0.1:1/", {
-      host: server.host,
-      port: server.port,
-      token: server.token,
-    });
-    assert.equal(await overridden.ping(), "PONG");
-    await overridden.close();
   } finally {
     await server.stop();
   }

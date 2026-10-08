@@ -47,8 +47,10 @@ test("plain and TLS server resolution use the same dedicated build", () => witho
   }
 }));
 
-test("the compatibility probe accepts only a HELLO 3 map", () => {
-  assert.equal(helloProbeFailure("%7"), undefined);
+test("the compatibility probe accepts only a HELLO 3 map or a SCRAM login", () => {
+  assert.equal(helloProbeFailure("%8"), undefined);
+  assert.equal(helloProbeFailure("+SCRAM r=abc,s=QUJD,i=4096"), undefined);
+  assert.match(helloProbeFailure("-ERR AUTH_REQUIRED use HELLO 3 USER") ?? "", /does not speak protocol 3/);
   assert.match(helloProbeFailure("-ERR PROTOCOL expected HELLO 2") ?? "", /does not speak protocol 3/);
   assert.match(helloProbeFailure("$120") ?? "", /does not speak protocol 3/);
 });

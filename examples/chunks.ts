@@ -1,7 +1,7 @@
 import { ChunkVersionMismatchError, connectUri } from "../src/index";
 
 // The URI path names the client's table.
-const client = await connectUri("chunk://chunk-token@127.0.0.1:4242/world");
+const client = await connectUri("chunk://admin:change-me@127.0.0.1:4242/world");
 
 // Read a chunk, change it, and write it back only if nobody else wrote the
 // chunk in between.

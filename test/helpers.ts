@@ -6,11 +6,17 @@ import os from "node:os";
 import path from "node:path";
 import { once } from "node:events";
 
+import { startScramLogin } from "../src/scram";
+
 export interface StartedServer {
   process: ChildProcessWithoutNullStreams;
   host: string;
   port: number;
-  token: string;
+  /** "users": the administrator below logs in; "none": `--auth none`. */
+  auth: "users" | "none";
+  /** The administrator, or "" with `--auth none`. */
+  user: string;
+  password: string;
   dataDir: string;
   tls: boolean;
   uri: string;
@@ -60,11 +66,12 @@ export function resolveServerBinary(
 }
 
 /**
- * Why the first reply line of a `HELLO 3` makes a server unusable for the
- * suite, or undefined when it answered the HELLO map.
+ * Why the first reply line of a `HELLO 3` (or `HELLO 3 USER`) makes a server
+ * unusable for the suite, or undefined when it answered the HELLO map or
+ * started the SCRAM login.
  */
 export function helloProbeFailure(firstLine: string): string | undefined {
-  if (firstLine.startsWith("%")) {
+  if (firstLine.startsWith("%") || firstLine.startsWith("+SCRAM ")) {
     return undefined;
   }
   return (
@@ -73,14 +80,19 @@ export function helloProbeFailure(firstLine: string): string | undefined {
   );
 }
 
-async function assertServerSpeaksProtocol3(host: string, port: number, token: string): Promise<void> {
+async function assertServerSpeaksProtocol3(host: string, port: number, user: string): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     const socket = net.connect({ host, port });
     let buffer = "";
     socket.setEncoding("latin1");
     socket.once("error", reject);
     socket.once("connect", () => {
-      socket.write(`HELLO 3 AUTH ${token}\r\n`);
+      if (user === "") {
+        socket.write("HELLO 3\r\n");
+      } else {
+        const first = startScramLogin(user).first;
+        socket.write(`HELLO 3 USER ${user} $1\r\n$${Buffer.byteLength(first)}\r\n${first}\r\n`);
+      }
     });
     socket.on("data", (chunk: string) => {
       buffer += chunk;
@@ -149,6 +161,11 @@ async function waitForServer(host: string, port: number): Promise<void> {
   throw new Error(`server did not start on ${host}:${port}`);
 }
 
+function removeServerFiles(dataDir: string): void {
+  fs.rmSync(dataDir, { recursive: true, force: true });
+  fs.rmSync(`${dataDir}.admin-password`, { force: true });
+}
+
 function tlsFixtures(): { cert: string; key: string } {
   const cert = path.join(tlsFixtureDir(), "cert.pem");
   const key = path.join(tlsFixtureDir(), "key.pem");
@@ -157,20 +174,28 @@ function tlsFixtures(): { cert: string; key: string } {
   return { cert, key };
 }
 
-export async function startServer(options: { tls?: boolean; token?: string } = {}): Promise<StartedServer> {
+/**
+ * Starts a server with an administrator (`admin`, whose password `uri`
+ * carries), or with `--auth none`.
+ */
+export async function startServer(options: { tls?: boolean; auth?: "users" | "none" } = {}): Promise<StartedServer> {
   const host = "127.0.0.1";
   const port = await pickFreePort();
-  const token = options.token ?? "chunk-token";
+  const auth = options.auth ?? "users";
+  const user = auth === "users" ? "admin" : "";
+  const password = auth === "users" ? "admin p@ss:word/1" : "";
   const tlsEnabled = options.tls ?? false;
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "chunkdb-node-sdk-"));
-  const uri = `${tlsEnabled ? "chunks" : "chunk"}://${token}@${host}:${port}/`;
+  const scheme = tlsEnabled ? "chunks" : "chunk";
+  const credentials = user === "" ? "" : `${user}:${encodeURIComponent(password)}@`;
+  const uri = `${scheme}://${credentials}${host}:${port}/`;
   const binary = resolveServerBinary(tlsEnabled);
 
   assert.ok(fs.existsSync(binary), `server binary not found: ${binary}`);
 
   const args = [
     "--listen-uri",
-    uri,
+    `${scheme}://${host}:${port}/`,
     "--data-dir",
     dataDir,
     "--durability",
@@ -180,6 +205,15 @@ export async function startServer(options: { tls?: boolean; token?: string } = {
     "--log-level",
     "warn",
   ];
+
+  if (auth === "users") {
+    // Outside the data directory, which must start empty.
+    const passwordFile = `${dataDir}.admin-password`;
+    fs.writeFileSync(passwordFile, `${password}\n`, { mode: 0o600 });
+    args.push("--admin-user", user, "--admin-password-file", passwordFile);
+  } else {
+    args.push("--auth", "none");
+  }
 
   if (tlsEnabled) {
     const { cert, key } = tlsFixtures();
@@ -199,10 +233,10 @@ export async function startServer(options: { tls?: boolean; token?: string } = {
   // the same binary, so a TLS-only mismatch still surfaces there.
   if (!tlsEnabled) {
     try {
-      await assertServerSpeaksProtocol3(host, port, token);
+      await assertServerSpeaksProtocol3(host, port, user);
     } catch (error) {
       child.kill("SIGKILL");
-      fs.rmSync(dataDir, { recursive: true, force: true });
+      removeServerFiles(dataDir);
       throw error;
     }
   }
@@ -211,14 +245,16 @@ export async function startServer(options: { tls?: boolean; token?: string } = {
     process: child,
     host,
     port,
-    token,
+    auth,
+    user,
+    password,
     dataDir,
     tls: tlsEnabled,
     uri,
     async stop() {
       child.kill("SIGTERM");
       await Promise.race([once(child, "exit"), wait(2000)]);
-      fs.rmSync(dataDir, { recursive: true, force: true });
+      removeServerFiles(dataDir);
     },
   };
 }

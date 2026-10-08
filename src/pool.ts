@@ -11,8 +11,10 @@ import type {
   ChunkAreaRawEntry,
   ChunkClientOptions,
   ChunkCoord,
+  ChunkCreateUserOptions,
   ChunkPoolOptions,
   ChunkReadOptions,
+  ChunkRight,
   ChunkRow,
   ChunkScanOptions,
   ChunkScanPage,
@@ -21,6 +23,7 @@ import type {
   ChunkTableChange,
   ChunkTableDefinition,
   ChunkTableSchema,
+  ChunkUser,
   ChunkValue,
   ChunkWriteOptions,
 } from "./types";
@@ -70,7 +73,9 @@ function toClientOptions(options: ChunkPoolOptions): ChunkClientOptions {
     host: options.host,
     port: options.port,
     uri: options.uri,
-    token: options.token,
+    user: options.user,
+    password: options.password,
+    verifierIterations: options.verifierIterations,
     connectTimeoutMs: options.connectTimeoutMs,
     commandTimeoutMs: options.commandTimeoutMs,
     tls: options.tls,
@@ -283,6 +288,34 @@ export class ChunkPool {
 
   metrics(): Promise<string> {
     return this.withClient(async (client) => await client.metrics());
+  }
+
+  createUser(name: string, password: string, options: ChunkCreateUserOptions = {}): Promise<void> {
+    return this.withClient(async (client) => await client.createUser(name, password, options));
+  }
+
+  setPassword(name: string, password: string): Promise<void> {
+    return this.withClient(async (client) => await client.setPassword(name, password));
+  }
+
+  setManagesUsers(name: string, managesUsers: boolean): Promise<void> {
+    return this.withClient(async (client) => await client.setManagesUsers(name, managesUsers));
+  }
+
+  dropUser(name: string): Promise<void> {
+    return this.withClient(async (client) => await client.dropUser(name));
+  }
+
+  grant(right: ChunkRight, table: string, user: string): Promise<void> {
+    return this.withClient(async (client) => await client.grant(right, table, user));
+  }
+
+  revoke(right: ChunkRight, table: string, user: string): Promise<void> {
+    return this.withClient(async (client) => await client.revoke(right, table, user));
+  }
+
+  listUsers(): Promise<ChunkUser[]> {
+    return this.withClient(async (client) => await client.listUsers());
   }
 
   // A table statement changes the schema every pooled connection cached.

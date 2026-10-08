@@ -51,8 +51,14 @@ export class ChunkServerError extends ChunkError {
   }
 }
 
-/** `AUTH_REQUIRED` or `AUTH_FAILED`. */
+/**
+ * `AUTH_REQUIRED` (the server needs a user and password) or `AUTH_FAILED`
+ * (a wrong password or an unknown user).
+ */
 export class ChunkAuthError extends ChunkServerError {}
+
+/** `PERMISSION_DENIED`: the user lacks the right the statement needs; nothing changed. */
+export class ChunkPermissionError extends ChunkServerError {}
 
 /**
  * `VERSION_MISMATCH`: an `ifVersion` write found the chunk at another

@@ -1,7 +1,9 @@
+import { createHash, createHmac, pbkdf2Sync, randomBytes } from "node:crypto";
 import net, { type Socket } from "node:net";
 
-// The HELLO 3 reply.
-export const FAKE_HELLO = (() => {
+// The HELLO 3 reply; `signature` is the SCRAM server-final message, null
+// without a user.
+export function helloReply(signature: string | null): string {
   const entries: Array<[string, string]> = [
     ["protocol", ":3"],
     ["server_version", "$4\r\ntest"],
@@ -10,9 +12,55 @@ export const FAKE_HELLO = (() => {
     ["max_area_chunks", ":256"],
     ["max_response_bytes", ":67108864"],
     ["max_scan_limit", ":1024"],
+    ["server_signature", signature === null ? "_" : `$${signature.length}\r\n${signature}`],
   ];
   return `%${entries.length}\r\n${entries.map(([key, value]) => `$${key.length}\r\n${key}\r\n${value}\r\n`).join("")}`;
-})();
+}
+
+export const FAKE_HELLO = helloReply(null);
+
+/**
+ * The server side of a SCRAM-SHA-256 login for one user and password, as
+ * chunkdb runs it: answers `HELLO 3 USER` and `AUTH`, or null for any other
+ * statement. `signature` replaces the server signature it sends.
+ */
+export function scramResponder(user: string, password: string, options: { signature?: string } = {}) {
+  const salt = randomBytes(16);
+  const salted = pbkdf2Sync(password, salt, 4096, 32, "sha256");
+  const hmac = (key: Buffer, text: string) => createHmac("sha256", key).update(text).digest();
+  const storedKey = createHash("sha256").update(hmac(salted, "Client Key")).digest();
+  const serverKey = hmac(salted, "Server Key");
+  let pending: { bare: string; serverFirst: string; nonce: string } | null = null;
+  return (request: FakeRequest): string | null => {
+    if (request.line === `HELLO 3 USER ${user} $1`) {
+      const first = request.frames[0]?.toString("utf8") ?? "";
+      const match = /^n,,(n=([^,]*),r=(.+))$/.exec(first);
+      if (match === null || match[2] !== user) {
+        return "-ERR INVALID_ARGUMENT bad client-first message\r\n";
+      }
+      const nonce = match[3] + randomBytes(18).toString("base64");
+      pending = { bare: match[1], nonce, serverFirst: `r=${nonce},s=${salt.toString("base64")},i=4096` };
+      return `+SCRAM ${pending.serverFirst}\r\n`;
+    }
+    if (request.line === "AUTH $1" && pending !== null) {
+      const final = request.frames[0]?.toString("utf8") ?? "";
+      const prefix = `c=biws,r=${pending.nonce},p=`;
+      const authMessage = `${pending.bare},${pending.serverFirst},${prefix.slice(0, -3)}`;
+      pending = null;
+      if (!final.startsWith(prefix)) {
+        return "-ERR INVALID_ARGUMENT bad client-final message\r\n";
+      }
+      const proof = Buffer.from(final.slice(prefix.length), "base64");
+      const signature = hmac(storedKey, authMessage);
+      const clientKey = Buffer.from(proof.map((byte, i) => byte ^ signature[i]));
+      if (!createHash("sha256").update(clientKey).digest().equals(storedKey)) {
+        return "-ERR AUTH_FAILED invalid user or password\r\n";
+      }
+      return helloReply(options.signature ?? `v=${hmac(serverKey, authMessage).toString("base64")}`);
+    }
+    return null;
+  };
+}
 
 export interface FakeRequest {
   line: string;

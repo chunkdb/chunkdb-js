@@ -10,11 +10,18 @@ speaks the `chunkdb` 1.x protocol; the next major version speaks protocol 3
 ## Unreleased
 
 ### Breaking
-- Protocol 3 (CQL) only. Connecting sends `HELLO 3` with the token; a server
-  of an earlier protocol fails `connect()` with a `ChunkProtocolError` that
-  says so. `serverInfo()` returns the reply: server version, `maxLineBytes`,
-  `maxParameters`, `maxAreaChunks`, `maxResponseBytes`, `maxScanLimit`. A
-  wrong or missing token fails `connect()` with `ChunkAuthError`
+- Protocol 3 (CQL) only. Connecting sends `HELLO 3`; a server of an earlier
+  protocol fails `connect()` with a `ChunkProtocolError` that says so.
+  `serverInfo()` returns the reply: server version, `maxLineBytes`,
+  `maxParameters`, `maxAreaChunks`, `maxResponseBytes`, `maxScanLimit`,
+  `serverSignature`
+- Users replace the token: the client logs in with a user and password
+  (SCRAM-SHA-256) from the URI (`chunk://user:password@host:4242/`,
+  percent-decoded) or the `user` and `password` options, and checks the
+  server's signature. The `token` option and `ParsedChunkUri.token` are
+  removed; `ParsedChunkUri` has `user` and `password`, and `uri()` leaves the
+  password out. A wrong password, an unknown user (`AUTH_FAILED`) or a missing
+  login (`AUTH_REQUIRED`) fails `connect()` with `ChunkAuthError`
 - Every call names its table (`table` option), defaulting to the client's
   table: the `table` client option, the URI path, or `default`
 - Removed the 1.x and protocol 2 API: `get`, `set`, `unset`, `mget`, `mset`,
@@ -28,6 +35,11 @@ speaks the `chunkdb` 1.x protocol; the next major version speaks protocol 3
   `currentVersion`) instead of resolving `{ ok: false }`
 
 ### Added
+- Users API on `ChunkClient` and `ChunkPool`: `createUser`, `setPassword`,
+  `setManagesUsers`, `dropUser`, `grant`, `revoke`, `listUsers`; passwords
+  are sent only as SCRAM verifiers (`verifierIterations`, at least 4096).
+  `scramVerifier(password)` computes a verifier
+- `ChunkPermissionError` for `PERMISSION_DENIED`
 - Typed blocks: `getBlock`, `setBlock`, `deleteBlock`, with values by column
   type (`number` / `bigint`, `boolean`, `ChunkBits`, `string`, `Uint8Array`,
   `null`) sent as parameters and checked before sending; writes resolve the
