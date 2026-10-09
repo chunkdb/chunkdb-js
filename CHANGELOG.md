@@ -35,6 +35,9 @@ speaks the `chunkdb` 1.x protocol; the next major version speaks protocol 3
   `currentVersion`) instead of resolving `{ ok: false }`
 
 ### Added
+- `ChunkClient.watch` and `ChunkPool.watch`: dedicated, authenticated WATCH
+  streams with typed change, schema and resync events, exact positions,
+  versioned schema decoding and acknowledged `UNWATCH` on close
 - Transactions: `transaction(async (tx) => { ... }, { retries? })` on
   `ChunkClient` and `ChunkPool` runs the callback between `BEGIN` and
   `COMMIT` and resolves the commit version (null when nothing was written).

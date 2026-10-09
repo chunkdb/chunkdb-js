@@ -9,6 +9,7 @@ import type {
   ChunkWatchCoordinate,
   ChunkWatchEvent,
   ChunkWatchOptions,
+  ChunkTableSchema,
 } from "./types";
 import { checkCoordinate, checkName, requestError, valueFromReply } from "./values";
 
@@ -86,10 +87,11 @@ export class ChunkWatch implements AsyncIterableIterator<ChunkWatchEvent> {
   private ended = false;
   private closePromise: Promise<void> | null = null;
   private nextTurn: Promise<void> = Promise.resolve();
+  private description: ChunkClient | null = null;
 
   private constructor(
     private readonly stream: ChunkClient,
-    private readonly descriptions: ChunkClient,
+    private readonly createClient: () => ChunkClient,
     private readonly table: string,
     start: ChunkPosition,
     version: number,
@@ -108,6 +110,8 @@ export class ChunkWatch implements AsyncIterableIterator<ChunkWatchEvent> {
     let earlyFailure: Error | null = null;
     try {
       const schema = await descriptions.describe(table);
+      // Ordinary connections occupy statement workers; release this one before WATCH.
+      await descriptions.close();
       const reply = await stream[kWatchStream](statement, (push) => {
         if (watch === null) {
           early.push(push);
@@ -122,7 +126,7 @@ export class ChunkWatch implements AsyncIterableIterator<ChunkWatchEvent> {
       if (reply.type !== "simple") throw malformed("WATCH did not answer +OK epoch revision");
       const match = /^OK ([0-9a-f]{32}) (0|[1-9][0-9]*)$/i.exec(reply.value);
       if (match === null || BigInt(match[2]) > MAX_UINT64) throw malformed("invalid WATCH start position");
-      watch = new ChunkWatch(stream, descriptions, table, { epoch: match[1].toLowerCase(), revision: BigInt(match[2]) }, schema.version, schema.columns);
+      watch = new ChunkWatch(stream, createClient, table, { epoch: match[1].toLowerCase(), revision: BigInt(match[2]) }, schema.version, schema.columns);
       for (const push of early) watch.receive(push);
       if (earlyFailure !== null) watch.fail(earlyFailure);
       return watch;
@@ -163,7 +167,7 @@ export class ChunkWatch implements AsyncIterableIterator<ChunkWatchEvent> {
       } finally {
         this.ended = true;
         this.wake?.();
-        await Promise.all([this.stream.close(), this.descriptions.close()]);
+        await Promise.all([this.stream.close(), this.description?.close()]);
       }
     })();
     return this.closePromise;
@@ -182,7 +186,7 @@ export class ChunkWatch implements AsyncIterableIterator<ChunkWatchEvent> {
     this.failure ??= error;
     this.wake?.();
     // No automatic reconnect: the caller decides which position to resume after.
-    void Promise.all([this.stream.close(), this.descriptions.close()]);
+    void Promise.all([this.stream.close(), this.description?.close()]);
   }
 
   private async readNext(): Promise<IteratorResult<ChunkWatchEvent>> {
@@ -228,7 +232,7 @@ export class ChunkWatch implements AsyncIterableIterator<ChunkWatchEvent> {
     if (schemaVersion < 0) throw malformed("negative schema version");
     let columns = this.schemas.get(schemaVersion);
     if (columns === undefined) {
-      const schema = await this.descriptions.describe(this.table);
+      const schema = await this.describe();
       if (schema.version !== schemaVersion) throw malformed(`schema version ${schemaVersion} is unavailable; re-read state before resuming`);
       columns = schema.columns;
       this.schemas.set(schemaVersion, columns);
@@ -245,5 +249,16 @@ export class ChunkWatch implements AsyncIterableIterator<ChunkWatchEvent> {
       return { x: coordinate(block.items[0]), y: coordinate(block.items[1]), before: row(block.items[2]), after: row(block.items[3]) };
     });
     return { kind, position, commitTimeMs, user, schemaVersion, blocks };
+  }
+
+  private async describe(): Promise<ChunkTableSchema> {
+    const client = this.createClient();
+    this.description = client;
+    try {
+      return await client.describe(this.table);
+    } finally {
+      await client.close();
+      if (this.description === client) this.description = null;
+    }
   }
 }
