@@ -44,6 +44,7 @@ export type {
   ChunkSchemaEvent,
   ChunkResyncEvent,
   ChunkPosition,
+  ChunkSlot,
   ChunkWatchCoordinate,
   ChunkWatchOptions,
   ChunkWatchEvent,

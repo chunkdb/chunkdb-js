@@ -17,7 +17,8 @@ import {
 } from "./errors";
 import { chunkFormLimit, decodeChunkForm, encodeChunkForm } from "./chunk-form";
 import { encodeStatement, ReplyReader, type ChunkParameter, type ChunkReply, type ErrorReply, type PushReply } from "./protocol";
-import { ChunkWatch, kWatchPause, kWatchStream } from "./watch";
+import { ChunkWatch, kWatchAck, kWatchPause, kWatchStream } from "./watch";
+import { parseSlots, slotName } from "./slots";
 import {
   MIN_SCRAM_ITERATIONS,
   finishScramLogin,
@@ -44,6 +45,7 @@ import type {
   ChunkScanOptions,
   ChunkScanPage,
   ChunkServerInfo,
+  ChunkSlot,
   ChunkState,
   ChunkStateInput,
   ChunkTableChange,
@@ -451,6 +453,7 @@ export class ChunkClient {
   private disposed = false;
   private info: ChunkServerInfo | null = null;
   private watchReceiver: ((reply: PushReply) => void) | null = null;
+  private watchAckError: ((error: Error) => void) | null = null;
   private watchFailure: ((error: Error) => void) | null = null;
   private watchPaused = false;
   private watchStarted = false;
@@ -569,11 +572,44 @@ export class ChunkClient {
   }
 
   /** @internal */
-  async [kWatchStream](statement: string, receive: (reply: PushReply) => void, failed: (error: Error) => void): Promise<ChunkReply> {
+  async [kWatchStream](statement: string, receive: (reply: PushReply) => void, failed: (error: Error) => void,
+    rejectedAck?: (error: Error) => void): Promise<ChunkReply> {
     await this.connect();
     this.watchReceiver = receive;
     this.watchFailure = failed;
+    this.watchAckError = rejectedAck ?? null;
     return this.execute(statement);
+  }
+
+  /** @internal ACK has no success reply and never reconnects its stream. */
+  [kWatchAck](revision: bigint): Promise<void> {
+    return this.enqueue(async () => {
+      const turn = this.sendTurns.getStore();
+      await turn?.previous;
+      const socket = this.socket;
+      if (socket === null || !this.watchStarted || this.watchReceiver === null) {
+        throw new ChunkConnectionError("watch connection is not available", { phase: "request", command: "ACK" });
+      }
+      await new Promise<void>((resolve, reject) => {
+        const finish = (error?: Error) => {
+          clearTimeout(timer);
+          socket.off("close", closed);
+          if (error !== undefined) reject(error); else resolve();
+        };
+        const closed = () => finish(new ChunkConnectionError("connection closed during ACK", { phase: "request", command: "ACK" }));
+        const timer = setTimeout(() => {
+          const error = new ChunkTimeoutError("ACK write timed out", { phase: "timeout", command: "ACK" });
+          this.clearConnectionState(error); socket.destroy(); finish(error);
+        }, this.options.commandTimeoutMs);
+        socket.once("close", closed);
+        socket.write(encodeStatement(`ACK ${revision}`, []), (cause) => {
+          if (cause) {
+            const error = this.wrapTransportError(cause, "request", "ACK");
+            this.clearConnectionState(error); socket.destroy(); finish(error);
+          } else finish();
+        });
+      });
+    });
   }
 
   /** @internal */
@@ -601,6 +637,30 @@ export class ChunkClient {
     return this.enqueue(async () => {
       const reply = await this.run("SHOW TABLES", [], "SHOW TABLES");
       return itemsOf(reply, "SHOW TABLES").map((item) => textOf(item, "a table name", "SHOW TABLES"));
+    });
+  }
+
+  /** Creates a durable slot; requires ADMIN on the table. */
+  createSlot(table: string, name: string): Promise<void> {
+    return this.enqueue(async () => {
+      const statement = `CREATE SLOT ${slotName(name)} ON ${checkName(table, "a table name")}`;
+      expectOk(await this.run(statement, [], "CREATE SLOT"), "CREATE SLOT");
+    });
+  }
+
+  /** Drops a durable slot and its retention claim; requires ADMIN. */
+  dropSlot(table: string, name: string): Promise<void> {
+    return this.enqueue(async () => {
+      const statement = `DROP SLOT ${slotName(name)} ON ${checkName(table, "a table name")}`;
+      expectOk(await this.run(statement, [], "DROP SLOT"), "DROP SLOT");
+    });
+  }
+
+  /** Lists visible slots, including lost slots; acked is the written position. */
+  listSlots(table?: string): Promise<ChunkSlot[]> {
+    return this.enqueue(async () => {
+      const statement = `SHOW SLOTS${table === undefined ? "" : ` ON ${checkName(table, "a table name")}`}`;
+      return parseSlots(await this.run(statement, [], "SHOW SLOTS"));
     });
   }
 
@@ -1654,6 +1714,10 @@ export class ChunkClient {
         this.watchReceiver(reply);
         continue;
       }
+      if (reply.type === "error" && reply.code === "INVALID_ARGUMENT" && this.watchStarted && this.watchAckError !== null) {
+        this.watchAckError(this.serverError(reply, "ACK"));
+        continue;
+      }
       if (this.pendingQueue.length === 0) {
         const error = reply.type === "error" ? this.serverError(reply, "WATCH") :
           new ChunkProtocolError("unexpected non-push WATCH reply", { phase: "protocol", command: "WATCH" });
@@ -1751,6 +1815,7 @@ export class ChunkClient {
     const failed = this.watchFailure;
     this.watchReceiver = null;
     this.watchFailure = null;
+    this.watchAckError = null;
     this.watchPaused = false;
     this.watchStarted = false;
     if (failed !== null && error !== undefined) this.disposed = true;

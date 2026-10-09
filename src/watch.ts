@@ -2,6 +2,7 @@ import type { ChunkClient } from "./client";
 import { ChunkConnectionError, ChunkProtocolError } from "./errors";
 import type { ChunkReply, PushReply } from "./protocol";
 import { integerOf, parseColumns, textOf } from "./schema";
+import { slotName } from "./slots";
 import type {
   ChunkColumn,
   ChunkPosition,
@@ -16,6 +17,7 @@ import { ChunkBits, checkCoordinate, checkName, requestError, valueFromReply } f
 // Internal stream access; ordinary operations never switch their connection to WATCH.
 export const kWatchStream = Symbol("watchStream");
 export const kWatchPause = Symbol("watchPause");
+export const kWatchAck = Symbol("watchAck");
 
 const MAX_UINT64 = (1n << 64n) - 1n;
 const MIN_INT64 = -(1n << 63n);
@@ -67,6 +69,7 @@ function coordinate(reply: ChunkReply): ChunkWatchCoordinate {
 
 function statementOf(table: string, options: ChunkWatchOptions): string {
   let statement = `WATCH ${checkName(table, "a table name")}`;
+  if (options.slot !== undefined) statement += ` SLOT ${slotName(options.slot)}`;
   if (options.area !== undefined) {
     const area = options.area;
     const values = [area.cx0, area.cy0, area.cx1, area.cy1].map((value) => checkCoordinate(value, "area coordinate"));
@@ -89,7 +92,7 @@ function statementOf(table: string, options: ChunkWatchOptions): string {
 export class ChunkWatch implements AsyncIterableIterator<ChunkWatchEvent> {
   readonly start: ChunkPosition;
   private readonly schemas = new Map<number, ChunkColumn[]>();
-  private readonly queued: PushReply[] = [];
+  private readonly queued: Array<PushReply | Error> = [];
   private wake: (() => void) | null = null;
   private failure: Error | null = null;
   private closing = false;
@@ -97,6 +100,8 @@ export class ChunkWatch implements AsyncIterableIterator<ChunkWatchEvent> {
   private closePromise: Promise<void> | null = null;
   private nextTurn: Promise<void> = Promise.resolve();
   private description: ChunkClient | null = null;
+  private available: bigint;
+  private acknowledged: bigint;
 
   private constructor(
     private readonly stream: ChunkClient,
@@ -105,8 +110,11 @@ export class ChunkWatch implements AsyncIterableIterator<ChunkWatchEvent> {
     start: ChunkPosition,
     version: number,
     columns: ChunkColumn[],
+    private readonly slot: boolean,
   ) {
     this.start = start;
+    this.available = start.revision;
+    this.acknowledged = start.revision;
     this.schemas.set(version, columns);
   }
 
@@ -115,7 +123,7 @@ export class ChunkWatch implements AsyncIterableIterator<ChunkWatchEvent> {
     const stream = createClient();
     const descriptions = createClient();
     let watch: ChunkWatch | null = null;
-    const early: PushReply[] = [];
+    const early: Array<PushReply | Error> = [];
     let earlyFailure: Error | null = null;
     try {
       const schema = await descriptions.describe(table);
@@ -131,11 +139,14 @@ export class ChunkWatch implements AsyncIterableIterator<ChunkWatchEvent> {
       }, (error) => {
         if (watch === null) earlyFailure = error;
         else watch.fail(error);
+      }, options.slot === undefined ? undefined : (error) => {
+        if (watch === null) early.push(error);
+        else watch.receive(error);
       });
       if (reply.type !== "simple") throw malformed("WATCH did not answer +OK epoch revision");
       const match = /^OK ([0-9a-f]{32}) (0|[1-9][0-9]*)$/i.exec(reply.value);
       if (match === null || BigInt(match[2]) > MAX_UINT64) throw malformed("invalid WATCH start position");
-      watch = new ChunkWatch(stream, createClient, table, { epoch: match[1].toLowerCase(), revision: BigInt(match[2]) }, schema.version, schema.columns);
+      watch = new ChunkWatch(stream, createClient, table, { epoch: match[1].toLowerCase(), revision: BigInt(match[2]) }, schema.version, schema.columns, options.slot !== undefined);
       for (const push of early) watch.receive(push);
       if (earlyFailure !== null) watch.fail(earlyFailure);
       return watch;
@@ -160,7 +171,25 @@ export class ChunkWatch implements AsyncIterableIterator<ChunkWatchEvent> {
     return { done: true, value: undefined };
   }
 
-  /** UNWATCH acknowledges every earlier push before the socket is closed. */
+  /** Sends a slot ACK. Completion means written to the socket, not persisted. */
+  ack(revision: bigint): Promise<void> {
+    if (this.failure !== null) return Promise.reject(this.failure);
+    if (this.closing || this.ended) return Promise.reject(new ChunkConnectionError("watch is closed", { phase: "request", command: "ACK" }));
+    if (!this.slot) return Promise.reject(requestError("ACK requires a slot watch", "ACK"));
+    if (typeof revision !== "bigint" || revision < 0n || revision > MAX_UINT64) {
+      return Promise.reject(requestError("ACK needs a uint64 bigint revision", "ACK"));
+    }
+    if (revision < this.acknowledged || revision > this.available) {
+      return Promise.reject(requestError("ACK decreases or exceeds the last returned position", "ACK"));
+    }
+    this.acknowledged = revision;
+    return this.stream[kWatchAck](revision).catch((error: Error) => {
+      this.fail(error);
+      throw error;
+    });
+  }
+
+  /** Drains earlier pushes; for slots, UNWATCH persists accepted ACKs before OK. */
   close(): Promise<void> {
     if (this.closePromise !== null) return this.closePromise;
     this.closing = true;
@@ -182,7 +211,7 @@ export class ChunkWatch implements AsyncIterableIterator<ChunkWatchEvent> {
     return this.closePromise;
   }
 
-  private receive(push: PushReply): void {
+  private receive(push: PushReply | Error): void {
     if (this.closing || this.ended) return;
     this.queued.push(push);
     // Leave subsequent frames in the reader/socket when the consumer is slow.
@@ -205,9 +234,13 @@ export class ChunkWatch implements AsyncIterableIterator<ChunkWatchEvent> {
       const push = this.queued.shift();
       if (push !== undefined) {
         this.stream[kWatchPause](false);
+        // A server-rejected ACK does not end a slot stream. It has no success
+        // reply, so rejection is reported by next(), which may be called again.
+        if (push instanceof Error) throw push;
         try {
           const value = await this.decode(push);
           if (this.closing || this.ended) return { done: true, value: undefined };
+          this.available = this.available > value.position.revision ? this.available : value.position.revision;
           return { done: false, value };
         } catch (error) {
           if (this.closing) return { done: true, value: undefined };
