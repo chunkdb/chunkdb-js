@@ -140,7 +140,7 @@ await client.dropUser("bot");
 
 ## Watching changes
 
-`client.watch(table, { area?, after? })` and `pool.watch` open a dedicated
+`client.watch(table, { slot?, area?, after? })` and `pool.watch` open a dedicated
 connection with the same TLS and login options. `area` is an inclusive box of
 chunk coordinates (`{ cx0, cy0, cx1, cy1 }`). A watch is an async iterator:
 
@@ -182,13 +182,65 @@ frontier together with that rebuilt state before applying later changes. See
 the server's [change feed guide](https://github.com/chunkdb/chunkdb/blob/main/docs/CHANGE_FEED.md).
 
 A lost connection ends iteration with an error; resume explicitly with the last
-saved `after` position. The server retains history only while a watch is open,
-so resuming can require resync. Schemas are cached by version; if an old version
+saved `after` position. Without a slot, the server retains history only while a
+watch is open, so resuming can require resync. Schemas are cached by version; if an old version
 is unavailable, iteration fails with `ChunkProtocolError` and state must be
 rebuilt. `close()` sends `UNWATCH`, waits for its acknowledgment, and closes the
 watch's connections. Breaking out of `for await` also closes it. Close watches
 separately from their originating client or pool; ordinary calls keep working
 while a watch is open.
+
+### Durable slots
+
+Create a slot once before producing changes: `await client.createSlot("world", "consumer")`.
+Then use `client.watch("world", { slot: "consumer", after: savedPosition })`.
+Slots retain durable changes across disconnects and checkpoints. `listSlots(table?)`
+returns `{ table, name, epoch, acked, retainedBytes, lost }`; both numeric fields
+are `bigint`, and `acked` is the position already written by the server.
+`dropSlot(table, name)` releases the slot. These methods also exist on pools.
+Creating or dropping a slot requires ADMIN; watching requires READ. Only one
+watch can use a slot at a time (`BUSY`).
+
+For exactly-once output, store the position atomically with the output in your
+own system, then ACK. On reconnect, pass that stored position as `after`.
+In this example, `output.transaction` is your external store's atomic transaction:
+
+```ts
+const savedPosition = await output.loadPosition();
+const watch = await client.watch("world", { slot: "consumer", after: savedPosition });
+try {
+  for await (const event of watch) {
+    if (event.kind === "schema") { updateColumns(event.columns); continue; }
+    if (event.kind === "resync") throw new Error("Rebuild consumer state before resuming");
+    await output.transaction(async (tx) => {
+      const previous = await tx.loadPosition();
+      if (previous?.epoch === event.position.epoch && previous.revision >= event.position.revision) return;
+      await tx.applyBlocks(event.blocks);
+      await tx.savePosition(event.position);
+    });
+    await watch.ack(event.position.revision);
+  }
+} finally {
+  await watch.close();
+}
+```
+
+`after` does not acknowledge or release history. ACK alone cannot make an external
+write atomic. `ack(revision)` accepts a uint64 `bigint` through the starting or
+last returned position, in nondecreasing order. It resolves after writing to the
+socket; successful ACK has no reply. The server batches eligible acknowledgements
+for up to 100 ms, and `close()` waits for accepted ACKs to be persisted before OK.
+Schema descriptions may preface an archived change at the same revision: apply
+that change before acknowledging its revision. A server-rejected ACK appears as
+`ChunkServerError` with code `INVALID_ARGUMENT` from `next()`; a subsequent
+`next()` can continue the stream. Other stream errors remain terminal.
+
+If retained history exceeds the server's slot limit, `lost` becomes true and
+WATCH fails with `SLOT_LOST`. Rebuild the consumer state, drop the lost slot and
+create it again. Resume explicitly after connection loss; the client does not
+reconnect or ACK automatically. See the server's
+[slot guide](https://github.com/chunkdb/chunkdb/blob/main/docs/CHANGE_FEED.md#durable-slots)
+for durability and retention limits.
 
 ## API
 
@@ -204,7 +256,8 @@ while a watch is open.
 - `describe(table?): Promise<ChunkTableSchema>`, `clearSchemaCache(table?)`
 - `createUser(name, password, { managesUsers? })`, `setPassword(name, password)`, `setManagesUsers(name, managesUsers)`, `dropUser(name)`, `grant(right, table, user)`, `revoke(right, table, user)`, `listUsers(): Promise<ChunkUser[]>`
 - `transaction(fn, { retries? }): Promise<bigint | null>`: runs `fn(tx)` in a transaction (see Transactions)
-- `watch(table, { area?, after? }): Promise<ChunkWatch>`: typed changes on a dedicated connection (see Watching changes)
+- `watch(table, { slot?, area?, after? }): Promise<ChunkWatch>`: typed changes on a dedicated connection; slot watches support `ack(revision)`
+- `createSlot(table, name)`, `dropSlot(table, name)`, `listSlots(table?): Promise<ChunkSlot[]>`: durable history and written acknowledgements
 - `ping()`, `flushWal()` (resolves once every write acknowledged before is durable), `metrics()` (Prometheus text)
 - `execute(statement, parameters?): Promise<ChunkReply>`: one CQL statement with `$1`..`$n` parameter frames (`Uint8Array` or `null`); `encodeParameter(column, value)` encodes a typed value
 - `serverInfo()`, `defaultTable()`, `uri()`, `connect()`, `close()`
