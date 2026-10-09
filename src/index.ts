@@ -3,6 +3,7 @@ export { ChunkPool, connectPool } from "./pool";
 export { emptyChunk } from "./chunk-form";
 export {
   ChunkAuthError,
+  ChunkConflictError,
   ChunkConnectionError,
   ChunkError,
   ChunkPermissionError,
@@ -60,6 +61,8 @@ export type {
   ChunkTableOptions,
   ChunkTableOptionValues,
   ChunkTableSchema,
+  ChunkTransaction,
+  ChunkTransactionOptions,
   ChunkTypeConversion,
   ChunkUser,
   ChunkValue,

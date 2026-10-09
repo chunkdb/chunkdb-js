@@ -4,6 +4,7 @@ import tls from "node:tls";
 
 import {
   ChunkAuthError,
+  ChunkConflictError,
   ChunkConnectionError,
   ChunkPermissionError,
   ChunkProtocolError,
@@ -49,6 +50,8 @@ import type {
   ChunkTableOption,
   ChunkTableOptions,
   ChunkTableSchema,
+  ChunkTransaction,
+  ChunkTransactionOptions,
   ChunkUser,
   ChunkValue,
   ChunkWriteOptions,
@@ -94,6 +97,38 @@ interface ResolvedOptions {
 interface SendTurn {
   previous: Promise<void>;
   release: () => void;
+  // The transaction attempt the operation belongs to.
+  tx?: TransactionAttempt;
+}
+
+// One run of a transaction's callback (ChunkClient.transaction).
+//
+// The server keeps a transaction per connection, so the attempt holds the
+// client's whole connection: it starts once every operation in flight has
+// ended, and plain operations called meanwhile wait until it ends. Its own
+// statements, the DESCRIBE of a schema it has not cached included, run one
+// at a time on that connection and never reconnect.
+interface TransactionAttempt {
+  readonly owner: ChunkClient;
+  // False once the callback settled: the handle then refuses calls.
+  open: boolean;
+  // The connection BEGIN went out on; the attempt uses no other one.
+  socket: TransportSocket | null;
+  // The server holds the attempt's transaction, open or ended by CONFLICT,
+  // until ROLLBACK or COMMIT.
+  began: boolean;
+  // Settles when the statements called so far have settled.
+  chain: Promise<void>;
+  // CONFLICT or a lost connection ended the transaction: every later
+  // statement of the attempt fails with it without being sent.
+  failure: Error | null;
+}
+
+interface OperationWaiter {
+  run: () => void;
+  reject: (err: Error) => void;
+  // A transaction, which waits until no operation is in flight.
+  exclusive?: boolean;
 }
 
 interface PendingRequest {
@@ -107,6 +142,7 @@ const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 4242;
 const DEFAULT_TIMEOUT_MS = 5000;
 const DEFAULT_TABLE = "default";
+const DEFAULT_TRANSACTION_RETRIES = 5;
 
 // Server messages (src/engine_cql.cpp) that mean the cached schema is out
 // of date: a parameter frame of the wrong size for its column, or a column
@@ -287,6 +323,51 @@ function ifVersionClause(ifVersion: bigint | undefined): string {
   return ifVersion === undefined ? "" : ` IF VERSION ${checkVersion(ifVersion)}`;
 }
 
+function isTransportError(error: unknown): error is ChunkError {
+  return error instanceof ChunkConnectionError || error instanceof ChunkTimeoutError || error instanceof ChunkTlsError;
+}
+
+// Errors of statements a transaction did not send because its connection
+// had closed, which rolled the transaction back.
+const unsent = new WeakSet<Error>();
+
+function transactionLost(command: string): ChunkConnectionError {
+  const error = new ChunkConnectionError(
+    `the connection closed during the transaction, before ${command}; the server rolled the transaction back`,
+    { phase: "connect", command },
+  );
+  unsent.add(error);
+  return error;
+}
+
+// A COMMIT whose connection failed after it was sent may or may not have
+// been applied.
+function commitError(error: unknown): unknown {
+  if (!isTransportError(error) || unsent.has(error)) {
+    return error;
+  }
+  const message = `the outcome of COMMIT is unknown: ${error.message}`;
+  const options = { phase: error.phase, command: "COMMIT", cause: error };
+  if (error instanceof ChunkTimeoutError) {
+    return new ChunkTimeoutError(message, options);
+  }
+  return error instanceof ChunkTlsError ? new ChunkTlsError(message, options) : new ChunkConnectionError(message, options);
+}
+
+// A short random pause before a transaction runs again, so that
+// transactions conflicting with each other do not keep meeting: up to 1 ms
+// after the first conflict, doubling to at most 16 ms.
+function conflictPause(conflicts: number): Promise<void> {
+  const ms = Math.random() * Math.min(16, 2 ** (conflicts - 1));
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function noIfVersion(options: ChunkWriteOptions | undefined, command: string): void {
+  if (options?.ifVersion !== undefined) {
+    throw requestError("ifVersion is not taken inside a transaction: COMMIT checks every chunk the transaction read or wrote", command);
+  }
+}
+
 function typeText(type: string | ChunkColumnType): string {
   try {
     return formatColumnType(typeof type === "string" ? parseColumnType(type) : type);
@@ -378,7 +459,12 @@ export class ChunkClient {
   // whatever each awaits first (such as a DESCRIBE for its schema).
   private readonly sendTurns = new AsyncLocalStorage<SendTurn>();
   private lastSendTurn: Promise<void> = Promise.resolve();
-  private readonly opWaiters: Array<{ run: () => void; reject: (err: Error) => void }> = [];
+  private readonly opWaiters: OperationWaiter[] = [];
+  // The transaction attempt holding the connection.
+  private holder: TransactionAttempt | null = null;
+  // The attempt whose callback is running, for refusing plain calls on this
+  // client from inside it: they would wait for the transaction to end.
+  private readonly callbackScope = new AsyncLocalStorage<TransactionAttempt>();
 
   constructor(options: ChunkClientOptions = {}) {
     this.options = resolveOptions(options);
@@ -561,30 +647,7 @@ export class ChunkClient {
 
   /** A block's values by column name, or null when the block is absent. */
   getBlock(x: number, y: number, options: ChunkReadOptions = {}): Promise<ChunkRow | null> {
-    return this.enqueue(async () => {
-      const table = this.tableOf(options);
-      const at = `${checkCoordinate(x, "x")} ${checkCoordinate(y, "y")}`;
-      return await this.withLayout(table, false, async (layout) => {
-        const indexes = columnIndexes(layout, options.columns);
-        const names = indexes.map((index) => layout.schema.columns[index].name);
-        const reply = await this.run(`GET BLOCK ${at} FROM ${table}${columnsClause(names)}`, [], "GET BLOCK");
-        if (reply.type === "null") {
-          return null;
-        }
-        if (reply.type !== "array" || reply.items.length !== indexes.length) {
-          throw new StaleSchemaError(`GET BLOCK answered ${reply.type === "array" ? reply.items.length : reply.type} values for ${indexes.length} columns`, {
-            phase: "protocol",
-            command: "GET BLOCK",
-          });
-        }
-        const row: ChunkRow = {};
-        indexes.forEach((index, i) => {
-          const column = layout.schema.columns[index];
-          row[column.name] = valueFromReply(column, reply.items[i]);
-        });
-        return row;
-      });
-    });
+    return this.enqueue(() => this.getBlockOp(x, y, options));
   }
 
   /**
@@ -592,33 +655,12 @@ export class ChunkClient {
    * Values travel as parameters. Resolves the chunk version after the write.
    */
   setBlock(x: number, y: number, values: Readonly<Record<string, ChunkValue>>, options: ChunkWriteOptions = {}): Promise<bigint> {
-    return this.enqueue(async () => {
-      const table = this.tableOf(options);
-      const at = `${checkCoordinate(x, "x")} ${checkCoordinate(y, "y")}`;
-      const condition = ifVersionClause(options.ifVersion);
-      const names = Object.keys(values);
-      if (names.length === 0) {
-        throw requestError("setBlock needs at least one column", "SET BLOCK");
-      }
-      return await this.withLayout(table, true, async (layout) => {
-        const indexes = columnIndexes(layout, names);
-        const parameters = indexes.map((index, i) => encodeParameter(layout.schema.columns[index], values[names[i]]));
-        const assignments = names.map((name, i) => `${name} = $${i + 1}`).join(", ");
-        const reply = await this.run(`SET BLOCK ${at} IN ${table} ${assignments}${condition}`, parameters, "SET BLOCK");
-        return versionOf(reply, "SET BLOCK");
-      });
-    });
+    return this.enqueue(async () => versionOf(await this.setBlockOp(x, y, values, options), "SET BLOCK"));
   }
 
   /** Deletes a block. Resolves the chunk version after it. */
   deleteBlock(x: number, y: number, options: ChunkWriteOptions = {}): Promise<bigint> {
-    return this.enqueue(async () => {
-      const table = this.tableOf(options);
-      const statement =
-        `DELETE BLOCK ${checkCoordinate(x, "x")} ${checkCoordinate(y, "y")} FROM ${table}` +
-        ifVersionClause(options.ifVersion);
-      return versionOf(await this.run(statement, [], "DELETE BLOCK"), "DELETE BLOCK");
-    });
+    return this.enqueue(async () => versionOf(await this.deleteBlockOp(x, y, options), "DELETE BLOCK"));
   }
 
   /**
@@ -627,26 +669,12 @@ export class ChunkClient {
    * without blocks reads as an empty state with its version.
    */
   getChunk(cx: number, cy: number, options: ChunkReadOptions = {}): Promise<ChunkState> {
-    return this.enqueue(async () => {
-      const table = this.tableOf(options);
-      const at = `${checkCoordinate(cx, "cx")} ${checkCoordinate(cy, "cy")}`;
-      return await this.withLayout(table, false, async (layout) => {
-        const indexes = columnIndexes(layout, options.columns);
-        const names = indexes.map((index) => layout.schema.columns[index].name);
-        const reply = await this.run(`GET CHUNK ${at} FROM ${table}${columnsClause(names)}`, [], "GET CHUNK");
-        return decodeChunkForm(layout, bulkOf(reply, "GET CHUNK"), indexes);
-      });
-    });
+    return this.enqueue(() => this.getChunkOp(cx, cy, options));
   }
 
   /** The chunk form as the server sends it (docs/CQL.md), for copying chunks. */
   getChunkRaw(cx: number, cy: number, options: ChunkReadOptions = {}): Promise<Buffer> {
-    return this.enqueue(async () => {
-      const table = this.tableOf(options);
-      const names = (options.columns ?? []).map((name) => checkName(name, "a column name"));
-      const statement = `GET CHUNK ${checkCoordinate(cx, "cx")} ${checkCoordinate(cy, "cy")} FROM ${table}${columnsClause(names)}`;
-      return bulkOf(await this.run(statement, [], "GET CHUNK"), "GET CHUNK");
-    });
+    return this.enqueue(() => this.getChunkRawOp(cx, cy, options));
   }
 
   /**
@@ -656,16 +684,7 @@ export class ChunkClient {
    * the write.
    */
   setChunk(cx: number, cy: number, state: ChunkStateInput, options: ChunkWriteOptions = {}): Promise<bigint> {
-    return this.enqueue(async () => {
-      const table = this.tableOf(options);
-      const statement =
-        `SET CHUNK ${checkCoordinate(cx, "cx")} ${checkCoordinate(cy, "cy")} IN ${table} $1` +
-        ifVersionClause(options.ifVersion);
-      return await this.withLayout(table, true, async (layout) => {
-        const form = encodeChunkForm(layout, state);
-        return versionOf(await this.run(statement, [form], "SET CHUNK"), "SET CHUNK");
-      }, true);
-    });
+    return this.enqueue(async () => versionOf(await this.setChunkOp(cx, cy, state, options), "SET CHUNK"));
   }
 
   /**
@@ -674,26 +693,7 @@ export class ChunkClient {
    * version than the table's rejects with `ChunkSchemaMismatchError`.
    */
   setChunkRaw(cx: number, cy: number, form: Uint8Array, options: ChunkWriteOptions = {}): Promise<bigint> {
-    return this.enqueue(async () => {
-      const table = this.tableOf(options);
-      const statement =
-        `SET CHUNK ${checkCoordinate(cx, "cx")} ${checkCoordinate(cy, "cy")} IN ${table} $1` +
-        ifVersionClause(options.ifVersion);
-      if (!(form instanceof Uint8Array)) {
-        throw requestError("setChunkRaw takes the chunk form as a Uint8Array", "SET CHUNK");
-      }
-      // A longer frame than the table takes closes the connection.
-      return await this.withLayout(table, true, async (layout) => {
-        const limit = chunkFormLimit(layout);
-        if (form.length > limit) {
-          throw new StaleSchemaError(`a chunk form of ${table} takes at most ${limit} bytes, got ${form.length}`, {
-            phase: "request",
-            command: "SET CHUNK",
-          });
-        }
-        return versionOf(await this.run(statement, [form], "SET CHUNK"), "SET CHUNK");
-      });
-    });
+    return this.enqueue(async () => versionOf(await this.setChunkRawOp(cx, cy, form, options), "SET CHUNK"));
   }
 
   /**
@@ -702,30 +702,73 @@ export class ChunkClient {
    * `maxAreaChunks` chunks.
    */
   getArea(area: ChunkArea, options: ChunkReadOptions = {}): Promise<ChunkAreaEntry[]> {
-    return this.enqueue(async () => {
-      const table = this.tableOf(options);
-      const clause = areaClause(area);
-      return await this.withLayout(table, false, async (layout) => {
-        const indexes = columnIndexes(layout, options.columns);
-        const names = indexes.map((index) => layout.schema.columns[index].name);
-        const reply = await this.run(`GET AREA ${clause} FROM ${table}${columnsClause(names)}`, [], "GET AREA");
-        return this.areaEntries(reply).map(({ cx, cy, chunk }) => ({
-          cx,
-          cy,
-          chunk: decodeChunkForm(layout, chunk, indexes),
-        }));
-      });
-    });
+    return this.enqueue(() => this.getAreaOp(area, options));
   }
 
   /** `getArea` with each chunk as the server sends its form. */
   getAreaRaw(area: ChunkArea, options: ChunkReadOptions = {}): Promise<ChunkAreaRawEntry[]> {
-    return this.enqueue(async () => {
-      const table = this.tableOf(options);
-      const names = (options.columns ?? []).map((name) => checkName(name, "a column name"));
-      const reply = await this.run(`GET AREA ${areaClause(area)} FROM ${table}${columnsClause(names)}`, [], "GET AREA");
-      return this.areaEntries(reply);
-    });
+    return this.enqueue(() => this.getAreaRawOp(area, options));
+  }
+
+  /**
+   * Runs `fn` in a transaction and resolves the version `COMMIT` gave every
+   * chunk it wrote, or null when it wrote nothing. `fn` reads and writes
+   * through `tx`; its reads see one snapshot of the table, and its writes
+   * apply together at `COMMIT` or not at all.
+   *
+   * When the transaction ends with `CONFLICT` (another write changed what it
+   * read or wrote, or a server limit ended it), nothing of it is applied and
+   * `fn` runs again in a new transaction, after a pause of a few
+   * milliseconds, up to `retries` times; then the `ChunkConflictError`
+   * rejects. When `fn` throws, the transaction is rolled back and the error
+   * rejects without running again. `fn` may run more than once, so it
+   * should not have other effects until the returned promise resolves.
+   *
+   * The transaction holds this client's connection: it starts once the
+   * calls in flight have ended, and calls made meanwhile wait until it ends.
+   * Inside `fn` use `tx`; calls on this client from inside it are refused.
+   */
+  async transaction(
+    fn: (tx: ChunkTransaction) => unknown,
+    options: ChunkTransactionOptions = {},
+  ): Promise<bigint | null> {
+    const retries = options.retries ?? DEFAULT_TRANSACTION_RETRIES;
+    if (!Number.isSafeInteger(retries) || retries < 0) {
+      throw new TypeError("retries must be a non-negative integer");
+    }
+    if (this.inCallback()) {
+      throw requestError("transactions do not nest: use the transaction's tx inside its callback");
+    }
+    let conflicts = 0;
+    while (true) {
+      // Connecting rejects the operations waiting for the connection, so
+      // the attempt connects before it waits for it.
+      await this.connect();
+      const tx: TransactionAttempt = {
+        owner: this,
+        open: true,
+        socket: null,
+        began: false,
+        chain: Promise.resolve(),
+        failure: null,
+      };
+      await this.hold(tx);
+      let error: unknown;
+      try {
+        return await this.runAttempt(tx, fn);
+      } catch (caught) {
+        error = caught;
+      } finally {
+        this.holder = null;
+        this.releaseEnqueueSlot();
+      }
+      if (error instanceof ChunkConflictError && conflicts < retries) {
+        conflicts += 1;
+        await conflictPause(conflicts);
+        continue;
+      }
+      throw error;
+    }
   }
 
   /** One page of the chunks that have a present block (`SCAN CHUNKS`). */
@@ -859,6 +902,286 @@ export class ChunkClient {
     return Buffer.from(await scramVerifierAsync(password, { iterations: this.options.verifierIterations }), "utf8");
   }
 
+  // The statements of the block, chunk and area methods, shared by this
+  // client's calls and a transaction's. Writes resolve the reply: a version,
+  // or null inside a transaction.
+
+  private async getBlockOp(x: number, y: number, options: ChunkReadOptions): Promise<ChunkRow | null> {
+    const table = this.tableOf(options);
+    const at = `${checkCoordinate(x, "x")} ${checkCoordinate(y, "y")}`;
+    return await this.withLayout(table, false, async (layout) => {
+      const indexes = columnIndexes(layout, options.columns);
+      const names = indexes.map((index) => layout.schema.columns[index].name);
+      const reply = await this.run(`GET BLOCK ${at} FROM ${table}${columnsClause(names)}`, [], "GET BLOCK");
+      if (reply.type === "null") {
+        return null;
+      }
+      if (reply.type !== "array" || reply.items.length !== indexes.length) {
+        throw new StaleSchemaError(`GET BLOCK answered ${reply.type === "array" ? reply.items.length : reply.type} values for ${indexes.length} columns`, {
+          phase: "protocol",
+          command: "GET BLOCK",
+        });
+      }
+      const row: ChunkRow = {};
+      indexes.forEach((index, i) => {
+        const column = layout.schema.columns[index];
+        row[column.name] = valueFromReply(column, reply.items[i]);
+      });
+      return row;
+    });
+  }
+
+  private async setBlockOp(
+    x: number,
+    y: number,
+    values: Readonly<Record<string, ChunkValue>>,
+    options: ChunkWriteOptions,
+  ): Promise<ChunkReply> {
+    const table = this.tableOf(options);
+    const at = `${checkCoordinate(x, "x")} ${checkCoordinate(y, "y")}`;
+    const condition = ifVersionClause(options.ifVersion);
+    const names = Object.keys(values);
+    if (names.length === 0) {
+      throw requestError("setBlock needs at least one column", "SET BLOCK");
+    }
+    return await this.withLayout(table, true, async (layout) => {
+      const indexes = columnIndexes(layout, names);
+      const parameters = indexes.map((index, i) => encodeParameter(layout.schema.columns[index], values[names[i]]));
+      const assignments = names.map((name, i) => `${name} = $${i + 1}`).join(", ");
+      return await this.run(`SET BLOCK ${at} IN ${table} ${assignments}${condition}`, parameters, "SET BLOCK");
+    });
+  }
+
+  private async deleteBlockOp(x: number, y: number, options: ChunkWriteOptions): Promise<ChunkReply> {
+    const table = this.tableOf(options);
+    const statement =
+      `DELETE BLOCK ${checkCoordinate(x, "x")} ${checkCoordinate(y, "y")} FROM ${table}` +
+      ifVersionClause(options.ifVersion);
+    return await this.run(statement, [], "DELETE BLOCK");
+  }
+
+  private async getChunkOp(cx: number, cy: number, options: ChunkReadOptions): Promise<ChunkState> {
+    const table = this.tableOf(options);
+    const at = `${checkCoordinate(cx, "cx")} ${checkCoordinate(cy, "cy")}`;
+    return await this.withLayout(table, false, async (layout) => {
+      const indexes = columnIndexes(layout, options.columns);
+      const names = indexes.map((index) => layout.schema.columns[index].name);
+      const reply = await this.run(`GET CHUNK ${at} FROM ${table}${columnsClause(names)}`, [], "GET CHUNK");
+      return decodeChunkForm(layout, bulkOf(reply, "GET CHUNK"), indexes);
+    });
+  }
+
+  private async getChunkRawOp(cx: number, cy: number, options: ChunkReadOptions): Promise<Buffer> {
+    const table = this.tableOf(options);
+    const names = (options.columns ?? []).map((name) => checkName(name, "a column name"));
+    const statement = `GET CHUNK ${checkCoordinate(cx, "cx")} ${checkCoordinate(cy, "cy")} FROM ${table}${columnsClause(names)}`;
+    return bulkOf(await this.run(statement, [], "GET CHUNK"), "GET CHUNK");
+  }
+
+  private async setChunkOp(cx: number, cy: number, state: ChunkStateInput, options: ChunkWriteOptions): Promise<ChunkReply> {
+    const table = this.tableOf(options);
+    const statement =
+      `SET CHUNK ${checkCoordinate(cx, "cx")} ${checkCoordinate(cy, "cy")} IN ${table} $1` +
+      ifVersionClause(options.ifVersion);
+    return await this.withLayout(table, true, async (layout) => {
+      const form = encodeChunkForm(layout, state);
+      return await this.run(statement, [form], "SET CHUNK");
+    }, true);
+  }
+
+  private async setChunkRawOp(cx: number, cy: number, form: Uint8Array, options: ChunkWriteOptions): Promise<ChunkReply> {
+    const table = this.tableOf(options);
+    const statement =
+      `SET CHUNK ${checkCoordinate(cx, "cx")} ${checkCoordinate(cy, "cy")} IN ${table} $1` +
+      ifVersionClause(options.ifVersion);
+    if (!(form instanceof Uint8Array)) {
+      throw requestError("setChunkRaw takes the chunk form as a Uint8Array", "SET CHUNK");
+    }
+    // A longer frame than the table takes closes the connection.
+    return await this.withLayout(table, true, async (layout) => {
+      const limit = chunkFormLimit(layout);
+      if (form.length > limit) {
+        throw new StaleSchemaError(`a chunk form of ${table} takes at most ${limit} bytes, got ${form.length}`, {
+          phase: "request",
+          command: "SET CHUNK",
+        });
+      }
+      return await this.run(statement, [form], "SET CHUNK");
+    });
+  }
+
+  private async getAreaOp(area: ChunkArea, options: ChunkReadOptions): Promise<ChunkAreaEntry[]> {
+    const table = this.tableOf(options);
+    const clause = areaClause(area);
+    return await this.withLayout(table, false, async (layout) => {
+      const indexes = columnIndexes(layout, options.columns);
+      const names = indexes.map((index) => layout.schema.columns[index].name);
+      const reply = await this.run(`GET AREA ${clause} FROM ${table}${columnsClause(names)}`, [], "GET AREA");
+      return this.areaEntries(reply).map(({ cx, cy, chunk }) => ({
+        cx,
+        cy,
+        chunk: decodeChunkForm(layout, chunk, indexes),
+      }));
+    });
+  }
+
+  private async getAreaRawOp(area: ChunkArea, options: ChunkReadOptions): Promise<ChunkAreaRawEntry[]> {
+    const table = this.tableOf(options);
+    const names = (options.columns ?? []).map((name) => checkName(name, "a column name"));
+    const reply = await this.run(`GET AREA ${areaClause(area)} FROM ${table}${columnsClause(names)}`, [], "GET AREA");
+    return this.areaEntries(reply);
+  }
+
+  // BEGIN, the callback of one attempt, then COMMIT; ROLLBACK when it
+  // throws or a statement met CONFLICT.
+  private async runAttempt(tx: TransactionAttempt, fn: (tx: ChunkTransaction) => unknown): Promise<bigint | null> {
+    expectOk(await this.transactionStatement(tx, "BEGIN"), "BEGIN");
+    tx.began = true;
+    const handle = this.transactionHandle(tx);
+    try {
+      await this.callbackScope.run(tx, () => fn(handle));
+    } catch (error) {
+      await this.closeAttempt(tx);
+      await this.rollback(tx);
+      throw error;
+    }
+    await this.closeAttempt(tx);
+    if (tx.failure !== null) {
+      // The callback caught the failure; a transaction ended by CONFLICT
+      // still answers it to every statement until ROLLBACK.
+      await this.rollback(tx);
+      throw tx.failure;
+    }
+    tx.began = false;
+    let reply: ChunkReply;
+    try {
+      reply = await this.transactionStatement(tx, "COMMIT");
+    } catch (error) {
+      throw commitError(error);
+    }
+    return reply.type === "null" ? null : versionOf(reply, "COMMIT");
+  }
+
+  // Refuses further calls on the attempt's handle and waits for the
+  // statements already called, which a statement left unawaited may still
+  // be running.
+  private async closeAttempt(tx: TransactionAttempt): Promise<void> {
+    tx.open = false;
+    await tx.chain;
+  }
+
+  private async rollback(tx: TransactionAttempt): Promise<void> {
+    if (!tx.began) {
+      return;
+    }
+    tx.began = false;
+    try {
+      expectOk(await this.transactionStatement(tx, "ROLLBACK"), "ROLLBACK");
+    } catch (error) {
+      // The server rolls back the transaction of a connection that closes:
+      // closing it leaves no transaction open whatever ROLLBACK met, and the
+      // next call or attempt reconnects. The caller gets the attempt's error.
+      const socket = tx.socket;
+      if (socket !== null && this.socket === socket) {
+        this.clearConnectionState(
+          new ChunkConnectionError("connection closed after a failed ROLLBACK", { phase: "response", command: "ROLLBACK", cause: error }),
+        );
+        socket.destroy();
+      }
+    }
+  }
+
+  // BEGIN, COMMIT or ROLLBACK, sent while none of the attempt's statements
+  // is in flight.
+  private transactionStatement(tx: TransactionAttempt, statement: string): Promise<ChunkReply> {
+    const turn: SendTurn = { previous: Promise.resolve(), release: () => {}, tx };
+    return this.sendTurns.run(turn, () => this.run(statement, [], statement));
+  }
+
+  private transactionHandle(tx: TransactionAttempt): ChunkTransaction {
+    const call = <T>(operation: () => Promise<T>) => this.enqueueTransaction(tx, operation);
+    const write = async (options: ChunkWriteOptions, command: string, operation: () => Promise<ChunkReply>): Promise<void> => {
+      noIfVersion(options, command);
+      const reply = await call(operation);
+      if (reply.type !== "null") {
+        throw new ChunkProtocolError(`expected _ from ${command} inside a transaction, got ${reply.type}`, {
+          phase: "protocol",
+          command,
+        });
+      }
+    };
+    return {
+      getBlock: (x, y, options = {}) => call(() => this.getBlockOp(x, y, options)),
+      setBlock: (x, y, values, options = {}) => write(options, "SET BLOCK", () => this.setBlockOp(x, y, values, options)),
+      deleteBlock: (x, y, options = {}) => write(options, "DELETE BLOCK", () => this.deleteBlockOp(x, y, options)),
+      getChunk: (cx, cy, options = {}) => call(() => this.getChunkOp(cx, cy, options)),
+      getChunkRaw: (cx, cy, options = {}) => call(() => this.getChunkRawOp(cx, cy, options)),
+      setChunk: (cx, cy, state, options = {}) => write(options, "SET CHUNK", () => this.setChunkOp(cx, cy, state, options)),
+      setChunkRaw: (cx, cy, form, options = {}) => write(options, "SET CHUNK", () => this.setChunkRawOp(cx, cy, form, options)),
+      getArea: (area, options = {}) => call(() => this.getAreaOp(area, options)),
+      getAreaRaw: (area, options = {}) => call(() => this.getAreaRawOp(area, options)),
+    };
+  }
+
+  // Runs one statement of a transaction after those called before it have
+  // settled. The server keeps a transaction ended by CONFLICT on the
+  // connection, answering CONFLICT to every statement until ROLLBACK, so a
+  // statement sent behind the conflict would not run outside it either; one
+  // at a time, the client knows of the conflict before the next statement
+  // and does not send it.
+  private enqueueTransaction<T>(tx: TransactionAttempt, operation: () => Promise<T>): Promise<T> {
+    if (!tx.open) {
+      return Promise.reject(requestError("the transaction has ended: its tx works only inside its callback"));
+    }
+    const result = tx.chain.then(() => {
+      if (tx.failure !== null) {
+        throw tx.failure;
+      }
+      const turn: SendTurn = { previous: Promise.resolve(), release: () => {}, tx };
+      return this.sendTurns.run(turn, async () => {
+        try {
+          return await operation();
+        } catch (error) {
+          if (error instanceof ChunkConflictError) {
+            // The server ended the transaction; ROLLBACK closes it.
+            tx.failure ??= error;
+          } else if (isTransportError(error)) {
+            // The connection closed, which rolled the transaction back.
+            tx.failure ??= error;
+            tx.began = false;
+          }
+          throw error;
+        }
+      });
+    });
+    tx.chain = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+
+  // Waits until no operation is in flight, then holds the connection for
+  // the attempt (see TransactionAttempt).
+  private hold(tx: TransactionAttempt): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const run = () => {
+        this.holder = tx;
+        resolve();
+      };
+      if (this.opWaiters.length === 0 && this.holder === null && this.activeOps === 0) {
+        run();
+      } else {
+        this.opWaiters.push({ run, reject, exclusive: true });
+      }
+    });
+  }
+
+  private inCallback(): boolean {
+    const scope = this.callbackScope.getStore();
+    return scope !== undefined && scope.owner === this && scope.open;
+  }
+
   private tableOf(options: ChunkTableOption | undefined): string {
     return checkName(options?.table ?? this.options.table, "a table name");
   }
@@ -967,6 +1290,11 @@ export class ChunkClient {
   }
 
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.inCallback()) {
+      return Promise.reject(
+        requestError("this client is running a transaction: inside its callback use tx, or another client"),
+      );
+    }
     return new Promise<T>((resolve, reject) => {
       const run = () => {
         this.activeOps += 1;
@@ -992,7 +1320,7 @@ export class ChunkClient {
           },
         );
       };
-      if (this.opWaiters.length === 0 && this.activeOps < this.maxPipeline) {
+      if (this.opWaiters.length === 0 && this.holder === null && this.activeOps < this.maxPipeline) {
         run();
       } else {
         this.opWaiters.push({ run, reject });
@@ -1000,8 +1328,13 @@ export class ChunkClient {
     });
   }
 
+  // Starts waiting operations in order while there is room: a transaction
+  // once no operation is in flight, then nothing until it ends.
   private releaseEnqueueSlot(): void {
-    while (this.opWaiters.length > 0 && this.activeOps < this.maxPipeline) {
+    while (this.opWaiters.length > 0 && this.holder === null) {
+      if (this.activeOps >= (this.opWaiters[0].exclusive === true ? 1 : this.maxPipeline)) {
+        return;
+      }
       this.opWaiters.shift()!.run();
     }
   }
@@ -1133,6 +1466,9 @@ export class ChunkClient {
       }
       return new ChunkVersionMismatchError(reply.message, BigInt(current[1]), { phase: "response", command });
     }
+    if (reply.code === "CONFLICT") {
+      return new ChunkConflictError(reply.message, reply.message.split(" ", 1)[0], { phase: "response", command });
+    }
     if (reply.code === "SCHEMA_MISMATCH") {
       const current = /^current=([0-9]+)(?: |$)/.exec(reply.message);
       if (current === null) {
@@ -1183,10 +1519,22 @@ export class ChunkClient {
     if (turn !== undefined) {
       await turn.previous;
     }
-    await this.ensureConnected();
+    // After BEGIN a transaction's statements go to its connection only: on
+    // a new one they would run outside the transaction.
+    const tx = turn?.tx;
+    if (tx?.socket != null) {
+      if (this.socket !== tx.socket) {
+        throw transactionLost(command);
+      }
+    } else {
+      await this.ensureConnected();
+    }
     const socket = this.socket;
     if (socket === null) {
       throw new ChunkConnectionError("connection is not available", { phase: "connect", command });
+    }
+    if (tx !== undefined && command === "BEGIN") {
+      tx.socket = socket;
     }
     // A longer line, or more frames, make the server close the connection.
     if (this.info !== null) {

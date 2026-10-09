@@ -84,6 +84,26 @@ for await (const { cx, cy } of client.scanAllChunks()) console.log(cx, cy);
 - `getArea` returns only chunks with a present block, at most `maxAreaChunks` per call. `scanChunks({ after, limit })` returns one page `{ chunks, more }`.
 - Versions are compared only for equality. `ifVersion` on a block write also fails when another block of its chunk changed.
 
+## Transactions
+
+```ts
+import { ChunkConflictError } from "@chunkdb/client";
+
+const version = await client.transaction(async (tx) => {
+  const from = await tx.getBlock(10, 4);
+  const to = await tx.getBlock(300, 7);
+  await tx.setBlock(10, 4, { light: (from?.light as number) - 1 });
+  await tx.setBlock(300, 7, { light: (to?.light as number) + 1 });
+}); // the version of every chunk it wrote, or null when it wrote nothing
+```
+
+- Reads inside the callback see one snapshot of the table and the transaction's own writes; writes resolve nothing and apply together at `COMMIT`, or not at all ([transactions](https://github.com/chunkdb/chunkdb/blob/main/docs/TRANSACTIONS.md)).
+- `tx` has `getBlock`, `setBlock`, `deleteBlock`, `getChunk`, `setChunk`, `getArea` and their raw forms, without `ifVersion`: `COMMIT` checks every chunk the transaction read or wrote. A transaction covers one table, the one its first call names.
+- When another write changed what the transaction read or wrote (`CONFLICT`), nothing of it is applied and the callback runs again after a short random pause, up to `retries` times (`client.transaction(fn, { retries: 5 })` is the default); then it rejects with `ChunkConflictError`. The callback may run more than once, so keep other effects out of it.
+- When the callback throws, the transaction is rolled back and the error rejects; it does not run again.
+- The transaction holds the client's connection: calls made meanwhile wait until it ends, and calls on the client inside the callback are refused. `pool.transaction(fn)` runs on one pooled connection while other calls use the others.
+- A connection that closes rolls the transaction back. When it fails after `COMMIT` was sent, the error says the outcome is unknown.
+
 ## Tables
 
 ```ts
@@ -131,11 +151,12 @@ await client.dropUser("bot");
 - `createTable(name, { columns, chunk, large?, options? })`, `alterTable(name, change)`, `dropTable(name)`, `listTables()`
 - `describe(table?): Promise<ChunkTableSchema>`, `clearSchemaCache(table?)`
 - `createUser(name, password, { managesUsers? })`, `setPassword(name, password)`, `setManagesUsers(name, managesUsers)`, `dropUser(name)`, `grant(right, table, user)`, `revoke(right, table, user)`, `listUsers(): Promise<ChunkUser[]>`
+- `transaction(fn, { retries? }): Promise<bigint | null>`: runs `fn(tx)` in a transaction (see Transactions)
 - `ping()`, `flushWal()` (resolves once every write acknowledged before is durable), `metrics()` (Prometheus text)
 - `execute(statement, parameters?): Promise<ChunkReply>`: one CQL statement with `$1`..`$n` parameter frames (`Uint8Array` or `null`); `encodeParameter(column, value)` encodes a typed value
 - `serverInfo()`, `defaultTable()`, `uri()`, `connect()`, `close()`
 
-`ChunkPool` has the same data, table and user methods, plus `withClient(fn)` and `close()`.
+`ChunkPool` has the same data, table, user and transaction methods, plus `withClient(fn)` and `close()`.
 
 Table options: `durabilityMode` (`"relaxed"`, `"fsync-wal"`, `"fsync-checkpoint"`), `checkpointUpdates`, `checkpointWalBytes`, `walGroupCommitUpdates`, `checkpointCompression` (`"none"`, `"zrle"`) and `varMaxChunkBytes`.
 
@@ -151,6 +172,7 @@ Table options: `durabilityMode` (`"relaxed"`, `"fsync-wal"`, `"fsync-checkpoint"
 
 - `ChunkServerError`: an `-ERR` reply, with `serverCode` (`SYNTAX`, `INVALID_ARGUMENT`, `NO_TABLE`, `TABLE_EXISTS`, ...) and `serverMessage`
 - `ChunkVersionMismatchError`: an `ifVersion` write found another version and changed nothing; `currentVersion` is the chunk's version
+- `ChunkConflictError`: `CONFLICT`, a transaction ended without writing anything; `reason` is `chunk_changed`, `duration`, `history_limit` or `table_changed`, and running it again may succeed
 - `ChunkSchemaMismatchError`: a chunk form of another schema version than the table's; nothing changed, and `currentSchemaVersion` is the table's
 - `ChunkAuthError`: a wrong password or unknown user (`AUTH_FAILED`), or no user for a server that needs one (`AUTH_REQUIRED`)
 - `ChunkPermissionError`: `PERMISSION_DENIED`, the user lacks the right the statement needs; `serverMessage` names it (`WRITE on world`)

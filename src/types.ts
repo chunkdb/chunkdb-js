@@ -292,6 +292,30 @@ export interface ChunkScanOptions extends ChunkTableOption {
   limit?: number;
 }
 
+export interface ChunkTransactionOptions {
+  /** How many times a transaction that ends with `CONFLICT` runs again; 5 by default. */
+  retries?: number;
+}
+
+/**
+ * The statements of one transaction (`transaction()`). Reads see one snapshot
+ * of the table and the transaction's own writes; writes apply together at
+ * `COMMIT`, so they resolve nothing. A transaction covers one table, the one
+ * its first call names. `ifVersion` is not taken: `COMMIT` checks every
+ * chunk the transaction read or wrote.
+ */
+export interface ChunkTransaction {
+  getBlock(x: number, y: number, options?: ChunkReadOptions): Promise<ChunkRow | null>;
+  setBlock(x: number, y: number, values: Readonly<Record<string, ChunkValue>>, options?: ChunkTableOption): Promise<void>;
+  deleteBlock(x: number, y: number, options?: ChunkTableOption): Promise<void>;
+  getChunk(cx: number, cy: number, options?: ChunkReadOptions): Promise<ChunkState>;
+  getChunkRaw(cx: number, cy: number, options?: ChunkReadOptions): Promise<Buffer>;
+  setChunk(cx: number, cy: number, state: ChunkStateInput, options?: ChunkTableOption): Promise<void>;
+  setChunkRaw(cx: number, cy: number, form: Uint8Array, options?: ChunkTableOption): Promise<void>;
+  getArea(area: ChunkArea, options?: ChunkReadOptions): Promise<ChunkAreaEntry[]>;
+  getAreaRaw(area: ChunkArea, options?: ChunkReadOptions): Promise<ChunkAreaRawEntry[]>;
+}
+
 export type ChunkErrorPhase =
   | "connect"
   | "auth"

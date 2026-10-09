@@ -88,4 +88,18 @@ export class ChunkSchemaMismatchError extends ChunkServerError {
   }
 }
 
+/**
+ * `CONFLICT`: a transaction ended without writing anything; running it
+ * again may succeed. `transaction()` runs its callback again by itself.
+ */
+export class ChunkConflictError extends ChunkServerError {
+  /** `chunk_changed`, `duration`, `history_limit` or `table_changed`. */
+  readonly reason: string;
+
+  constructor(serverMessage: string, reason: string, options: Omit<ChunkErrorOptions, "code">) {
+    super("CONFLICT", serverMessage, options);
+    this.reason = reason;
+  }
+}
+
 export class ChunkTlsError extends ChunkError {}
