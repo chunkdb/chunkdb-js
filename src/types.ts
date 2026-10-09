@@ -115,6 +115,48 @@ export type ChunkValue = number | bigint | boolean | string | Uint8Array | Chunk
 /** Values by column name. */
 export type ChunkRow = Record<string, ChunkValue>;
 
+export interface ChunkPosition {
+  epoch: string;
+  revision: bigint;
+}
+
+/** An absolute block coordinate, or an exact chunk/offset address beyond int64. */
+export type ChunkWatchCoordinate = bigint | { chunk: bigint; offset: number };
+
+export interface ChunkWatchOptions {
+  /** Inclusive chunk coordinates. */
+  area?: { cx0: number; cy0: number; cx1: number; cy1: number };
+  after?: ChunkPosition;
+}
+
+export interface ChunkChangeEvent {
+  kind: "change";
+  position: ChunkPosition;
+  commitTimeMs: bigint;
+  user: string | null;
+  schemaVersion: number;
+  blocks: Array<{
+    x: ChunkWatchCoordinate;
+    y: ChunkWatchCoordinate;
+    before: ChunkRow | null;
+    after: ChunkRow | null;
+  }>;
+}
+
+export interface ChunkSchemaEvent {
+  kind: "schema";
+  position: ChunkPosition;
+  version: number;
+  columns: ChunkColumn[];
+}
+
+export interface ChunkResyncEvent {
+  kind: "resync";
+  position: ChunkPosition;
+}
+
+export type ChunkWatchEvent = ChunkChangeEvent | ChunkSchemaEvent | ChunkResyncEvent;
+
 export type ChunkColumnType =
   | { readonly kind: "u"; readonly bits: number }
   | { readonly kind: "i"; readonly bits: number }

@@ -120,6 +120,14 @@ function parseColumn(reply: ChunkReply, command: string): { column: ChunkColumn;
   return { column, id: integerOf(field(entries, "id", command), `the id of ${name}`, command) };
 }
 
+/** Column descriptions shared by DESCRIBE and WATCH schema events. */
+export function parseColumns(reply: ChunkReply, command: string): ChunkColumn[] {
+  if (reply.type !== "array") {
+    throw malformed("columns is not an array", command);
+  }
+  return reply.items.map((item) => parseColumn(item, command).column);
+}
+
 export function parseDescribe(reply: ChunkReply): TableLayout {
   const command = "DESCRIBE";
   const entries = mapOf(reply, command);

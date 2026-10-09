@@ -1,5 +1,6 @@
 export { ChunkClient, connect, connectUri } from "./client";
 export { ChunkPool, connectPool } from "./pool";
+export { ChunkWatch } from "./watch";
 export { emptyChunk } from "./chunk-form";
 export {
   ChunkAuthError,
@@ -27,6 +28,7 @@ export type {
   MapReply,
   NullReply,
   SimpleReply,
+  PushReply,
 } from "./protocol";
 export { ChunkBits, encodeParameter, formatColumnType, parseColumnType } from "./values";
 export { formatChunkUri, parseChunkUri, tableFromUriPath } from "./uri";
@@ -38,6 +40,13 @@ export type {
   ChunkCheckpointCompression,
   ChunkClientOptions,
   ChunkColumn,
+  ChunkChangeEvent,
+  ChunkSchemaEvent,
+  ChunkResyncEvent,
+  ChunkPosition,
+  ChunkWatchCoordinate,
+  ChunkWatchOptions,
+  ChunkWatchEvent,
   ChunkColumnDefinition,
   ChunkColumnType,
   ChunkCoord,

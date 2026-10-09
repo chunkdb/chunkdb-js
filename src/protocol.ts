@@ -45,6 +45,12 @@ export interface ArrayReply {
   items: ChunkReply[];
 }
 
+/** An unsolicited WATCH event. */
+export interface PushReply {
+  type: "push";
+  items: ChunkReply[];
+}
+
 export interface MapReply {
   type: "map";
   entries: Array<[ChunkReply, ChunkReply]>;
@@ -59,6 +65,7 @@ export type ChunkReply =
   | NullReply
   | BulkReply
   | ArrayReply
+  | PushReply
   | MapReply;
 
 /** A parameter frame: the value's bytes, or null for `NULL`. */
@@ -158,12 +165,13 @@ function scanReply(buffer: Buffer, start: number): number | Incomplete {
       return buffer.length < after ? { need: after } : after;
     }
     case 0x2a: // *
+    case 0x3e: // >
     case 0x25: {
       // %
       if (prefix === 0x2a && text === "-1") {
         return next;
       }
-      const count = lengthOf(text, prefix === 0x2a ? "array" : "map") * (prefix === 0x25 ? 2 : 1);
+      const count = lengthOf(text, prefix === 0x25 ? "map" : prefix === 0x3e ? "push" : "array") * (prefix === 0x25 ? 2 : 1);
       let at = next;
       for (let i = 0; i < count; i += 1) {
         const scanned = scanReply(buffer, at);
@@ -251,12 +259,13 @@ function readReply(buffer: Buffer, start: number): { reply: ChunkReply; end: num
         end: next + length + 2,
       };
     }
-    case 0x2a: {
+    case 0x2a:
+    case 0x3e: {
       const text = buffer.toString("latin1", start + 1, end);
-      if (text === "-1") {
+      if (prefix === 0x2a && text === "-1") {
         return { reply: { type: "null" }, end: next };
       }
-      const count = lengthOf(text, "array");
+      const count = lengthOf(text, prefix === 0x3e ? "push" : "array");
       const items: ChunkReply[] = [];
       let at = next;
       for (let i = 0; i < count; i += 1) {
@@ -264,7 +273,7 @@ function readReply(buffer: Buffer, start: number): { reply: ChunkReply; end: num
         items.push(item.reply);
         at = item.end;
       }
-      return { reply: { type: "array", items }, end: at };
+      return { reply: { type: prefix === 0x3e ? "push" : "array", items }, end: at };
     }
     case 0x25: {
       const count = lengthOf(buffer.toString("latin1", start + 1, end), "map");
