@@ -228,8 +228,8 @@ try {
 `after` does not acknowledge or release history. ACK alone cannot make an external
 write atomic. `ack(revision)` accepts a uint64 `bigint` through the starting or
 last returned position, in nondecreasing order. It resolves after writing to the
-socket; successful ACK has no reply. The server batches eligible acknowledgements
-for up to 100 ms, and `close()` waits for accepted ACKs to be persisted before OK.
+socket; successful ACK has no reply. The server writes eligible acknowledgement
+batches at most once per 100 ms, and `close()` waits for accepted ACKs to be persisted before OK.
 Schema descriptions may preface an archived change at the same revision: apply
 that change before acknowledging its revision. A server-rejected ACK appears as
 `ChunkServerError` with code `INVALID_ARGUMENT` from `next()`; a subsequent
