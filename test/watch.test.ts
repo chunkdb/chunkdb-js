@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { Socket } from "node:net";
+import net from "node:net";
+import tls from "node:tls";
+import fs from "node:fs";
 
 import { ChunkClient, ChunkConnectionError, ChunkPool, ChunkProtocolError, ChunkServerError, ChunkTimeoutError, parseReply, type ChunkReply } from "../src/index";
 import { ReplyReader } from "../src/protocol";
@@ -26,10 +29,11 @@ function encode(reply: ChunkReply): string {
   }
 }
 
-function schema(version: number, type: string): string {
+function schema(version: number, type: string, edit: (columns: ChunkReply) => void = () => {}): string {
   const reply = parseReply(Buffer.from(describeReply(type)))!.reply;
   assert.equal(reply.type, "map");
   const columns = reply.entries.find(([key]) => key.type === "bulk" && key.value.toString() === "columns")![1];
+  edit(columns);
   return `>5\r\n${bulk("schema")}${bulk(EPOCH)}:3\r\n:${version}\r\n${encode(columns)}`;
 }
 
@@ -56,6 +60,8 @@ test("WATCH pushes parse across every byte boundary", () => {
     assert.deepEqual(kinds, expected);
   }
   assert.throws(() => parseReply(Buffer.from(">-1\r\n")), ChunkProtocolError);
+  assert.throws(() => parseReply(Buffer.from("*1\r\n>0\r\n")), ChunkProtocolError);
+  assert.throws(() => parseReply(Buffer.from(">1\r\n>0\r\n")), ChunkProtocolError);
 });
 
 test("WATCH has a dedicated socket, start and typed values", async () => {
@@ -96,6 +102,10 @@ test("WATCH caches schemas by version and preserves overflow coordinates", async
     assert.equal(event.kind, "schema");
     assert.equal(event.version, 2);
     assert.equal(event.columns[1].typeName, "u64");
+    // Public column descriptions do not own the decoder's cached schema.
+    event.columns[1].name = "changed_by_caller";
+    if (event.columns[1].type.kind === "u") event.columns[1].type.bits = 8;
+    event.columns.reverse();
     const wide = (await watch.next()).value;
     assert.equal(wide.kind, "change");
     assert.deepEqual(wide.blocks[0].x, { chunk: 9223372036854775807n, offset: 3 });
@@ -191,6 +201,52 @@ test("WATCH close wakes idle and concurrent next calls", async () => {
   } finally { await client.close(); await server.close(); }
 });
 
+test("WATCH close aborts a schema connection stalled during TLS setup", { timeout: 3000 }, async (t) => {
+  const stalled = deferred();
+  const sockets = new Set<Socket>();
+  let connections = 0;
+  const secureContext = tls.createSecureContext({
+    cert: fs.readFileSync(new URL("./fixtures/tls/cert.pem", import.meta.url)),
+    key: fs.readFileSync(new URL("./fixtures/tls/key.pem", import.meta.url)),
+  });
+  const server = net.createServer((socket) => {
+    sockets.add(socket);
+    socket.on("close", () => sockets.delete(socket));
+    socket.on("error", () => {});
+    if (++connections === 3) { stalled.resolve(); return; }
+    const secure = new tls.TLSSocket(socket, { isServer: true, secureContext });
+    secure.on("error", () => {});
+    let buffer = "";
+    secure.on("data", (data) => {
+      buffer += data.toString();
+      for (let at = buffer.indexOf("\n"); at !== -1; at = buffer.indexOf("\n")) {
+        const line = buffer.slice(0, at).replace(/\r$/, "");
+        buffer = buffer.slice(at + 1);
+        if (line === "HELLO 3") secure.write(FAKE_HELLO);
+        else if (line === "DESCRIBE t") secure.write(describeReply("u8"));
+        else if (line === "WATCH t") secure.write(`+OK ${EPOCH} 1\r\n` + change(2, 9));
+        else if (line === "UNWATCH") secure.write("+OK\r\n");
+        else throw new Error(line);
+      }
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address !== null && typeof address !== "string");
+  t.after(async () => {
+    for (const socket of sockets) socket.destroy();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+  const client = new ChunkClient({ port: address.port, tls: true, tlsInsecure: true, connectTimeoutMs: 60000 });
+  try {
+    const watch = await client.watch("t");
+    const pending = watch.next();
+    await stalled.promise;
+    await watch.close();
+    assert.deepEqual(await pending, { done: true, value: undefined });
+  } finally { await client.close(); }
+});
+
 test("WATCH transport loss ends iteration without reconnecting", async () => {
   const watching = deferred<Socket>();
   const server = await startFakeServer(({ line }, socket) => {
@@ -260,6 +316,59 @@ test("WATCH rejects a push before the start acknowledgment", async () => {
   const client = new ChunkClient({ port: server.port });
   try {
     await assert.rejects(client.watch("t"), (error: unknown) => error instanceof ChunkProtocolError && /preceded/.test(error.message));
+  } finally { await client.close(); await server.close(); }
+});
+
+test("WATCH rejects empty schemas and duplicate column names or IDs", async () => {
+  for (const field of ["empty", "name", "id"]) {
+    const frame = schema(2, "u64", (columns) => {
+      assert.equal(columns.type, "array");
+      if (field === "empty") { columns.items = []; return; }
+      const [first, second] = columns.items;
+      assert.equal(first.type, "map");
+      assert.equal(second.type, "map");
+      const keyIs = (key: ChunkReply) => key.type === "bulk" && key.value.toString() === field;
+      second.entries.find(([key]) => keyIs(key))![1] = first.entries.find(([key]) => keyIs(key))![1];
+    });
+    const server = await startFakeServer(({ line }) => {
+      if (line === "HELLO 3") return FAKE_HELLO;
+      if (line === "DESCRIBE t") return describeReply("u8");
+      if (line === "WATCH t") return `+OK ${EPOCH} 1\r\n` + frame;
+      throw new Error(line);
+    });
+    const client = new ChunkClient({ port: server.port });
+    try {
+      const watch = await client.watch("t");
+      await assert.rejects(watch.next(), (error: unknown) => error instanceof ChunkProtocolError && /nonempty|duplicate/.test(error.message));
+      await watch.close();
+    } finally { await client.close(); await server.close(); }
+  }
+});
+
+test("WATCH rows preserve a column named __proto__ as an own value", async () => {
+  const frame = schema(2, "u8", (columns) => {
+    assert.equal(columns.type, "array");
+    assert.equal(columns.items[0].type, "map");
+    const name = columns.items[0].entries.find(([key]) => key.type === "bulk" && key.value.toString() === "name")!;
+    name[1] = { type: "bulk", value: Buffer.from("__proto__") };
+  });
+  const server = await startFakeServer(({ line }) => {
+    if (line === "HELLO 3") return FAKE_HELLO;
+    if (line === "DESCRIBE t") return describeReply("u8");
+    if (line === "WATCH t") return `+OK ${EPOCH} 1\r\n` + frame + change(4, 2);
+    if (line === "UNWATCH") return "+OK\r\n";
+    throw new Error(line);
+  });
+  const client = new ChunkClient({ port: server.port });
+  try {
+    const watch = await client.watch("t");
+    assert.equal((await watch.next()).value.kind, "schema");
+    const event = (await watch.next()).value;
+    assert.equal(event.kind, "change");
+    assert.equal(Object.hasOwn(event.blocks[0].after!, "__proto__"), true);
+    assert.equal(event.blocks[0].after!.__proto__, 3);
+    assert.equal(Object.getPrototypeOf(event.blocks[0].after!), Object.prototype);
+    await watch.close();
   } finally { await client.close(); await server.close(); }
 });
 

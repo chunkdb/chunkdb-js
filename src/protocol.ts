@@ -136,7 +136,7 @@ function lengthOf(text: string, what: string): number {
 
 // Finds where the reply starting at `start` ends without building it, so a
 // large reply is built once, after its last byte arrived.
-function scanReply(buffer: Buffer, start: number): number | Incomplete {
+function scanReply(buffer: Buffer, start: number, depth = 0): number | Incomplete {
   if (start >= buffer.length) {
     return { need: start + 1 };
   }
@@ -145,6 +145,9 @@ function scanReply(buffer: Buffer, start: number): number | Incomplete {
     return { need: buffer.length + 1 };
   }
   const prefix = buffer[start];
+  if (prefix === 0x3e && depth !== 0) {
+    throw protocolError("push inside an aggregate reply");
+  }
   const text = buffer.toString("latin1", start + 1, end);
   const next = end + 2;
   switch (prefix) {
@@ -174,7 +177,7 @@ function scanReply(buffer: Buffer, start: number): number | Incomplete {
       const count = lengthOf(text, prefix === 0x25 ? "map" : prefix === 0x3e ? "push" : "array") * (prefix === 0x25 ? 2 : 1);
       let at = next;
       for (let i = 0; i < count; i += 1) {
-        const scanned = scanReply(buffer, at);
+        const scanned = scanReply(buffer, at, depth + 1);
         if (typeof scanned !== "number") {
           return scanned;
         }

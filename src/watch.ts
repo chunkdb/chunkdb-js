@@ -11,7 +11,7 @@ import type {
   ChunkWatchOptions,
   ChunkTableSchema,
 } from "./types";
-import { checkCoordinate, checkName, requestError, valueFromReply } from "./values";
+import { ChunkBits, checkCoordinate, checkName, requestError, valueFromReply } from "./values";
 
 // Internal stream access; ordinary operations never switch their connection to WATCH.
 export const kWatchStream = Symbol("watchStream");
@@ -38,6 +38,15 @@ function epochOf(reply: ChunkReply): string {
     throw malformed("epoch is not 32 hex digits");
   }
   return epoch.toLowerCase();
+}
+
+function copyColumns(columns: readonly ChunkColumn[]): ChunkColumn[] {
+  return columns.map((column) => ({
+    ...column,
+    type: { ...column.type },
+    default: column.default instanceof ChunkBits ? new ChunkBits(column.default.length, column.default.toBytes()) :
+      column.default instanceof Uint8Array ? Buffer.from(column.default) : column.default,
+  }));
 }
 
 function coordinate(reply: ChunkReply): ChunkWatchCoordinate {
@@ -222,7 +231,7 @@ export class ChunkWatch implements AsyncIterableIterator<ChunkWatchEvent> {
       const version = integerOf(items[3], "schema version", "WATCH");
       if (version < 0) throw malformed("negative schema version");
       const columns = parseColumns(items[4], "WATCH");
-      this.schemas.set(version, columns);
+      this.schemas.set(version, copyColumns(columns));
       return { kind, position, version, columns };
     }
     if (kind !== "change" || items.length !== 7 || items[6].type !== "array") throw malformed("unknown kind or incorrect event length");
@@ -240,9 +249,7 @@ export class ChunkWatch implements AsyncIterableIterator<ChunkWatchEvent> {
     const row = (reply: ChunkReply): ChunkRow | null => {
       if (reply.type === "null") return null;
       if (reply.type !== "array" || reply.items.length !== columns.length) throw malformed("row does not match its schema");
-      const values: ChunkRow = {};
-      columns.forEach((column, index) => { values[column.name] = valueFromReply(column, reply.items[index]); });
-      return values;
+      return Object.fromEntries(columns.map((column, index) => [column.name, valueFromReply(column, reply.items[index])]));
     };
     const blocks = items[6].items.map((block) => {
       if (block.type !== "array" || block.items.length !== 4) throw malformed("block is not [x, y, before, after]");

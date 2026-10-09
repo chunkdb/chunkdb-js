@@ -445,6 +445,7 @@ export class ChunkClient {
   private socket: TransportSocket | null = null;
   private pendingQueue: PendingRequest[] = [];
   private connectPromise: Promise<this> | null = null;
+  private connectAbort: (() => void) | null = null;
   private readonly reader = new ReplyReader();
   private connected = false;
   private disposed = false;
@@ -509,6 +510,7 @@ export class ChunkClient {
 
   async close(): Promise<void> {
     this.disposed = true;
+    this.connectAbort?.();
     const socket = this.socket;
     this.clearConnectionState(new ChunkConnectionError("connection closed", { phase: "connect" }));
     if (socket === null) {
@@ -1373,6 +1375,10 @@ export class ChunkClient {
     this.clearConnectionState();
     this.info = null;
     const socket = await this.openSocket();
+    if (this.disposed) {
+      socket.destroy();
+      throw new ChunkConnectionError("client is closed", { phase: "connect" });
+    }
     this.socket = socket;
     this.connected = true;
 
@@ -1682,7 +1688,15 @@ export class ChunkClient {
       const cleanup = () => {
         clearTimeout(timer);
         socket?.off("error", onError);
+        if (this.connectAbort === abort) this.connectAbort = null;
       };
+
+      const abort = () => {
+        cleanup();
+        socket?.destroy();
+        reject(new ChunkConnectionError("connection closed while connecting", { phase: "connect" }));
+      };
+      this.connectAbort = abort;
 
       try {
         socket = this.options.secure

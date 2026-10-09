@@ -122,10 +122,20 @@ function parseColumn(reply: ChunkReply, command: string): { column: ChunkColumn;
 
 /** Column descriptions shared by DESCRIBE and WATCH schema events. */
 export function parseColumns(reply: ChunkReply, command: string): ChunkColumn[] {
-  if (reply.type !== "array") {
-    throw malformed("columns is not an array", command);
+  if (reply.type !== "array" || reply.items.length === 0) {
+    throw malformed("columns is not a nonempty array", command);
   }
-  return reply.items.map((item) => parseColumn(item, command).column);
+  const names = new Set<string>();
+  const ids = new Set<number>();
+  return reply.items.map((item) => {
+    const { column, id } = parseColumn(item, command);
+    if (id < 0 || id > 0xffff_ffff || names.has(column.name) || ids.has(id)) {
+      throw malformed("invalid or duplicate column name/id", command);
+    }
+    names.add(column.name);
+    ids.add(id);
+    return column;
+  });
 }
 
 export function parseDescribe(reply: ChunkReply): TableLayout {
