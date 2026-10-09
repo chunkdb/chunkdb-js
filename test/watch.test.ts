@@ -250,6 +250,19 @@ test("WATCH validates options before opening any socket", async () => {
   await assert.rejects(client.watch("t"), ChunkConnectionError);
 });
 
+test("WATCH rejects a push before the start acknowledgment", async () => {
+  const server = await startFakeServer(({ line }) => {
+    if (line === "HELLO 3") return FAKE_HELLO;
+    if (line === "DESCRIBE t") return describeReply("u8");
+    if (line === "WATCH t") return resync() + `+OK ${EPOCH} 1\r\n`;
+    throw new Error(line);
+  });
+  const client = new ChunkClient({ port: server.port });
+  try {
+    await assert.rejects(client.watch("t"), (error: unknown) => error instanceof ChunkProtocolError && /preceded/.test(error.message));
+  } finally { await client.close(); await server.close(); }
+});
+
 test("WATCH fails malformed event rows and unsolicited replies", async () => {
   for (const frame of [change().replace("*2\r\n:3\r\n:7\r\n", "*1\r\n:3\r\n"), "+PONG\r\n", ">3\r\n" + bulk("other") + bulk(EPOCH) + ":2\r\n"]) {
     const ready = deferred<Socket>();

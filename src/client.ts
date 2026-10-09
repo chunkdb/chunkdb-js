@@ -452,6 +452,7 @@ export class ChunkClient {
   private watchReceiver: ((reply: PushReply) => void) | null = null;
   private watchFailure: ((error: Error) => void) | null = null;
   private watchPaused = false;
+  private watchStarted = false;
   // DESCRIBE replies by table: how parameters and chunk forms are encoded.
   private readonly schemas = new Map<string, TableLayout>();
   // DESCRIBE statements in flight, which concurrent operations share.
@@ -1638,6 +1639,12 @@ export class ChunkClient {
         return;
       }
       if (reply.type === "push" && this.watchReceiver !== null) {
+        if (!this.watchStarted) {
+          const socket = this.socket;
+          this.clearConnectionState(new ChunkProtocolError("WATCH push preceded its start reply", { phase: "protocol", command: "WATCH" }));
+          socket?.destroy();
+          return;
+        }
         this.watchReceiver(reply);
         continue;
       }
@@ -1650,6 +1657,7 @@ export class ChunkClient {
         return;
       }
       const pending = this.pendingQueue.shift()!;
+      if (this.watchReceiver !== null) this.watchStarted = true;
       clearTimeout(pending.timer);
       pending.resolve(reply);
     }
@@ -1730,6 +1738,7 @@ export class ChunkClient {
     this.watchReceiver = null;
     this.watchFailure = null;
     this.watchPaused = false;
+    this.watchStarted = false;
     if (failed !== null && error !== undefined) this.disposed = true;
     this.reader.clear();
     this.connected = false;
