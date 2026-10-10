@@ -354,7 +354,7 @@ function commitError(error: unknown): unknown {
     return error;
   }
   const message = `the outcome of COMMIT is unknown: ${error.message}`;
-  const options = { phase: error.phase, command: "COMMIT", cause: error };
+  const options = { phase: error.phase, command: "COMMIT", code: error.code, cause: error };
   if (error instanceof ChunkTimeoutError) {
     return new ChunkTimeoutError(message, options);
   }
@@ -1492,7 +1492,8 @@ export class ChunkClient {
 
     socket.on("close", () => {
       if (this.socket === socket) {
-        this.clearConnectionState(new ChunkConnectionError("connection closed", { phase: "connect" }));
+        this.clearConnectionState(new ChunkConnectionError(
+          "connection closed; check the server log and that chunk:// uses plaintext and chunks:// uses TLS", { phase: "connect" }));
       }
     });
 
@@ -1691,7 +1692,7 @@ export class ChunkClient {
         }
         socket.destroy();
         reject(
-          new ChunkTimeoutError(`command timeout after ${this.options.commandTimeoutMs}ms`, {
+          new ChunkTimeoutError(`${command} command timeout after ${this.options.commandTimeoutMs}ms; check the server and network, then adjust commandTimeoutMs if needed`, {
             phase: "timeout",
             command,
           }),
@@ -1780,7 +1781,7 @@ export class ChunkClient {
       const timer = setTimeout(() => {
         cleanup();
         socket?.destroy();
-        reject(new ChunkTimeoutError(`connection timeout after ${timeoutMs}ms`, { phase: "timeout", command: "CONNECT" }));
+        reject(new ChunkTimeoutError(`connection timeout after ${timeoutMs}ms to ${this.options.host}:${this.options.port}; check the address, firewall and chunk:// versus chunks://, then adjust connectTimeoutMs if needed`, { phase: "timeout", command: "CONNECT" }));
       }, timeoutMs);
 
       const cleanup = () => {
@@ -1867,11 +1868,17 @@ export class ChunkClient {
   }
 
   private wrapTransportError(error: unknown, phase: "connect" | "request" | "tls", command?: string): ChunkError {
-    const message = error instanceof Error ? error.message : String(error);
+    const original = error instanceof Error ? error.message : String(error);
+    const code = typeof error === "object" && error !== null && "code" in error && typeof error.code === "string" ? error.code : undefined;
+    const message = code === "ECONNREFUSED"
+      ? `connection refused at ${this.options.host}:${this.options.port}; start the server and check its listen address and port (${original})`
+      : phase === "tls"
+        ? `TLS connection failed; use chunks:// with a TLS-enabled server and check the CA certificate and server name (${original})`
+        : `${original}; check the server address, network and server log`;
     if (phase === "tls") {
-      return new ChunkTlsError(message, { phase, command, cause: error });
+      return new ChunkTlsError(message, { phase, command, code, cause: error });
     }
-    return new ChunkConnectionError(message, { phase, command, cause: error });
+    return new ChunkConnectionError(message, { phase, command, code, cause: error });
   }
 }
 

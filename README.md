@@ -2,6 +2,20 @@
 
 Official Node.js and TypeScript client for [`chunkdb`](https://github.com/chunkdb/chunkdb).
 
+## World in five minutes
+
+Start a server with the [quick start](https://github.com/chunkdb/chunkdb/blob/main/docs/QUICK_START.md), then run the [world example](examples/world.ts) from this checkout:
+
+```bash
+npm ci
+CHUNKDB_URI='chunk://admin:change-me@127.0.0.1:4242/' npm run example:world
+```
+
+Use your server's admin password in the URI, percent-encoded when needed.
+The example creates a table with two typed columns, fills and reads a small
+area, then watches a block update. Run it again with the same URI: its named
+migration skips the existing table.
+
 Package: [`@chunkdb/client` on npm](https://www.npmjs.com/package/@chunkdb/client).
 
 Speaks `chunkdb` protocol 3: CQL statements with typed values ([CQL](https://github.com/chunkdb/chunkdb/blob/main/docs/CQL.md), [protocol](https://github.com/chunkdb/chunkdb/blob/main/docs/PROTOCOL.md)). It does not connect to servers of earlier protocols; `connect()` then fails with a `ChunkProtocolError` that says so.
