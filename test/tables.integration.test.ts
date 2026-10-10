@@ -119,6 +119,7 @@ test("the schema cache follows changes another client makes", async () => {
     await admin.alterTable("t", { kind: "addColumn", column: { name: "label", type: "text(8)", nullable: true } });
     await client.setBlock(1, 0, { h: 2, label: "b1", data: Buffer.from("y"), tag: "t1" });
     const chunk = await client.getChunk(0, 0);
+    assert.ok(chunk);
     assert.deepEqual(Object.keys(chunk.columns), ["h", "data", "tag", "label"]);
     assert.deepEqual(chunk.columns.label.slice(0, 2), [null, "b1"]);
     assert.deepEqual(chunk.columns.tag.slice(0, 2), ["new", "t1"]);

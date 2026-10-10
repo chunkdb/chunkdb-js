@@ -11,6 +11,7 @@ import {
   ChunkTimeoutError,
   ChunkVersionMismatchError,
   connect,
+  connectPool,
 } from "../src/index";
 import { FAKE_HELLO, describeReply, scramResponder, startFakeServer, type FakeRequest } from "./fake-server";
 
@@ -372,5 +373,42 @@ test("a statement without a reply times out and the client reconnects", async ()
     await assert.rejects(client.ping(), ChunkConnectionError);
   } finally {
     await server.close();
+  }
+});
+
+
+test("never-written chunks are null; versioned empty forms remain decoded", async (t) => {
+  for (const mode of ["client", "pool", "transaction"] as const) {
+    await t.test(mode, async () => {
+      const form = Buffer.alloc(16 + 2 + 20 + 64);
+      form.writeBigUInt64LE(7n, 0);
+      form.writeBigUInt64LE(1n, 8);
+      const server = await startFakeServer((request) => {
+        if (request.line.startsWith("HELLO")) return FAKE_HELLO;
+        if (request.line.startsWith("DESCRIBE")) return describeReply("f32");
+        if (request.line.startsWith("GET CHUNK 8 8 ")) return "_\r\n";
+        if (request.line.startsWith("GET CHUNK")) return Buffer.concat([Buffer.from(`$${form.length}\r\n`), form, Buffer.from("\r\n")]);
+        if (request.line === "BEGIN" || request.line === "ROLLBACK") return "+OK\r\n";
+        if (request.line === "COMMIT") return "_\r\n";
+        return "-ERR SYNTAX unexpected\r\n";
+      });
+      const client = mode === "pool" ? await connectPool({ port: server.port, table: "t", maxConnections: 1 }) : await connect({ port: server.port, table: "t" });
+      const check = async (reader: Pick<typeof client, "getChunk" | "getChunkRaw">) => {
+        assert.equal(await reader.getChunk(8, 8), null);
+        assert.equal(await reader.getChunkRaw(8, 8), null);
+        const empty = await reader.getChunk(9, 9);
+        assert.ok(empty);
+        assert.equal(empty.version, 7n);
+        assert.ok(empty.present.every((present) => !present));
+        assert.deepEqual(await reader.getChunkRaw(9, 9), form);
+      };
+      try {
+        if (mode === "transaction") await client.transaction(check);
+        else await check(client);
+      } finally {
+        await client.close();
+        await server.close();
+      }
+    });
   }
 });
