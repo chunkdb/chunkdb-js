@@ -7,6 +7,7 @@ This client uses CQL protocol 3 with chunkdb 2.x; see the server's [compatibilit
 ## Unreleased
 
 ### Fixed
+- Return null for never-written typed and raw chunk reads, including pools and transactions; expose nullable result types and retain versioned empty forms. (#72).
 - The README example uses an ESM filename that also runs outside an ESM package; feed guides link to the server's resync and ACK persistence rules
 - Connection errors identify refused endpoints, TLS configuration checks and
   timeout settings while retaining the transport error code and cause
@@ -40,6 +41,7 @@ This client uses CQL protocol 3 with chunkdb 2.x; see the server's [compatibilit
   `currentVersion`) instead of resolving `{ ok: false }`
 
 ### Added
+- Set and describe per-table `feedBufferBytes` and `slotMaxBytes`; examples and table listings follow an initially empty server catalog. (#72).
 - User documentation for chunkdb 2.0, with a short npm quick start and focused guides for the exported API, typed data, transactions, users, feed, slots, backup and migrations
 - Runnable `examples/world.ts` and `npm run example:world` show typed blocks,
   area reads and a watched update, with an integration test for repeat runs

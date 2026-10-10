@@ -11,6 +11,7 @@ import {
   ChunkTimeoutError,
   ChunkVersionMismatchError,
   connect,
+  connectPool,
 } from "../src/index";
 import { FAKE_HELLO, describeReply, scramResponder, startFakeServer, type FakeRequest } from "./fake-server";
 
@@ -328,7 +329,7 @@ test("table statements are written from their definitions", async () => {
       ],
       chunk: { width: 16, height: 16 },
       large: { width: 8, height: 8 },
-      options: { durabilityMode: "fsync-wal", varMaxChunkBytes: 4096 },
+      options: { durabilityMode: "fsync-wal", varMaxChunkBytes: 4096, feedBufferBytes: 2097152, slotMaxBytes: 4194304 },
     });
     await client.alterTable("land", { kind: "addColumn", column: { name: "depth", type: "i8", nullable: true } });
     await client.alterTable("land", { kind: "dropColumn", column: "depth" });
@@ -336,16 +337,20 @@ test("table statements are written from their definitions", async () => {
     await client.alterTable("land", { kind: "alterColumnType", column: "light", type: "u2", using: "clamp" });
     await client.alterTable("land", { kind: "setOption", option: "checkpointUpdates", value: 64 });
     await client.alterTable("land", { kind: "setOption", option: "durabilityMode", value: "relaxed" });
+    await client.alterTable("land", { kind: "setOption", option: "feedBufferBytes", value: 3145728 });
+    await client.alterTable("land", { kind: "setOption", option: "slotMaxBytes", value: 5242880 });
     await client.dropTable("land");
     assert.deepEqual(server.requests.slice(1).map((request) => request.line), [
       "CREATE TABLE land (id u10 REQUIRED, light u4 DEFAULT 15, sign text(8) NULL DEFAULT 'it''s', h f32 DEFAULT 1.5) " +
-        "CHUNK 16 x 16 LARGE 8 x 8 WITH durability_mode = 'fsync-wal', var_max_chunk_bytes = 4096",
+        "CHUNK 16 x 16 LARGE 8 x 8 WITH durability_mode = 'fsync-wal', var_max_chunk_bytes = 4096, feed_buffer_bytes = 2097152, slot_max_bytes = 4194304",
       "ALTER TABLE land ADD COLUMN depth i8 NULL",
       "ALTER TABLE land DROP COLUMN depth",
       "ALTER TABLE land RENAME COLUMN sign TO label",
       "ALTER TABLE land ALTER COLUMN light TYPE u2 USING CLAMP",
       "ALTER TABLE land SET checkpoint_updates = 64",
       "ALTER TABLE land SET durability_mode = 'relaxed'",
+      "ALTER TABLE land SET feed_buffer_bytes = 3145728",
+      "ALTER TABLE land SET slot_max_bytes = 5242880",
       "DROP TABLE land",
     ]);
     await client.close();
@@ -370,6 +375,57 @@ test("a statement without a reply times out and the client reconnects", async ()
     assert.equal(server.connections, 2);
     await client.close();
     await assert.rejects(client.ping(), ChunkConnectionError);
+  } finally {
+    await server.close();
+  }
+});
+
+
+test("never-written chunks are null; versioned empty forms remain decoded", async (t) => {
+  for (const mode of ["client", "pool", "transaction"] as const) {
+    await t.test(mode, async () => {
+      const form = Buffer.alloc(16 + 2 + 20 + 64);
+      form.writeBigUInt64LE(7n, 0);
+      form.writeBigUInt64LE(1n, 8);
+      const server = await startFakeServer((request) => {
+        if (request.line.startsWith("HELLO")) return FAKE_HELLO;
+        if (request.line.startsWith("DESCRIBE")) return describeReply("f32");
+        if (request.line.startsWith("GET CHUNK 8 8 ")) return "_\r\n";
+        if (request.line.startsWith("GET CHUNK")) return Buffer.concat([Buffer.from(`$${form.length}\r\n`), form, Buffer.from("\r\n")]);
+        if (request.line === "BEGIN" || request.line === "ROLLBACK") return "+OK\r\n";
+        if (request.line === "COMMIT") return "_\r\n";
+        return "-ERR SYNTAX unexpected\r\n";
+      });
+      const client = mode === "pool" ? await connectPool({ port: server.port, table: "t", maxConnections: 1 }) : await connect({ port: server.port, table: "t" });
+      const check = async (reader: Pick<typeof client, "getChunk" | "getChunkRaw">) => {
+        assert.equal(await reader.getChunk(8, 8), null);
+        assert.equal(await reader.getChunkRaw(8, 8), null);
+        const empty = await reader.getChunk(9, 9);
+        assert.ok(empty);
+        assert.equal(empty.version, 7n);
+        assert.ok(empty.present.every((present) => !present));
+        assert.deepEqual(await reader.getChunkRaw(9, 9), form);
+      };
+      try {
+        if (mode === "transaction") await client.transaction(check);
+        else await check(client);
+      } finally {
+        await client.close();
+        await server.close();
+      }
+    });
+  }
+});
+
+
+test("DESCRIBE exposes per-table feed and slot limits", async () => {
+  const server = await startFakeServer((request) => hello(request) ?? describeReply("f32"));
+  try {
+    const client = await connect({ port: server.port });
+    const schema = await client.describe("t");
+    assert.equal(schema.options.feedBufferBytes, 67108864);
+    assert.equal(schema.options.slotMaxBytes, 1073741824);
+    await client.close();
   } finally {
     await server.close();
   }

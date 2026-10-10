@@ -8,9 +8,9 @@ All methods return promises unless stated otherwise; [examples](../README.md) us
 | `getBlock(x, y, { table?, columns? }?)` | `ChunkRow | null` |
 | `setBlock(x, y, values, { table?, ifVersion? }?)` | written chunk version (`bigint`) |
 | `deleteBlock(x, y, { table?, ifVersion? }?)` | written chunk version |
-| `getChunk(cx, cy, readOptions?)` | `ChunkState` |
+| `getChunk(cx, cy, readOptions?)` | `ChunkState` or `null` |
 | `setChunk(cx, cy, state, writeOptions?)` | written chunk version |
-| `getChunkRaw(cx, cy, readOptions?)` | `Buffer` |
+| `getChunkRaw(cx, cy, readOptions?)` | `Buffer` or `null` |
 | `setChunkRaw(cx, cy, form, writeOptions?)` | written chunk version |
 | `getArea(area, readOptions?)` | `ChunkAreaEntry[]` |
 | `getAreaRaw(area, readOptions?)` | `ChunkAreaRawEntry[]` |
