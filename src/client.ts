@@ -16,7 +16,8 @@ import {
   type ChunkError,
 } from "./errors";
 import { chunkFormLimit, decodeChunkForm, encodeChunkForm } from "./chunk-form";
-import { encodeStatement, ReplyReader, type ChunkParameter, type ChunkReply, type ErrorReply } from "./protocol";
+import { encodeStatement, ReplyReader, type ChunkParameter, type ChunkReply, type ErrorReply, type PushReply } from "./protocol";
+import { ChunkWatch, kWatchPause, kWatchStream } from "./watch";
 import {
   MIN_SCRAM_ITERATIONS,
   finishScramLogin,
@@ -55,6 +56,7 @@ import type {
   ChunkUser,
   ChunkValue,
   ChunkWriteOptions,
+  ChunkWatchOptions,
   ParsedChunkUri,
 } from "./types";
 import {
@@ -443,10 +445,15 @@ export class ChunkClient {
   private socket: TransportSocket | null = null;
   private pendingQueue: PendingRequest[] = [];
   private connectPromise: Promise<this> | null = null;
+  private connectAbort: (() => void) | null = null;
   private readonly reader = new ReplyReader();
   private connected = false;
   private disposed = false;
   private info: ChunkServerInfo | null = null;
+  private watchReceiver: ((reply: PushReply) => void) | null = null;
+  private watchFailure: ((error: Error) => void) | null = null;
+  private watchPaused = false;
+  private watchStarted = false;
   // DESCRIBE replies by table: how parameters and chunk forms are encoded.
   private readonly schemas = new Map<string, TableLayout>();
   // DESCRIBE statements in flight, which concurrent operations share.
@@ -503,6 +510,7 @@ export class ChunkClient {
 
   async close(): Promise<void> {
     this.disposed = true;
+    this.connectAbort?.();
     const socket = this.socket;
     this.clearConnectionState(new ChunkConnectionError("connection closed", { phase: "connect" }));
     if (socket === null) {
@@ -552,6 +560,30 @@ export class ChunkClient {
    */
   describe(table?: string): Promise<ChunkTableSchema> {
     return this.enqueue(async () => (await this.refreshLayout(this.tableOf({ table }))).schema);
+  }
+
+  /** Changes on a dedicated connection with the same transport and login options. */
+  watch(table: string, options: ChunkWatchOptions = {}): Promise<ChunkWatch> {
+    if (this.disposed) return Promise.reject(new ChunkConnectionError("client is closed", { phase: "connect" }));
+    return ChunkWatch.open(() => new ChunkClient({ ...this.options, uri: undefined, tls: this.options.secure }), table, options);
+  }
+
+  /** @internal */
+  async [kWatchStream](statement: string, receive: (reply: PushReply) => void, failed: (error: Error) => void): Promise<ChunkReply> {
+    await this.connect();
+    this.watchReceiver = receive;
+    this.watchFailure = failed;
+    return this.execute(statement);
+  }
+
+  /** @internal */
+  [kWatchPause](paused: boolean): void {
+    this.watchPaused = paused;
+    if (paused) this.socket?.pause();
+    else {
+      this.drainReplies();
+      if (!this.watchPaused) this.socket?.resume();
+    }
   }
 
   /** Forgets the cached schema of `table`, or of every table. */
@@ -1343,6 +1375,10 @@ export class ChunkClient {
     this.clearConnectionState();
     this.info = null;
     const socket = await this.openSocket();
+    if (this.disposed) {
+      socket.destroy();
+      throw new ChunkConnectionError("client is closed", { phase: "connect" });
+    }
     this.socket = socket;
     this.connected = true;
 
@@ -1594,7 +1630,7 @@ export class ChunkClient {
   }
 
   private drainReplies(): void {
-    while (this.pendingQueue.length > 0) {
+    while (this.pendingQueue.length > 0 || (this.watchReceiver !== null && !this.watchPaused)) {
       let reply: ChunkReply | null;
       try {
         reply = this.reader.next();
@@ -1608,7 +1644,26 @@ export class ChunkClient {
       if (reply === null) {
         return;
       }
+      if (reply.type === "push" && this.watchReceiver !== null) {
+        if (!this.watchStarted) {
+          const socket = this.socket;
+          this.clearConnectionState(new ChunkProtocolError("WATCH push preceded its start reply", { phase: "protocol", command: "WATCH" }));
+          socket?.destroy();
+          return;
+        }
+        this.watchReceiver(reply);
+        continue;
+      }
+      if (this.pendingQueue.length === 0) {
+        const error = reply.type === "error" ? this.serverError(reply, "WATCH") :
+          new ChunkProtocolError("unexpected non-push WATCH reply", { phase: "protocol", command: "WATCH" });
+        const socket = this.socket;
+        this.clearConnectionState(error);
+        socket?.destroy();
+        return;
+      }
       const pending = this.pendingQueue.shift()!;
+      if (this.watchReceiver !== null) this.watchStarted = true;
       clearTimeout(pending.timer);
       pending.resolve(reply);
     }
@@ -1633,7 +1688,15 @@ export class ChunkClient {
       const cleanup = () => {
         clearTimeout(timer);
         socket?.off("error", onError);
+        if (this.connectAbort === abort) this.connectAbort = null;
       };
+
+      const abort = () => {
+        cleanup();
+        socket?.destroy();
+        reject(new ChunkConnectionError("connection closed while connecting", { phase: "connect" }));
+      };
+      this.connectAbort = abort;
 
       try {
         socket = this.options.secure
@@ -1685,6 +1748,12 @@ export class ChunkClient {
   }
 
   private clearConnectionState(error?: Error): void {
+    const failed = this.watchFailure;
+    this.watchReceiver = null;
+    this.watchFailure = null;
+    this.watchPaused = false;
+    this.watchStarted = false;
+    if (failed !== null && error !== undefined) this.disposed = true;
     this.reader.clear();
     this.connected = false;
     this.socket = null;
@@ -1694,6 +1763,7 @@ export class ChunkClient {
     for (const w of waiters) w.reject(connErr);
     if (error !== undefined) {
       this.failAllPending(error);
+      failed?.(error);
     }
   }
 

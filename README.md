@@ -138,6 +138,58 @@ await client.dropUser("bot");
 - Users may change their own password; everything else needs `MANAGES USERS`. A client keeps logging in with the password it was given.
 - `ADMIN` includes `WRITE`, which includes `READ`; `revoke` takes away the right and those above it. A table the user has no right on reads as absent (`NO_TABLE`).
 
+## Watching changes
+
+`client.watch(table, { area?, after? })` and `pool.watch` open a dedicated
+connection with the same TLS and login options. `area` is an inclusive box of
+chunk coordinates (`{ cx0, cy0, cx1, cy1 }`). A watch is an async iterator:
+
+```ts
+let position = savedPosition; // { epoch: string, revision: bigint }, or undefined
+const watch = await client.watch("world", { after: position });
+position ??= watch.start;
+try {
+  for await (const event of watch) {
+    if (event.kind === "resync") {
+      // This helper keeps reading watch and buffers changes while client re-reads.
+      position = await rebuildState(client, watch, event.position);
+      await savePosition(position);
+      continue;
+    } else if (event.kind === "schema") {
+      updateColumns(event.columns);
+    } else {
+      applyBlocks(event.blocks); // typed before/after rows; null means absent
+    }
+    position = event.position;
+    await savePosition(position);
+  }
+} finally {
+  await watch.close();
+}
+```
+
+Change events include `position`, `commitTimeMs` (a `bigint`), `user` (null for
+anonymous writes), `schemaVersion` and `blocks`. Block values have the same
+types as `getBlock`; `x` and `y` are `bigint`, or `{ chunk: bigint, offset: number }`
+when an absolute coordinate exceeds int64. Schema events include `version` and
+`columns`; resync events include the position to rebuild from. Revisions order
+commits and may have gaps; timestamps do not define their order.
+
+On resync, keep consuming the stream while another connection re-reads state,
+including chunks or blocks that disappeared. Apply buffered changes to each
+chunk only when their revision exceeds the version of the chunk read. Save the
+frontier together with that rebuilt state before applying later changes. See
+the server's [change feed guide](https://github.com/chunkdb/chunkdb/blob/main/docs/CHANGE_FEED.md).
+
+A lost connection ends iteration with an error; resume explicitly with the last
+saved `after` position. The server retains history only while a watch is open,
+so resuming can require resync. Schemas are cached by version; if an old version
+is unavailable, iteration fails with `ChunkProtocolError` and state must be
+rebuilt. `close()` sends `UNWATCH`, waits for its acknowledgment, and closes the
+watch's connections. Breaking out of `for await` also closes it. Close watches
+separately from their originating client or pool; ordinary calls keep working
+while a watch is open.
+
 ## API
 
 `connect(options)`, `connectUri(uri, overrides?)` and `connectPool(options)` open connections. `ChunkClient` methods:
@@ -152,6 +204,7 @@ await client.dropUser("bot");
 - `describe(table?): Promise<ChunkTableSchema>`, `clearSchemaCache(table?)`
 - `createUser(name, password, { managesUsers? })`, `setPassword(name, password)`, `setManagesUsers(name, managesUsers)`, `dropUser(name)`, `grant(right, table, user)`, `revoke(right, table, user)`, `listUsers(): Promise<ChunkUser[]>`
 - `transaction(fn, { retries? }): Promise<bigint | null>`: runs `fn(tx)` in a transaction (see Transactions)
+- `watch(table, { area?, after? }): Promise<ChunkWatch>`: typed changes on a dedicated connection (see Watching changes)
 - `ping()`, `flushWal()` (resolves once every write acknowledged before is durable), `metrics()` (Prometheus text)
 - `execute(statement, parameters?): Promise<ChunkReply>`: one CQL statement with `$1`..`$n` parameter frames (`Uint8Array` or `null`); `encodeParameter(column, value)` encodes a typed value
 - `serverInfo()`, `defaultTable()`, `uri()`, `connect()`, `close()`

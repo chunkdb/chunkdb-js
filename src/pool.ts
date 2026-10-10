@@ -4,6 +4,7 @@ import {
   ChunkTlsError,
 } from "./errors";
 import { ChunkClient, tableOfStatement } from "./client";
+import type { ChunkWatch } from "./watch";
 import type { ChunkParameter, ChunkReply } from "./protocol";
 import type {
   ChunkArea,
@@ -28,6 +29,7 @@ import type {
   ChunkUser,
   ChunkValue,
   ChunkWriteOptions,
+  ChunkWatchOptions,
 } from "./types";
 
 interface ResolvedPoolOptions {
@@ -202,6 +204,12 @@ export class ChunkPool {
 
   describe(table?: string): Promise<ChunkTableSchema> {
     return this.withClient(async (client) => await client.describe(table));
+  }
+
+  /** A dedicated watch, independent of pooled leases; close it separately. */
+  watch(table: string, options: ChunkWatchOptions = {}): Promise<ChunkWatch> {
+    if (this.closing) return Promise.reject(new ChunkConnectionError("pool is closing", { phase: "connect" }));
+    return new ChunkClient(this.clientOptions).watch(table, options);
   }
 
   /** Forgets cached schemas on every pooled connection. */
