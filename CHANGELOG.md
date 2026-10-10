@@ -10,6 +10,8 @@ speaks the `chunkdb` 1.x protocol; the next major version speaks protocol 3
 ## Unreleased
 
 ### Fixed
+- Connection errors identify refused endpoints, TLS configuration checks and
+  timeout settings while retaining the transport error code and cause
 - Slot ACK bounds now follow returned changes rather than schema or resync
   events. The server validates ACK order, allowing a lower valid ACK after a
   rejection without a local refusal
@@ -40,6 +42,8 @@ speaks the `chunkdb` 1.x protocol; the next major version speaks protocol 3
   `currentVersion`) instead of resolving `{ ok: false }`
 
 ### Added
+- Runnable `examples/world.ts` and `npm run example:world` show typed blocks,
+  area reads and a watched update, with an integration test for repeat runs
 - `client.migrate` runs named schema and permissions steps in order, returning
   `applied`/`skipped`. `ChunkMigrationError` identifies the first failed step
   and preserves earlier results and the underlying error

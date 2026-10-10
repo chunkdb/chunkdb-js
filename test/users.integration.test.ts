@@ -70,7 +70,7 @@ test("users and rights end to end", async () => {
     await assert.rejects(bot.setBlock(1, 1, { id: 8 }), (error: unknown) => {
       assert.ok(error instanceof ChunkPermissionError);
       assert.equal(error.serverCode, "PERMISSION_DENIED");
-      assert.equal(error.serverMessage, "WRITE on world");
+      assert.equal(error.serverMessage, "WRITE on world; ask an administrator to grant this right");
       assert.equal(error.command, "SET BLOCK");
       return true;
     });
