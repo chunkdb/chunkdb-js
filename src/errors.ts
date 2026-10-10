@@ -1,4 +1,4 @@
-import type { ChunkErrorPhase } from "./types";
+import type { ChunkErrorPhase, ChunkMigration, ChunkMigrationResult } from "./types";
 
 export interface ChunkErrorOptions {
   phase: ChunkErrorPhase;
@@ -35,6 +35,26 @@ export class ChunkConnectionError extends ChunkError {}
 export class ChunkTimeoutError extends ChunkError {}
 
 export class ChunkProtocolError extends ChunkError {}
+
+/** A migration stopped at this step; earlier results remain applied. */
+export class ChunkMigrationError extends ChunkError {
+  readonly migration: Readonly<ChunkMigration>;
+  /** Zero-based position in the supplied list. */
+  readonly index: number;
+  readonly results: readonly ChunkMigrationResult[];
+
+  constructor(migration: ChunkMigration, index: number, results: readonly ChunkMigrationResult[], cause: unknown) {
+    super(`migration ${JSON.stringify(migration.name)} at step ${index + 1} failed: ${cause instanceof Error ? cause.message : String(cause)}`, {
+      phase: cause instanceof ChunkError ? cause.phase : "request",
+      code: cause instanceof ChunkError ? cause.code : undefined,
+      command: "MIGRATE",
+      cause,
+    });
+    this.migration = Object.freeze({ ...migration });
+    this.index = index;
+    this.results = Object.freeze(results.map((result) => Object.freeze({ ...result })));
+  }
+}
 
 /** A `-ERR <CODE> <message>` reply. */
 export class ChunkServerError extends ChunkError {
@@ -89,11 +109,12 @@ export class ChunkSchemaMismatchError extends ChunkServerError {
 }
 
 /**
- * `CONFLICT`: a transaction ended without writing anything; running it
- * again may succeed. `transaction()` runs its callback again by itself.
+ * `CONFLICT`: a transaction could not commit, or a migration name was
+ * already applied with different statement text. `transaction()` retries
+ * transaction conflicts; a migration conflict needs a different step name.
  */
 export class ChunkConflictError extends ChunkServerError {
-  /** `chunk_changed`, `duration`, `history_limit` or `table_changed`. */
+  /** Transaction reason, or the first word of a migration conflict message. */
   readonly reason: string;
 
   constructor(serverMessage: string, reason: string, options: Omit<ChunkErrorOptions, "code">) {
