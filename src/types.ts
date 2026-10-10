@@ -43,7 +43,8 @@ export interface ChunkClientOptions {
   pipelineDepth?: number;
   /**
    * The table of calls that do not name one. Defaults to the URI path
-   * (`chunk://host:4242/terrain`), then to `"default"`.
+   * (`chunk://host:4242/terrain`), then to `"default"`. Selecting a name
+   * does not create its table; a fresh server has no tables.
    */
   table?: string;
 }
@@ -211,7 +212,7 @@ export interface ChunkSize {
 export type ChunkDurabilityMode = "relaxed" | "fsync-wal" | "fsync-checkpoint";
 export type ChunkCheckpointCompression = "none" | "zrle";
 
-/** Table options; the server's documentation (SERVER_FLAGS.md) describes them. */
+/** Table options; the server's CQL reference describes them. */
 export interface ChunkTableOptions {
   durabilityMode?: ChunkDurabilityMode;
   checkpointUpdates?: number;
@@ -220,6 +221,10 @@ export interface ChunkTableOptions {
   checkpointCompression?: ChunkCheckpointCompression;
   /** The most bytes of `text` and `bytes` values in one chunk. */
   varMaxChunkBytes?: number;
+  /** In-memory change-feed byte budget for this table. */
+  feedBufferBytes?: number;
+  /** Durable-slot retained byte budget for this table. */
+  slotMaxBytes?: number;
 }
 
 /** A table's options as `describe` reports them. */
@@ -230,6 +235,8 @@ export interface ChunkTableOptionValues {
   walGroupCommitUpdates: number;
   checkpointCompression: string;
   varMaxChunkBytes: number;
+  feedBufferBytes: number;
+  slotMaxBytes: number;
 }
 
 /** The `DESCRIBE` reply. */

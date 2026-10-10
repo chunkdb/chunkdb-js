@@ -168,6 +168,8 @@ const TABLE_OPTION_NAMES: Record<keyof ChunkTableOptions, string> = {
   walGroupCommitUpdates: "wal_group_commit_updates",
   checkpointCompression: "checkpoint_compression",
   varMaxChunkBytes: "var_max_chunk_bytes",
+  feedBufferBytes: "feed_buffer_bytes",
+  slotMaxBytes: "slot_max_bytes",
 };
 
 // Error replies after which the server closes the connection: a request it

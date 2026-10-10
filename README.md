@@ -33,7 +33,8 @@ try {
 ```
 
 Run it again: the named migration skips the existing table.
-The URI path selects the default table; a method's `table` option overrides it.
+A fresh server has no tables; create a named table before data operations, as the migration above does.
+The URI path selects the client's default table; a method's `table` option overrides it.
 Percent-encode reserved characters in the URI password, or pass `user` and `password` options to `connect`.
 Use `chunks://` for TLS with certificate verification; see [connections and errors](https://github.com/chunkdb/chunkdb-js/blob/main/docs/CONNECTIONS.md).
 

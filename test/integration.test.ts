@@ -37,7 +37,7 @@ async function createKinds(client: Client): Promise<void> {
   });
 }
 
-test("HELLO 3, ping, FLUSH WAL, SHOW METRICS and the default table", async () => {
+test("HELLO 3, empty catalog, ping and an explicitly created default table", async () => {
   const server = await startServer();
   try {
     const client = await connectUri(server.uri);
@@ -51,10 +51,16 @@ test("HELLO 3, ping, FLUSH WAL, SHOW METRICS and the default table", async () =>
     assert.equal(await client.ping(), "PONG");
     await client.flushWal();
     assert.match(await client.metrics(), /^# (HELP|TYPE) /m);
-    assert.deepEqual(await client.listTables(), ["default"]);
+    assert.deepEqual(await client.listTables(), []);
     assert.equal(client.defaultTable(), "default");
 
-    // The default table: one bits(16) column.
+    // Client-side fallback selects a name; it does not create that table.
+    await assert.rejects(client.describe(), serverError("NO_TABLE"));
+    await client.createTable("default", {
+      columns: [{ name: "bits", type: "bits(16)" }],
+      chunk: { width: 16, height: 16 },
+    });
+    assert.deepEqual(await client.listTables(), ["default"]);
     const schema = await client.describe();
     assert.equal(schema.table, "default");
     assert.deepEqual(schema.columns.map((column) => column.typeName), ["bits(16)"]);
@@ -229,7 +235,7 @@ test("execute sends a statement with parameter frames", async () => {
     });
     // A parameter is never part of the statement.
     await client.execute("SET BLOCK 4 4 IN kinds name = $1", [Buffer.from("'; DROP TABLE t")]);
-    assert.deepEqual(await client.listTables(), ["default", "kinds"]);
+    assert.deepEqual(await client.listTables(), ["kinds"]);
     await assert.rejects(client.execute("GET BLOCK 0 0 FROM kinds;"), serverError("SYNTAX"));
     // A frame longer than its column holds is refused unread and the server
     // closes the connection; the next statement reconnects.

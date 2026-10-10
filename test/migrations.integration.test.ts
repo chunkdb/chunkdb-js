@@ -25,7 +25,7 @@ for (const tls of [false, true]) {
         { name: "must_not_run", statement: "DROP TABLE world" },
       ]), (error: unknown) => error instanceof ChunkMigrationError && error.migration.name === "world_table" &&
         error.code === "CONFLICT" && error.cause instanceof ChunkServerError && error.results.length === 0);
-      assert.deepEqual(await a.listTables(), ["default", "world"]);
+      assert.deepEqual(await a.listTables(), ["world"]);
 
       await a.setBlock(0, 0, { n: 1 }, { table: "world" });
       // A cached column must disappear after a table migration, including a skipped step.

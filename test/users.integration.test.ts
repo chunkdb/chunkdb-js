@@ -114,7 +114,7 @@ test("a server with --auth none takes HELLO 3 without a user", async () => {
     const client = await connectUri(server.uri);
     assert.equal(server.uri, `chunk://${server.host}:${server.port}/`);
     assert.equal(client.serverInfo()?.serverSignature, null);
-    assert.deepEqual(await client.listTables(), ["default"]);
+    assert.deepEqual(await client.listTables(), []);
     await client.close();
     await assert.rejects(
       connect({ host: server.host, port: server.port, user: "admin", password: "x" }),
