@@ -19,6 +19,7 @@ import type {
   ChunkRow,
   ChunkScanOptions,
   ChunkScanPage,
+  ChunkSlot,
   ChunkState,
   ChunkStateInput,
   ChunkTableChange,
@@ -221,6 +222,18 @@ export class ChunkPool {
 
   listTables(): Promise<string[]> {
     return this.withClient(async (client) => await client.listTables());
+  }
+
+  createSlot(table: string, name: string): Promise<void> {
+    return this.withClient((client) => client.createSlot(table, name));
+  }
+
+  dropSlot(table: string, name: string): Promise<void> {
+    return this.withClient((client) => client.dropSlot(table, name));
+  }
+
+  listSlots(table?: string): Promise<ChunkSlot[]> {
+    return this.withClient((client) => client.listSlots(table));
   }
 
   createTable(name: string, definition: ChunkTableDefinition): Promise<void> {

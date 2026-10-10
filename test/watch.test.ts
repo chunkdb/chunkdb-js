@@ -269,7 +269,7 @@ test("WATCH transport loss ends iteration without reconnecting", async () => {
 });
 
 test("WATCH errors at startup and during streaming retain their codes", async () => {
-  for (const code of ["NO_TABLE", "BUSY"]) {
+  for (const code of ["NO_TABLE", "BUSY", "SLOT_LOST"]) {
     const socketReady = deferred<Socket>();
     let rejectStart = true;
     const server = await startFakeServer(({ line }, socket) => {
@@ -427,4 +427,117 @@ test("pool WATCH uses dedicated connections and for-await break closes it", asyn
     await pool.close();
     await assert.rejects(pool.watch("t"), ChunkConnectionError);
   } finally { await pool.close(); await server.close(); }
+});
+
+test("slot WATCH sends write-only ACKs in order before UNWATCH and validates returned positions", { timeout: 3000 }, async () => {
+  const server = await startFakeServer(({ line }) => {
+    if (line === "HELLO 3") return FAKE_HELLO;
+    if (line === "DESCRIBE t") return describeReply("u8");
+    if (line === `WATCH t SLOT 'consumer' AREA -1 0 TO 1 2 AFTER ${EPOCH} 1`) return `+OK ${EPOCH} 1\r\n` + change(2) + change(3);
+    if (line.startsWith("ACK ")) return null; // There is intentionally no successful reply.
+    if (line === "UNWATCH") return "+OK\r\n";
+    throw new Error(line);
+  });
+  const client = new ChunkClient({ port: server.port, commandTimeoutMs: 100 });
+  try {
+    const watch = await client.watch("t", { slot: "consumer", area: { cx0: -1, cy0: 0, cx1: 1, cy1: 2 }, after: { epoch: EPOCH, revision: 1n } });
+    await watch.ack(1n); // The starting position is eligible even before any event.
+    const first = (await watch.next()).value;
+    first.position.revision = 1000n; watch.start.revision = 1000n; // Public objects do not own ACK bounds.
+    await assert.rejects(watch.ack(1000n), ChunkProtocolError);
+    for (const revision of [-1n, 4n, 1n << 64n, 2 as unknown as bigint]) await assert.rejects(watch.ack(revision), ChunkProtocolError);
+    assert.equal((await watch.next()).value.position.revision, 3n);
+    const sending = [watch.ack(2n), watch.ack(3n), watch.ack(2n)];
+    const closing = watch.close(); await Promise.all([...sending, closing]);
+    await assert.rejects(watch.ack(3n), ChunkConnectionError);
+    assert.deepEqual(server.requests.filter(({ line }) => /^(ACK|UNWATCH)/.test(line)).map(({ line }) => line), ["ACK 1", "ACK 2", "ACK 3", "ACK 2", "UNWATCH"]);
+  } finally { await client.close(); await server.close(); }
+});
+
+test("slot ACK rejection allows a lower ACK and leaves iteration usable", { timeout: 3000 }, async () => {
+  const server = await startFakeServer(({ line }) => {
+    if (line === "HELLO 3") return FAKE_HELLO;
+    if (line === "DESCRIBE t") return describeReply("u8");
+    if (line === "WATCH t SLOT 'consumer'") return `+OK ${EPOCH} 1\r\n` + change(2);
+    if (line === "ACK 2") return "-ERR INVALID_ARGUMENT rejected ACK\r\n" + change(3);
+    if (line === "ACK 1" || line === "ACK 3") return null;
+    if (line === "UNWATCH") return "+OK\r\n";
+    throw new Error(line);
+  });
+  const client = new ChunkClient({ port: server.port });
+  try {
+    const watch = await client.watch("t", { slot: "consumer" });
+    assert.equal((await watch.next()).value.position.revision, 2n); await watch.ack(2n);
+    await assert.rejects(watch.next(), (error: unknown) => error instanceof ChunkServerError && error.serverCode === "INVALID_ARGUMENT" && error.command === "ACK");
+    await watch.ack(1n);
+    assert.equal((await watch.next()).value.position.revision, 3n);
+    await watch.ack(3n); await watch.close();
+    assert.deepEqual(server.requests.filter(({ line }) => line.startsWith("ACK ")).map(({ line }) => line), ["ACK 2", "ACK 1", "ACK 3"]);
+  } finally { await client.close(); await server.close(); }
+});
+
+for (const kind of ["schema", "resync"] as const) {
+  test(`slot ${kind} events do not advance the ACK upper bound`, { timeout: 3000 }, async () => {
+    const server = await startFakeServer(({ line }) => {
+      if (line === "HELLO 3") return FAKE_HELLO;
+      if (line === "DESCRIBE t") return describeReply("u8");
+      if (line === "WATCH t SLOT 'consumer'") {
+        return `+OK ${EPOCH} 1\r\n` + change(2) + (kind === "schema" ? schema(1, "u8") : resync(3)) + change(3);
+      }
+      if (line.startsWith("ACK ")) return null;
+      if (line === "UNWATCH") return "+OK\r\n";
+      throw new Error(line);
+    });
+    const client = new ChunkClient({ port: server.port });
+    try {
+      const watch = await client.watch("t", { slot: "consumer" });
+      await watch.ack(1n);
+      await assert.rejects(watch.ack(2n), ChunkProtocolError); // Queued changes have not been returned.
+      assert.equal((await watch.next()).value.kind, "change");
+      const event = (await watch.next()).value;
+      assert.equal(event.kind, kind);
+      assert.equal(event.position.revision, 3n);
+      await assert.rejects(watch.ack(3n), ChunkProtocolError);
+      await watch.ack(2n);
+      assert.equal((await watch.next()).value.kind, "change");
+      await watch.ack(3n); await watch.close();
+      assert.deepEqual(server.requests.filter(({ line }) => line.startsWith("ACK ")).map(({ line }) => line), ["ACK 1", "ACK 2", "ACK 3"]);
+    } finally { await client.close(); await server.close(); }
+  });
+}
+
+test("an ACK error during close cannot consume the UNWATCH acknowledgment", async () => {
+  const received = deferred(); const rejected = deferred();
+  const server = await startFakeServer(async ({ line }) => {
+    if (line === "HELLO 3") return FAKE_HELLO;
+    if (line === "DESCRIBE t") return describeReply("u8");
+    if (line === "WATCH t SLOT 'consumer'") return `+OK ${EPOCH} 1\r\n` + change(2);
+    if (line === "ACK 2") { received.resolve(); await rejected.promise; return "-ERR INVALID_ARGUMENT rejected ACK\r\n" + change(3); }
+    if (line === "UNWATCH") return "+OK\r\n";
+    throw new Error(line);
+  });
+  const client = new ChunkClient({ port: server.port });
+  try {
+    const watch = await client.watch("t", { slot: "consumer" });
+    await watch.next(); await watch.ack(2n); await received.promise;
+    const closing = watch.close(); rejected.resolve(); await closing;
+    assert.deepEqual(await watch.next(), { done: true, value: undefined });
+    assert.equal(server.requests.filter(({ line }) => line === "UNWATCH").length, 1);
+  } finally { rejected.resolve(); await client.close(); await server.close(); }
+});
+
+test("ordinary WATCH rejects ACK locally and retains its stream", async () => {
+  const server = await startFakeServer(({ line }) => {
+    if (line === "HELLO 3") return FAKE_HELLO;
+    if (line === "DESCRIBE t") return describeReply("u8");
+    if (line === "WATCH t") return `+OK ${EPOCH} 1\r\n` + change(2);
+    if (line === "UNWATCH") return "+OK\r\n";
+    throw new Error(line);
+  });
+  const client = new ChunkClient({ port: server.port });
+  try {
+    const watch = await client.watch("t"); await assert.rejects(watch.ack(1n), ChunkProtocolError);
+    assert.equal((await watch.next()).value.kind, "change"); await watch.close();
+    assert.equal(server.requests.some(({ line }) => line.startsWith("ACK ")), false);
+  } finally { await client.close(); await server.close(); }
 });

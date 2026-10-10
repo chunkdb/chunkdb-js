@@ -124,9 +124,21 @@ export interface ChunkPosition {
 export type ChunkWatchCoordinate = bigint | { chunk: bigint; offset: number };
 
 export interface ChunkWatchOptions {
+  /** Durable slot name; created separately with createSlot. */
+  slot?: string;
   /** Inclusive chunk coordinates. */
   area?: { cx0: number; cy0: number; cx1: number; cy1: number };
   after?: ChunkPosition;
+}
+
+/** A durable slot's written acknowledgement and retained history. */
+export interface ChunkSlot {
+  table: string;
+  name: string;
+  epoch: string;
+  acked: bigint;
+  retainedBytes: bigint;
+  lost: boolean;
 }
 
 export interface ChunkChangeEvent {

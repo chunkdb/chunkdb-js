@@ -9,6 +9,11 @@ speaks the `chunkdb` 1.x protocol; the next major version speaks protocol 3
 
 ## Unreleased
 
+### Fixed
+- Slot ACK bounds now follow returned changes rather than schema or resync
+  events. The server validates ACK order, allowing a lower valid ACK after a
+  rejection without a local refusal
+
 ### Breaking
 - Protocol 3 (CQL) only. Connecting sends `HELLO 3`; a server of an earlier
   protocol fails `connect()` with a `ChunkProtocolError` that says so.
@@ -35,6 +40,10 @@ speaks the `chunkdb` 1.x protocol; the next major version speaks protocol 3
   `currentVersion`) instead of resolving `{ ok: false }`
 
 ### Added
+- Durable slots on clients and pools: `createSlot`, `dropSlot`, typed
+  `listSlots`, `watch(table, { slot })` and `watch.ack(revision)`. Slot watches
+  resume archived history and preserve exact written positions; rejected ACKs
+  can be read as recoverable iteration errors
 - `ChunkClient.watch` and `ChunkPool.watch`: dedicated, authenticated WATCH
   streams with typed change, schema and resync events, exact positions,
   versioned schema decoding and acknowledged `UNWATCH` on close
