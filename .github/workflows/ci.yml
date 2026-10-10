@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    name: Build and Test (${{ matrix.os }}, plain and TLS)
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out chunkdb-js
+        uses: actions/checkout@v5
+
+      - name: Check out chunkdb main
+        uses: actions/checkout@v5
+        with:
+          repository: chunkdb/chunkdb
+          ref: main
+          path: chunkdb
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install OpenSSL (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev openssl
+
+      - name: Locate OpenSSL (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install openssl@3
+          echo "OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build SDK
+        run: npm run build
+
+      - name: Unit tests
+        run: npm run test:unit
+
+      - name: Build chunkdb server (TLS on)
+        run: |
+          cmake -S chunkdb -B chunkdb/build-js-tests \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCHUNKDB_BUILD_TESTS=OFF \
+            -DCHUNKDB_WITH_TLS=ON \
+            -DCHUNKDB_WERROR=ON
+          cmake --build chunkdb/build-js-tests --parallel 2 --target chunkdb_server
+          test -x chunkdb/build-js-tests/chunkdb_server
+
+      - name: Integration tests (plain and TLS)
+        env:
+          CHUNKDB_REPO_ROOT: ${{ github.workspace }}/chunkdb
+          CHUNKDB_SERVER_BIN: ${{ github.workspace }}/chunkdb/build-js-tests/chunkdb_server
+          CHUNKDB_SERVER_BIN_TLS: ${{ github.workspace }}/chunkdb/build-js-tests/chunkdb_server
+        run: |
+          set -o pipefail
+          npm run test:integration 2>&1 | tee integration.log
+          # The harness fails when a binary is missing; skipped tests also
+          # fail this gate so neither transport can silently lose coverage.
+          grep -Eq '^# skipped 0$' integration.log
+          if grep -Eq '^# skipped [1-9][0-9]*$' integration.log; then
+            echo "integration tests were skipped"
+            exit 1
+          fi
