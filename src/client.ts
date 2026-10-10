@@ -1596,7 +1596,7 @@ export class ChunkClient {
       }
       return new ChunkVersionMismatchError(reply.message, BigInt(current[1]), { phase: "response", command });
     }
-    if (reply.code === "CONFLICT") {
+    if (reply.code === "CONFLICT" && command !== "MIGRATE") {
       return new ChunkConflictError(reply.message, reply.message.split(" ", 1)[0], { phase: "response", command });
     }
     if (reply.code === "SCHEMA_MISMATCH") {

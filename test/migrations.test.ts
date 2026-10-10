@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { ChunkClient, ChunkConnectionError, ChunkMigrationError, ChunkProtocolError, ChunkServerError } from "../src/index";
+import { ChunkClient, ChunkConflictError, ChunkConnectionError, ChunkMigrationError, ChunkProtocolError, ChunkServerError } from "../src/index";
 import { tableOfStatement } from "../src/client";
 import { FAKE_HELLO, startFakeServer } from "./fake-server";
 
@@ -41,6 +41,7 @@ test("migrations stop on the first server error with its code, cause, step and e
       assert.equal(error.code, "CONFLICT");
       assert.equal(error.phase, "response");
       assert.ok(error.cause instanceof ChunkServerError);
+      assert.ok(!(error.cause instanceof ChunkConflictError));
       assert.equal(error.cause.serverCode, "CONFLICT");
       assert.deepEqual(error.results, [{ name: "first", status: "applied" }]);
       return true;

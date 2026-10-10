@@ -109,12 +109,11 @@ export class ChunkSchemaMismatchError extends ChunkServerError {
 }
 
 /**
- * `CONFLICT`: a transaction could not commit, or a migration name was
- * already applied with different statement text. `transaction()` retries
- * transaction conflicts; a migration conflict needs a different step name.
+ * `CONFLICT`: a transaction ended without writing anything; running it
+ * again may succeed. `transaction()` runs its callback again by itself.
  */
 export class ChunkConflictError extends ChunkServerError {
-  /** Transaction reason, or the first word of a migration conflict message. */
+  /** `chunk_changed`, `duration`, `history_limit` or `table_changed`. */
   readonly reason: string;
 
   constructor(serverMessage: string, reason: string, options: Omit<ChunkErrorOptions, "code">) {
