@@ -12,6 +12,7 @@ test("TLS: login, typed blocks and a chunk round trip", async () => {
     assert.equal(client.serverInfo()?.protocol, 3);
     assert.match(client.serverInfo()?.serverSignature ?? "", /^v=/);
     assert.equal(await client.ping(), "PONG");
+    await client.createTable("default", { columns: [{ name: "bits", type: "bits(16)" }] });
     await client.setBlock(3, 4, { bits: ChunkBits.from("1".repeat(16)) });
     assert.equal((await client.getBlock(3, 4))?.bits?.toString(), "1".repeat(16));
     const raw = await client.getChunkRaw(0, 0);
