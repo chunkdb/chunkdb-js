@@ -101,7 +101,6 @@ export class ChunkWatch implements AsyncIterableIterator<ChunkWatchEvent> {
   private nextTurn: Promise<void> = Promise.resolve();
   private description: ChunkClient | null = null;
   private available: bigint;
-  private acknowledged: bigint;
 
   private constructor(
     private readonly stream: ChunkClient,
@@ -114,7 +113,6 @@ export class ChunkWatch implements AsyncIterableIterator<ChunkWatchEvent> {
   ) {
     this.start = start;
     this.available = start.revision;
-    this.acknowledged = start.revision;
     this.schemas.set(version, columns);
   }
 
@@ -171,7 +169,11 @@ export class ChunkWatch implements AsyncIterableIterator<ChunkWatchEvent> {
     return { done: true, value: undefined };
   }
 
-  /** Sends a slot ACK. Completion means written to the socket, not persisted. */
+  /**
+   * Sends a slot ACK through the last returned change or starting position.
+   * Completion means written to the socket, not accepted or persisted.
+   * The server validates ACK order; rejections are reported by next().
+   */
   ack(revision: bigint): Promise<void> {
     if (this.failure !== null) return Promise.reject(this.failure);
     if (this.closing || this.ended) return Promise.reject(new ChunkConnectionError("watch is closed", { phase: "request", command: "ACK" }));
@@ -179,17 +181,19 @@ export class ChunkWatch implements AsyncIterableIterator<ChunkWatchEvent> {
     if (typeof revision !== "bigint" || revision < 0n || revision > MAX_UINT64) {
       return Promise.reject(requestError("ACK needs a uint64 bigint revision", "ACK"));
     }
-    if (revision < this.acknowledged || revision > this.available) {
-      return Promise.reject(requestError("ACK decreases or exceeds the last returned position", "ACK"));
+    if (revision > this.available) {
+      return Promise.reject(requestError("ACK exceeds the last returned change or starting position", "ACK"));
     }
-    this.acknowledged = revision;
     return this.stream[kWatchAck](revision).catch((error: Error) => {
       this.fail(error);
       throw error;
     });
   }
 
-  /** Drains earlier pushes; for slots, UNWATCH persists accepted ACKs before OK. */
+  /**
+   * Drains earlier pushes; for slots, UNWATCH persists accepted ACKs before OK.
+   * Discards queued ACK rejections and those received while closing.
+   */
   close(): Promise<void> {
     if (this.closePromise !== null) return this.closePromise;
     this.closing = true;
@@ -240,7 +244,7 @@ export class ChunkWatch implements AsyncIterableIterator<ChunkWatchEvent> {
         try {
           const value = await this.decode(push);
           if (this.closing || this.ended) return { done: true, value: undefined };
-          this.available = this.available > value.position.revision ? this.available : value.position.revision;
+          if (value.kind === "change") this.available = value.position.revision;
           return { done: false, value };
         } catch (error) {
           if (this.closing) return { done: true, value: undefined };

@@ -206,10 +206,24 @@ own system, then ACK. On reconnect, pass that stored position as `after`.
 In this example, `output.transaction` is your external store's atomic transaction:
 
 ```ts
+import { ChunkServerError } from "@chunkdb/client";
+
 const savedPosition = await output.loadPosition();
 const watch = await client.watch("world", { slot: "consumer", after: savedPosition });
 try {
-  for await (const event of watch) {
+  while (true) {
+    let next;
+    try {
+      next = await watch.next();
+    } catch (error) {
+      if (error instanceof ChunkServerError && error.serverCode === "INVALID_ARGUMENT" && error.command === "ACK") {
+        console.error("ACK rejected:", error.serverMessage);
+        continue;
+      }
+      throw error;
+    }
+    if (next.done) break;
+    const event = next.value;
     if (event.kind === "schema") { updateColumns(event.columns); continue; }
     if (event.kind === "resync") throw new Error("Rebuild consumer state before resuming");
     await output.transaction(async (tx) => {
@@ -226,14 +240,18 @@ try {
 ```
 
 `after` does not acknowledge or release history. ACK alone cannot make an external
-write atomic. `ack(revision)` accepts a uint64 `bigint` through the starting or
-last returned position, in nondecreasing order. It resolves after writing to the
-socket; successful ACK has no reply. The server writes eligible acknowledgement
-batches at most once per 100 ms, and `close()` waits for accepted ACKs to be persisted before OK.
+write atomic. `ack(revision)` accepts a uint64 `bigint` through the last returned
+change or starting position; schema and resync events do not advance this bound.
+The server validates acknowledgement order. It resolves after writing to the
+socket, without confirming acceptance; successful ACK has no reply. The server
+writes eligible acknowledgement batches at most once per 100 ms, and `close()`
+waits for accepted ACKs to be persisted before OK.
 Schema descriptions may preface an archived change at the same revision: apply
 that change before acknowledging its revision. A server-rejected ACK appears as
 `ChunkServerError` with code `INVALID_ARGUMENT` from `next()`; a subsequent
-`next()` can continue the stream. Other stream errors remain terminal.
+`next()` can continue the stream, as in the manual loop above. `close()` discards
+queued ACK rejections and those received while closing. Other stream errors
+remain terminal.
 
 If retained history exceeds the server's slot limit, `lost` becomes true and
 WATCH fails with `SLOT_LOST`. Rebuild the consumer state, drop the lost slot and

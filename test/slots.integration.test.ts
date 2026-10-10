@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { setTimeout as wait } from "node:timers/promises";
 import { ChunkServerError, connectPool, connectUri, type ChunkChangeEvent, type ChunkWatch } from "../src/index";
 import { startServer } from "./helpers";
 
@@ -61,6 +62,7 @@ for (const tls of [false, true]) {
       const deadline = Date.now() + 5000;
       while (!(await client.listSlots("world"))[0].lost) {
         assert.ok(Date.now() < deadline, "slot did not become lost after exceeding its retention limit");
+        await wait(50);
       }
       await assert.rejects(client.watch("world", { slot: "consumer" }), (error: unknown) => error instanceof ChunkServerError && error.serverCode === "SLOT_LOST");
       await client.dropSlot("world", "consumer"); await client.createSlot("world", "consumer");

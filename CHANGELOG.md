@@ -9,6 +9,11 @@ speaks the `chunkdb` 1.x protocol; the next major version speaks protocol 3
 
 ## Unreleased
 
+### Fixed
+- Slot ACK bounds now follow returned changes rather than schema or resync
+  events. The server validates ACK order, allowing a lower valid ACK after a
+  rejection without a local refusal
+
 ### Breaking
 - Protocol 3 (CQL) only. Connecting sends `HELLO 3`; a server of an earlier
   protocol fails `connect()` with a `ChunkProtocolError` that says so.
