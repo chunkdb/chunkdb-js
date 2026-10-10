@@ -2,10 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-This client follows [Semantic Versioning](https://semver.org/). Version 1.x
-speaks the `chunkdb` 1.x protocol; the next major version speaks protocol 3
-(CQL); see the engine's
-[compatibility policy](https://github.com/chunkdb/chunkdb/blob/main/docs/COMPATIBILITY.md).
+This client uses CQL protocol 3 with chunkdb 2.x; see the server's [compatibility policy](https://github.com/chunkdb/chunkdb/blob/main/docs/COMPATIBILITY.md).
 
 ## Unreleased
 
@@ -42,6 +39,7 @@ speaks the `chunkdb` 1.x protocol; the next major version speaks protocol 3
   `currentVersion`) instead of resolving `{ ok: false }`
 
 ### Added
+- User documentation for chunkdb 2.0, with a short npm quick start and focused guides for the exported API, typed data, transactions, users, feed, slots, backup and migrations
 - Runnable `examples/world.ts` and `npm run example:world` show typed blocks,
   area reads and a watched update, with an integration test for repeat runs
 - `client.migrate` runs named schema and permissions steps in order, returning
