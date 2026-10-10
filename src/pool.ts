@@ -260,11 +260,11 @@ export class ChunkPool {
     return this.withClient(async (client) => await client.deleteBlock(x, y, options));
   }
 
-  getChunk(cx: number, cy: number, options: ChunkReadOptions = {}): Promise<ChunkState> {
+  getChunk(cx: number, cy: number, options: ChunkReadOptions = {}): Promise<ChunkState | null> {
     return this.withClient(async (client) => await client.getChunk(cx, cy, options));
   }
 
-  getChunkRaw(cx: number, cy: number, options: ChunkReadOptions = {}): Promise<Buffer> {
+  getChunkRaw(cx: number, cy: number, options: ChunkReadOptions = {}): Promise<Buffer | null> {
     return this.withClient(async (client) => await client.getChunkRaw(cx, cy, options));
   }
 

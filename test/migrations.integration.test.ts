@@ -27,13 +27,14 @@ for (const tls of [false, true]) {
         error.code === "CONFLICT" && error.cause instanceof ChunkServerError && error.results.length === 0);
       assert.deepEqual(await a.listTables(), ["default", "world"]);
 
+      await a.setBlock(0, 0, { n: 1 }, { table: "world" });
       // A cached column must disappear after a table migration, including a skipped step.
       const remove = [{ name: "world_remove_label", statement: "ALTER TABLE world DROP COLUMN label" }];
       await b.migrate(remove);
       assert.deepEqual(await a.migrate(remove), [{ name: "world_remove_label", status: "skipped" }]);
-      assert.deepEqual(Object.keys((await a.getChunk(0, 0, { table: "world" })).columns), ["n"]);
+      assert.deepEqual(Object.keys((await a.getChunk(0, 0, { table: "world" }))!.columns), ["n"]);
       await a.migrate([{ name: "world_restore_label", statement: "ALTER TABLE world ADD COLUMN label text(32) NULL" }]);
-      assert.deepEqual(Object.keys((await a.getChunk(0, 0, { table: "world" })).columns), ["n", "label"]);
+      assert.deepEqual(Object.keys((await a.getChunk(0, 0, { table: "world" }))!.columns), ["n", "label"]);
       const reply = await a.execute("SHOW MIGRATIONS");
       assert.equal(reply.type, "array");
       if (reply.type === "array") assert.equal(reply.items.length, 4);
