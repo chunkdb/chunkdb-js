@@ -16,7 +16,7 @@ The reply map contains `tables`, `files`, `bytes` and `cuts`; each cut identifie
 The copy holds a per-table revision cut, preserves migration history, and restores with new data-directory and table identities.
 Concurrent backups return `BUSY`; do not infer failure or success from a lost reply without checking the destination.
 
-Restore and verify run on the server host using `chunkdb_server --restore ... --data-dir ...` and `chunkdb_server --verify ...`.
+Restore and verify run on the server host using `chunkdb_restore <backup> <destination>` and `chunkdb_verify --data-dir <backup>`.
 There is no client-side restore helper.
 A restored slot keeps its name but starts at the restored cut in the new epoch, so consumers must resynchronize.
 See the [server backup guide](https://github.com/chunkdb/chunkdb/blob/main/docs/BACKUP.md) for completeness guards, supported sources and restore steps.
