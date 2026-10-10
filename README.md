@@ -122,6 +122,36 @@ console.log(await client.listTables(), await client.describe("land"));
 await client.dropTable("land");
 ```
 
+## Migrations
+
+Run the same named steps at every start of your app, before serving requests:
+
+```ts
+const results = await client.migrate([
+  { name: "world_table", statement: "CREATE TABLE world (id u16) CHUNK 16 x 16" },
+  { name: "world_label", statement: "ALTER TABLE world ADD COLUMN label text(64) NULL" },
+]);
+for (const { name, status } of results) console.log(name, status); // applied or skipped
+```
+
+The server applies each step once, including when several app instances start
+concurrently. Keep an applied step's name and statement text unchanged; changing
+its text gives `CONFLICT`. Names match `[a-z_][a-z0-9_]*` and take at most 63
+bytes. Statements are single lines without parameters: `CREATE TABLE`,
+`ALTER TABLE`, `DROP TABLE`, `GRANT`, `REVOKE`, `CREATE SLOT` or `DROP SLOT`.
+Case and spaces inside the statement are part of its identity; outer spaces and
+tabs are trimmed. Each step needs the inner statement's rights and cannot run
+inside a transaction.
+
+The list stops at the first error and rejects with `ChunkMigrationError`:
+`migration` identifies the failed step, `index` is its zero-based position,
+`results` holds earlier acknowledged steps, and `cause`, `code` and `phase`
+preserve the underlying error. Earlier steps remain applied. A lost reply can
+leave the failed step's outcome unknown; retry the same named list after the
+server is available. `execute("SHOW MIGRATIONS")` lists the recorded steps and
+requires `MANAGES USERS` when authentication is enabled. See the server's
+[migration reference](https://github.com/chunkdb/chunkdb/blob/main/docs/CQL.md#named-migrations).
+
 ## Users
 
 ```ts

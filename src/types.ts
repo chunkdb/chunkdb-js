@@ -78,6 +78,18 @@ export interface ChunkServerInfo {
 /** A right on a table: `ADMIN` includes `WRITE`, which includes `READ`. */
 export type ChunkRight = "READ" | "WRITE" | "ADMIN";
 
+/** One named schema or permissions statement, applied once by the server. */
+export interface ChunkMigration {
+  name: string;
+  statement: string;
+}
+
+/** The outcome of one successfully acknowledged migration step. */
+export interface ChunkMigrationResult {
+  name: string;
+  status: "applied" | "skipped";
+}
+
 /** A user as `listUsers` reports it. */
 export interface ChunkUser {
   name: string;

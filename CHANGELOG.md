@@ -40,6 +40,9 @@ speaks the `chunkdb` 1.x protocol; the next major version speaks protocol 3
   `currentVersion`) instead of resolving `{ ok: false }`
 
 ### Added
+- `client.migrate` runs named schema and permissions steps in order, returning
+  `applied`/`skipped`. `ChunkMigrationError` identifies the first failed step
+  and preserves earlier results and the underlying error
 - Durable slots on clients and pools: `createSlot`, `dropSlot`, typed
   `listSlots`, `watch(table, { slot })` and `watch.ack(revision)`. Slot watches
   resume archived history and preserve exact written positions; rejected ACKs

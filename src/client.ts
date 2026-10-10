@@ -6,6 +6,7 @@ import {
   ChunkAuthError,
   ChunkConflictError,
   ChunkConnectionError,
+  ChunkMigrationError,
   ChunkPermissionError,
   ChunkProtocolError,
   ChunkSchemaMismatchError,
@@ -39,6 +40,8 @@ import type {
   ChunkColumnType,
   ChunkCoord,
   ChunkCreateUserOptions,
+  ChunkMigration,
+  ChunkMigrationResult,
   ChunkReadOptions,
   ChunkRight,
   ChunkRow,
@@ -153,7 +156,7 @@ const DEFAULT_TRANSACTION_RETRIES = 5;
 // the table no longer has.
 const WRONG_SIZE = /^\$[0-9]+ for column .+ must be [0-9]+ bytes, got [0-9]+$/;
 const NO_COLUMN = /^the table has no column /;
-const TABLE_STATEMENT = /^\s*(?:create|alter|drop)\s+table\s+([a-z_][a-z0-9_]*)/i;
+const TABLE_STATEMENT = /^\s*(?:migrate\s+'[a-z_][a-z0-9_]{0,62}'\s+)?(?:create|alter|drop)\s+table\s+([a-z_][a-z0-9_]*)/i;
 const RIGHTS: readonly ChunkRight[] = ["READ", "WRITE", "ADMIN"];
 // The statements of the login, sent while connecting.
 const HANDSHAKE = new Set(["HELLO", "AUTH"]);
@@ -555,6 +558,37 @@ export class ChunkClient {
         }
       }
     });
+  }
+
+  /**
+   * Runs named steps in order at each application start. Stops at the first
+   * error with a ChunkMigrationError containing that step and earlier results.
+   * Names and statement text must stay unchanged after a step is applied.
+   */
+  async migrate(migrations: readonly ChunkMigration[]): Promise<ChunkMigrationResult[]> {
+    const results: ChunkMigrationResult[] = [];
+    for (const [index, migration] of migrations.entries()) {
+      try {
+        checkName(migration.name, "a migration name");
+        if (migration.name.length > 63) throw requestError("a migration name takes at most 63 bytes", "MIGRATE");
+        if (typeof migration.statement !== "string" || /[\r\n\0]/.test(migration.statement)) {
+          throw requestError("a migration statement must be one line without CR, LF or NUL", "MIGRATE");
+        }
+        const statement = migration.statement.replace(/^[ \t]+|[ \t]+$/g, "");
+        if (statement === "") throw requestError("a migration needs one statement", "MIGRATE");
+        if (/\$[0-9]+/.test(statement.replace(/'(?:[^']|'')*'/g, ""))) {
+          throw requestError("a migration statement cannot take parameters", "MIGRATE");
+        }
+        const reply = await this.execute(`MIGRATE '${migration.name}' ${statement}`);
+        if (reply.type !== "simple" || (reply.value !== "applied" && reply.value !== "skipped")) {
+          throw new ChunkProtocolError("malformed MIGRATE reply: expected applied or skipped", { phase: "protocol", command: "MIGRATE" });
+        }
+        results.push({ name: migration.name, status: reply.value });
+      } catch (cause) {
+        throw new ChunkMigrationError(migration, index, results, cause);
+      }
+    }
+    return results;
   }
 
   /**
@@ -1562,7 +1596,7 @@ export class ChunkClient {
       }
       return new ChunkVersionMismatchError(reply.message, BigInt(current[1]), { phase: "response", command });
     }
-    if (reply.code === "CONFLICT") {
+    if (reply.code === "CONFLICT" && command !== "MIGRATE") {
       return new ChunkConflictError(reply.message, reply.message.split(" ", 1)[0], { phase: "response", command });
     }
     if (reply.code === "SCHEMA_MISMATCH") {
