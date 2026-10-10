@@ -1,7 +1,9 @@
 # Tables
 
 Examples use the connected administrator `client` from the [README](../README.md).
-Names use lowercase letters, digits and underscores and start with a letter or underscore.
+Column names use lowercase letters, digits and underscores and start with a letter or underscore.
+The server limits column names to 63 bytes and table names to 64 bytes.
+Table names start with a lowercase letter and cannot be reserved Windows device names (`con`, `prn`, `aux`, `nul`, `com0`–`com9`, `lpt0`–`lpt9`).
 The `table` option on data methods overrides the default table selected at connection time.
 
 ```ts
