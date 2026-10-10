@@ -50,7 +50,7 @@
     "test": "npm run test:unit && npm run test:integration",
     "test:unit": "tsx --test test/uri.test.ts test/scram.test.ts test/protocol.test.ts test/values.test.ts test/chunk-form.test.ts test/client.test.ts test/transaction.test.ts test/pool.test.ts test/helpers.test.ts test/watch.test.ts test/slots.test.ts test/migrations.test.ts test/connection-errors.test.ts",
     "test:server": "node scripts/build-test-server.mjs",
-    "test:integration": "npm run test:server && tsx --test test/integration.test.ts test/chunks.integration.test.ts test/tables.integration.test.ts test/pool.integration.test.ts test/tls.integration.test.ts test/users.integration.test.ts test/transactions.integration.test.ts test/watch.integration.test.ts test/slots.integration.test.ts test/migrations.integration.test.ts test/world.integration.test.ts test/backup.integration.test.ts",
+    "test:integration": "npm run test:server && tsx --test --test-reporter=tap test/integration.test.ts test/chunks.integration.test.ts test/tables.integration.test.ts test/pool.integration.test.ts test/tls.integration.test.ts test/users.integration.test.ts test/transactions.integration.test.ts test/watch.integration.test.ts test/slots.integration.test.ts test/migrations.integration.test.ts test/world.integration.test.ts test/backup.integration.test.ts",
     "prepublishOnly": "npm run build && npm test",
     "example:world": "tsx examples/world.ts"
   },
