@@ -23,7 +23,7 @@ await client.deleteBlock(10, 4);
 console.log(await client.getBlock(10, 4)); // null
 ```
 
-`getChunk` and `getChunkRaw` return `null` for a never-written chunk. A written chunk with all blocks deleted still returns its empty form and version until collection removes it.
+`getChunk` and `getChunkRaw` return `null` for a never-written chunk. A written chunk with all blocks deleted still returns its empty form and version until its stored and cached state are removed.
 
 A chunk state contains `version`, `schemaVersion`, `width`, `height`, `present` and per-column arrays.
 Index `i` represents local coordinates `(i % width, Math.floor(i / width))`.
