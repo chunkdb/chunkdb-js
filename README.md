@@ -37,7 +37,7 @@ The URI path selects the default table; a method's `table` option overrides it.
 Percent-encode reserved characters in the URI password, or pass `user` and `password` options to `connect`.
 Use `chunks://` for TLS with certificate verification; see [connections and errors](https://github.com/chunkdb/chunkdb-js/blob/main/docs/CONNECTIONS.md).
 
-`getChunk` and `getChunkRaw` return `null` when a chunk has never been written; a written empty chunk retains its versioned form until its stored and cached state are removed.
+`getChunk` and `getChunkRaw` return `null` when a chunk has never been written; a written empty chunk retains its versioned form until its disk artifacts and cached state are removed.
 
 ## Examples and reference
 
