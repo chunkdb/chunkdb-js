@@ -11,7 +11,7 @@ Block coordinates are integers; chunk coordinates address whole chunks.
 | `bits(N)` | `ChunkBits.from("101")`, bit 0 first |
 | `text(max)` | `string`, limited in UTF-8 bytes |
 | `bytes(max)` | `Uint8Array`; reads return `Buffer` |
-| SQL `NULL` | `null` |
+| `NULL` | `null` |
 
 Values are parameters, and the client rejects values that do not fit the column before sending.
 An absent block reads as `null`; setting a block fills omitted columns from their defaults and preserves existing values on updates.

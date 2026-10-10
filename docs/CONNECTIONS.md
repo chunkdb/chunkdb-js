@@ -9,6 +9,8 @@ A client has one socket; calls are sent and replied to in order.
 `pipelineDepth` defaults to 1 and allows more requests in flight on that connection.
 A pool leases warm clients to independent calls:
 
+Import `connectPool` from `@chunkdb/client` and set `CHUNKDB_URI` to the authenticated URI from the [README](../README.md).
+
 ```ts
 const pool = await connectPool({
   uri: process.env.CHUNKDB_URI,
@@ -25,7 +27,6 @@ try {
 }
 ```
 
-Import `connectPool` from `@chunkdb/client` and set `CHUNKDB_URI` to the authenticated URI from the [README](../README.md).
 `pool.withClient(fn)` leases one client for several operations; `pool.transaction(fn)` uses one connection throughout the callback.
 Closing a client or pool is final; create a new instance afterward.
 

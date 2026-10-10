@@ -19,6 +19,8 @@ Statements are single lines without parameters: `CREATE TABLE`, `ALTER TABLE`, `
 The helper trims outer spaces and tabs; case and all interior spaces remain part of statement identity.
 Keep applied names and text unchanged and add new steps for later changes.
 
+Import `ChunkMigrationError` from `@chunkdb/client` before running this example.
+
 ```ts
 try {
   await client.migrate([{ name: "realm_table", statement: "CREATE TABLE other (id u16) CHUNK 16 x 16" }]);
@@ -30,7 +32,6 @@ const ledger = await client.execute("SHOW MIGRATIONS");
 console.log(ledger.type); // array
 ```
 
-Import `ChunkMigrationError` from `@chunkdb/client` for the second example.
 The list stops at the first failure; `migration` and zero-based `index` identify it, `results` contains earlier acknowledged steps, and `cause`, `code` and `phase` retain the underlying error.
 Earlier steps stay applied; the list is not one transaction and cannot run inside a transaction.
 After a lost reply, a step's outcome can be unknown: retry the same named list when the server is available.

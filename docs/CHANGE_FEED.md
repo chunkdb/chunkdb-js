@@ -40,11 +40,16 @@ await client.createSlot("world", "consumer");
 const watch = await client.watch("world", { slot: "consumer" });
 try {
   await client.setBlock(1, 0, { id: 8, light: 10 });
-  const next = await watch.next();
-  if (next.done || next.value.kind !== "change") throw new Error("expected a change");
-  console.log(next.value.blocks[0].after); // { id: 8, light: 10 }
-  // Persist consumer output and next.value.position together before ACK.
-  await watch.ack(next.value.position.revision);
+  while (true) {
+    const next = await watch.next();
+    if (next.done) throw new Error("watch ended before a change");
+    if (next.value.kind === "schema") continue;
+    if (next.value.kind === "resync") throw new Error("rebuild state before continuing");
+    console.log(next.value.blocks[0].after); // { id: 8, light: 10 }
+    // Persist consumer output and next.value.position together before ACK.
+    await watch.ack(next.value.position.revision);
+    break;
+  }
 } finally {
   await watch.close();
 }
@@ -52,6 +57,7 @@ console.log((await client.listSlots("world"))[0].lost); // false
 await client.dropSlot("world", "consumer");
 ```
 
+A slot stream can send a schema description before the change using that schema.
 `listSlots(table?)` returns `{ table, name, epoch, acked, retainedBytes, lost }`; `acked` and `retainedBytes` are `bigint`.
 `ack` accepts a uint64 revision through the last returned change or starting position; its promise means written to the socket, not accepted or durable.
 Rejected ACKs appear in `next()` as `ChunkServerError` with `command === "ACK"`; after handling a rejection, another `next()` can continue the stream.
