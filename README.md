@@ -12,7 +12,7 @@ npm install @chunkdb/client
 npm install --save-dev tsx
 ```
 
-Save this as `world.ts`, replace the password with your administrator password, and run `npx tsx world.ts`:
+Save this as `world.mts`, replace the password with your administrator password, and run `npx tsx world.mts`:
 
 ```ts
 import { connectUri } from "@chunkdb/client";

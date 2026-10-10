@@ -27,7 +27,7 @@ Revisions order commits and may have gaps; timestamps do not order commits.
 
 Save positions with the consumer state and pass `{ after: savedPosition }` to resume.
 Without a slot, retained history depends on active watches, and resuming may require resync.
-For resync, keep consuming and buffering while another connection re-reads all state, including deletions; apply buffered changes only above each read chunk's version, then persist the rebuilt state and frontier together.
+For resync, follow the server's [state reconstruction procedure](https://github.com/chunkdb/chunkdb/blob/main/docs/CHANGE_FEED.md#resynchronizing).
 An unavailable old schema raises `ChunkProtocolError` and requires rebuilding state.
 
 ## Durable slots
@@ -67,6 +67,5 @@ Close watches separately from the originating client or pool.
 
 `after` does not acknowledge history, and ACK alone cannot make external output atomic.
 Store output and its position atomically in your own system, then ACK; resume from that stored position after disconnects.
-If retention limits mark the slot lost (`SLOT_LOST`), rebuild state, drop the lost slot and create it again.
+Retention loss raises `SLOT_LOST`; follow the server's [slot recovery and ACK persistence rules](https://github.com/chunkdb/chunkdb/blob/main/docs/CHANGE_FEED.md#durable-slots).
 The client does not reconnect a watch or acknowledge automatically.
-See [server feed and slot durability](https://github.com/chunkdb/chunkdb/blob/main/docs/CHANGE_FEED.md).
