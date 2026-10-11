@@ -6,6 +6,10 @@ This client uses CQL protocol 3 with chunkdb 2.x; see the server's [compatibilit
 
 ## Unreleased
 
+### Added
+- Pull requests run build, unit and plain/TLS integration tests on Linux and macOS
+- Generic `BACKUP TO` integration coverage checks summaries and copied data over plain TCP and TLS
+
 ### Fixed
 - Return null for never-written typed and raw chunk reads, including pools and transactions; expose nullable result types and retain versioned empty forms. (#72).
 - The README example uses an ESM filename that also runs outside an ESM package; feed guides link to the server's resync and ACK persistence rules
