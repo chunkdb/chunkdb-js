@@ -55,8 +55,9 @@ After a crash, skip changes you already applied using your stored position.
 | Error | What you do |
 |---|---|
 | `BUSY` | Release the other watcher; only one can claim a slot. |
-| `SLOT_LOST` | Rebuild consumer state using the server resume guide. |
+| `SLOT_LOST` | Rebuild consumer state, drop the lost slot and recreate it before consuming new changes. |
 | Rejected acknowledgment | Handle `ChunkServerError` from `next()` with `command === "ACK"`, then call `next()` again. |
 
+Rebuilding consumer state does not clear a slot's persistent lost flag.
 Creating and dropping slots requires `ADMIN`; watching requires `READ`.
 See the [server resume guide](https://github.com/chunkdb/chunkdb/blob/main/docs/FEED_RESUME.md) for rebuilding state.
