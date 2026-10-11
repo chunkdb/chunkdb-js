@@ -484,7 +484,7 @@ test("a lost connection fails the transaction and nothing goes to a new connecti
   }
 });
 
-test("an out-of-date schema is refreshed inside the transaction, on its connection", async () => {
+test("an explicit scalar schema refresh stays inside the transaction connection", async () => {
   let hType = "f32";
   const { server, lines } = await startTxServer((request) => {
     if (request.line.startsWith("DESCRIBE")) {
@@ -494,13 +494,17 @@ test("an out-of-date schema is refreshed inside the transaction, on its connecti
       return reply;
     }
     if (request.line.startsWith("SET BLOCK") && request.frames[0]?.length !== 8) {
-      return `-ERR INVALID_ARGUMENT $1 for column h (f64) must be 8 bytes, got ${request.frames[0]?.length ?? 0}\r\n`;
+      return `-ERR INVALID_ARGUMENT reason=parameter_width column=h a scalar has no schema version\r\n`;
     }
     return null;
   });
   try {
     const client = await connect({ port: server.port, table: "t" });
-    assert.equal(typeof (await client.transaction(async (tx) => await tx.setBlock(0, 0, { h: 0.5 }))), "bigint");
+    assert.equal(typeof (await client.transaction(async (tx) => {
+      await assert.rejects(tx.setBlock(0, 0, { h: 0.5 }), (error: unknown) => error instanceof ChunkServerError && error.retryClass === "fatal");
+      client.clearSchemaCache("t");
+      await tx.setBlock(0, 0, { h: 0.5 });
+    })), "bigint");
     assert.deepEqual(
       lines.map((l) => [l.connection, l.line]),
       [

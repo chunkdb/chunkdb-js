@@ -100,6 +100,7 @@ function readU32(data: Uint8Array, at: number): number {
  */
 export function decodeChunkForm(layout: TableLayout, form: Uint8Array, indexes: readonly number[]): ChunkState {
   const { schema } = layout;
+  if ((schema.dims ?? 2) !== 2) throw new ChunkProtocolError("this packed chunk form requires two dimensions; use raw forms", { phase: "protocol" });
   const blocks = blockCount(layout);
   const presenceSize = presenceBytes(blocks);
   const short = (what: string) =>

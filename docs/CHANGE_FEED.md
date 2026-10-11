@@ -12,7 +12,7 @@ try {
   await client.setBlock(0, 0, { id: 7, light: 9 });
   for await (const event of watch) {
     if (event.kind === "resync") throw new Error("rebuild state before continuing");
-    if (event.kind === "schema") continue;
+    if (event.kind !== "change") continue;
     console.log(event.blocks[0].after);
     break;
   }
@@ -37,9 +37,16 @@ Change events contain `position: { epoch, revision: bigint }`, `commitTimeMs: bi
 `user` is null for anonymous writes.
 Coordinates are `bigint`, or `{ chunk: bigint, offset: number }` beyond absolute int64 coordinates.
 
-Schema events contain `version` and `columns`.
-Resync events identify the position from which you must rebuild state.
-Use `{ area: { cx0, cy0, cx1, cy1 } }` to filter inclusive chunk coordinates.
+Schema events contain `version`, `dims`, projected `columns` and `chunkColumns`.
+Change events also include nullable bytes `tag`, nullable uint64 `txn`, and typed `chunkChanges`.
+Progress events report the completed frontier, including quiet or filtered streams.
+CHUNKS events carry versioned raw forms, with null forms for deletion.
+The decoder recognizes reserved catalog events without exposing a WATCH CATALOG command.
+Resync events identify the position from which you must rebuild state, with nullable `parentEpoch` and `forkRevision` lineage.
+Unknown push kinds are fully decoded and ignored without consuming an ordinary reply or advancing ACK eligibility.
+Use `area` for inclusive chunk coordinates, `columns` for projection, `noBefore` to omit before rows, or `chunks` for raw forms.
+Rows follow the schema event's projected column order.
+Coordinates can include a third axis when `dims` is 3; entry extensions are ignored after the known prefix.
 Close watches separately from their originating client or pool.
 
 ## Resume

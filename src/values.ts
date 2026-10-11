@@ -410,6 +410,9 @@ export function valueFromReply(column: ChunkColumn, reply: ChunkReply): ChunkVal
       if (reply.type !== "integer") {
         throw mismatch(column, reply);
       }
+      const minimum = type.kind === "i" ? -(1n << BigInt(type.bits - 1)) : 0n;
+      const maximum = type.kind === "i" ? (1n << BigInt(type.bits - 1)) - 1n : (1n << BigInt(type.bits)) - 1n;
+      if (reply.value < minimum || reply.value > maximum) throw mismatch(column, reply);
       return integerValue(type, reply.value);
     case "bool":
       if (reply.type !== "boolean") {

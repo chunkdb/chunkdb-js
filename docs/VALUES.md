@@ -34,8 +34,11 @@ null
 
 ## Chunks and conditional writes
 
-A chunk version is an equality token that identifies its written state.
+A chunk version identifies committed state and orders writes within the same table epoch.
 A schema version identifies the table's column layout.
+`describe` also reports the table epoch and completed revision; revisions can have gaps.
+The revision is null on read-only OPEN when the completed frontier is unavailable; read-write tables report a numeric frontier.
+
 `getChunk` and `getChunkRaw` return `null` for a never-written chunk.
 Deleting every block retains an empty form and version until the chunk's disk artifacts and cached state are removed.
 
@@ -91,3 +94,29 @@ A stale-schema typed operation refreshes and retries once.
 
 `describe(table?)` refreshes the schema; `clearSchemaCache(table?)` removes cached layouts.
 See [tables](TABLES.md) and the [server chunks reference](https://github.com/chunkdb/chunkdb/blob/main/docs/reference/CHUNKS.md).
+
+## Read metadata
+
+`getBlockWithMetadata` reads the row, chunk version and schema version under one read boundary.
+Absent blocks in written chunks keep that chunk's version.
+
+Never-written chunks and transaction-private modified chunks have a null version.
+A collected empty chunk also returns null when no committed version remains retained.
+`getAreaWithSchema` and `getAreaRawWithSchema` include schema metadata without promising an atomic snapshot across chunks.
+
+```ts docs-check
+await client.setBlock(10, 4, { id: 23, light: 7 });
+const read = await client.getBlockWithMetadata(10, 4);
+console.log(read.row);
+console.log(typeof read.version, typeof read.schemaVersion);
+```
+
+```output
+{ id: 23, light: 7 }
+bigint bigint
+```
+
+An unknown DESCRIBE type keeps its original name and returns raw bytes for that row column.
+Known neighboring columns keep their usual typed values.
+Packed chunk forms need every column's width; an unknown type raises `ChunkUnknownColumnTypeError` during typed form decoding.
+Use raw form methods when you need to retain that undecoded form.

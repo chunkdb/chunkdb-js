@@ -11,9 +11,11 @@ async function next(watch: ChunkWatch): Promise<ChunkWatchEvent> {
 }
 
 async function changed(watch: ChunkWatch): Promise<ChunkChangeEvent> {
-  const event = await next(watch);
-  assert.equal(event.kind, "change");
-  return event;
+  while (true) {
+    const event = await next(watch);
+    if (event.kind === "resync") throw new Error("watch needs state rebuild");
+    if (event.kind === "change") return event;
+  }
 }
 
 async function withWorld(fn: (server: StartedServer, client: ChunkClient) => Promise<void>, tls = false, feedLingerMs?: number): Promise<void> {

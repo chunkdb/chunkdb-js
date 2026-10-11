@@ -51,6 +51,11 @@ export { ChunkBits, encodeParameter, formatColumnType, parseColumnType } from ".
 export { formatChunkUri, parseChunkUri, tableFromUriPath } from "./uri";
 export { scramVerifier } from "./scram";
 export type {
+  ChunkBlockMetadata,
+  ChunkAreaMetadata,
+  ChunkSchemaVersion,
+  ChunkFeatureStatus,
+  ChunkStatus,
   ChunkArea,
   ChunkAreaEntry,
   ChunkAreaRawEntry,
@@ -58,6 +63,10 @@ export type {
   ChunkClientOptions,
   ChunkColumn,
   ChunkChangeEvent,
+  ChunkProgressEvent,
+  ChunkChunksEvent,
+  ChunkCatalogEvent,
+  ChunkSlotOptions,
   ChunkSchemaEvent,
   ChunkResyncEvent,
   ChunkPosition,

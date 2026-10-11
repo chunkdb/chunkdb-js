@@ -1,11 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  ChunkClient, ChunkProtocolError, ChunkServerError, ChunkVersionMismatchError,
+  ChunkClient, ChunkPool, ChunkProtocolError, ChunkServerError, ChunkVersionMismatchError,
   ChunkSchemaMismatchError, ChunkOutcomeUnknownError, ChunkUnknownColumnTypeError,
   countParameters, encodeStatement, parseReply, retryClassOf, type ChunkReply,
 } from "../src/index";
-import { parseDescribe, parseServerInfo } from "../src/schema";
+import { ReplyReader } from "../src/protocol";
+import { parseSlots } from "../src/slots";
+import { parseDescribe, parseServerInfo, parseStatus } from "../src/schema";
 import { valueFromReply } from "../src/values";
 import { decodeChunkForm } from "../src/chunk-form";
 import { describeReply, FAKE_HELLO, startFakeServer } from "./fake-server";
@@ -52,7 +54,10 @@ test("foundation: RESP3 big numbers and signed/JSON exactness boundaries survive
     const wire = Buffer.from(`(${value}\r\n`);
     for (let split = 0; split < wire.length; split++) {
       assert.equal(parseReply(wire.subarray(0, split)), null);
-      assert.deepEqual(parseReply(wire)!.reply, integer(value));
+      const reader = new ReplyReader();
+      reader.push(wire.subarray(0, split)); assert.equal(reader.next(), null);
+      reader.push(wire.subarray(split)); assert.deepEqual(reader.next(), integer(value));
+      assert.equal(reader.next(), null);
     }
   }
   for (const text of ["(", "(1.5\r\n", "(+1\r\n", "(\r\n"]) {
@@ -80,9 +85,9 @@ test("foundation: code alone classifies errors; percent keys and unknown diagnos
 test("foundation: optional HELLO metadata and unknown maps leave known fields intact", () => {
   const reply = addFields(parsed(FAKE_HELLO), {
     connection_id: integer((1n << 64n) - 1n), features: array(bulk("protocol_foundation"), bulk("future")),
-    options: map({ client_name: bulk("renderer") }),
+    options: map({ client_name: bulk("renderer"), future: array(map({ nested: bulk("ignored") })) }),
     not_applied: map({ default_tag: map({ reason: bulk("implementation_pending"), extra: array() }) }),
-    idle_timeout_ms: integer(60000n), limits: map({ max_watches: integer(64n) }),
+    idle_timeout_ms: integer(60000n), limits: map({ max_watches: integer(64n), future: map({ arbitrary: array() }) }),
     future: map({ nested: array(integer(123n)) }),
   });
   const info = parseServerInfo(reply);
@@ -144,4 +149,319 @@ test("foundation: current metadata keeps existing typed errors; OUTCOME_UNKNOWN 
     await assert.rejects(client.execute("SCHEMA"), (error: unknown) => error instanceof ChunkSchemaMismatchError && error.currentSchemaVersion === 9n);
     await assert.rejects(client.execute("COMMIT"), (error: unknown) => error instanceof ChunkOutcomeUnknownError && error.retryClass === "unknown_outcome" && error.stage === "publish");
   } finally { await client.close(); await server.close(); }
+});
+
+const EPOCH = "0123456789abcdef0123456789abcdef";
+const nullReply: ChunkReply = { type: "null" };
+const push = (...items: ChunkReply[]): ChunkReply => ({ type: "push", items });
+const watchStart = () => map({ epoch: bulk(EPOCH), revision: integer(1n), future: array() });
+const schemaPush = (dims = 2) => {
+  const fields = parsed(describeReply("u8"));
+  assert.equal(fields.type, "map");
+  const columns = fields.entries.find(([key]) => key.type === "bulk" && key.value.toString() === "columns")![1];
+  return push(bulk("schema"), map({ epoch: bulk(EPOCH), revision: integer(20n), schema_version: integer(1n),
+    dims: integer(BigInt(dims)), columns, chunk_columns: array(), future: map({ ignored: integer(99n) }) }), array(bulk("trailing")));
+};
+const changePush = (dims = 2, transaction: ChunkReply = integer((1n << 64n) - 1n)) => push(
+  bulk("change"), bulk(EPOCH), integer(2n), integer(123n), nullReply, integer(1n),
+  array(array(integer(-1n), integer(2n), ...(dims === 3 ? [integer(3n)] : []), nullReply, array(integer(7n), integer(8n), bulk("trailing row")), bulk("trailing entry"))),
+  bulk("tag"), transaction, array(), map({ ignored: bulk("trailing event") }),
+);
+
+test("foundation: new WATCH maps, longer envelopes, 3D prefix, bytes tag and nullable u64 transaction", { timeout: 5000 }, async () => {
+  const server = await startFakeServer(({ line }) => {
+    if (line === "HELLO 3") return FAKE_HELLO;
+    if (line === "DESCRIBE t") return describeReply("u8");
+    if (line === "WATCH t") return encode(watchStart()) + encode(schemaPush(3)) + encode(changePush(3)) + encode(push(bulk("resync"), bulk(EPOCH), integer(3n), bulk(EPOCH), integer(2n), array()));
+    if (line === "UNWATCH") return "+OK\r\n";
+    throw new Error(line);
+  });
+  const client = new ChunkClient({ port: server.port });
+  let watch;
+  try {
+    watch = await client.watch("t");
+    const schema = (await watch.next()).value;
+    assert.equal(schema.kind, "schema"); assert.equal(schema.dims, 3);
+    const event = (await watch.next()).value;
+    assert.equal(event.kind, "change");
+    assert.equal(event.blocks[0].z, 3n); assert.deepEqual(event.blocks[0].after, { id: 7, h: 8 });
+    assert.deepEqual(event.tag, Buffer.from("tag")); assert.equal(event.txn, (1n << 64n) - 1n);
+    const resync = (await watch.next()).value;
+    assert.equal(resync.kind, "resync"); assert.equal(resync.parentEpoch, EPOCH); assert.equal(resync.forkRevision, 2n);
+  } finally { await watch?.close(); await client.close(); await server.close(); }
+});
+
+test("foundation: only application-delivered changes, chunks and progress advance slot ACK eligibility", { timeout: 5000 }, async () => {
+  const server = await startFakeServer(({ line }) => {
+    if (line === "HELLO 3") return FAKE_HELLO;
+    if (line === "DESCRIBE t") return describeReply("u8");
+    if (line === "WATCH t SLOT 'consumer'") return encode(push(bulk("future"), map({ revision: integer(999n) }))) + encode(watchStart()) + encode(schemaPush()) + encode(push(bulk("future"), bulk(EPOCH), integer(1000n))) + encode(push(bulk("progress"), bulk(EPOCH), integer(7n), map({ trailing: array() })));
+    if (line.startsWith("ACK ")) return null;
+    if (line === "UNWATCH") return "+OK\r\n";
+    throw new Error(line);
+  });
+  const client = new ChunkClient({ port: server.port });
+  let watch;
+  try {
+    watch = await client.watch("t", { slot: "consumer" });
+    await assert.rejects(watch.ack(7n), ChunkProtocolError);
+    assert.equal((await watch.next()).value.kind, "schema");
+    await assert.rejects(watch.ack(20n), ChunkProtocolError);
+    const progress = (await watch.next()).value;
+    assert.equal(progress.kind, "progress"); assert.equal(progress.position.revision, 7n);
+    await watch.ack(7n);
+    await assert.rejects(watch.ack(8n), ChunkProtocolError);
+    await watch.close();
+    assert.equal(server.requests.filter(({ line }) => line === "ACK 7").length, 1);
+  } finally { await watch?.close(); await client.close(); await server.close(); }
+});
+
+test("foundation: chunks advance delivered ACK bounds while catalog only decodes typed prefixes", { timeout: 5000 }, async () => {
+  const chunks = push(bulk("chunks"), bulk(EPOCH), integer(4n), integer(12n), nullReply, integer(1n),
+    array(array(integer(-1n), integer(2n), integer(3n), integer(4n), nullReply, bulk("trailing"))), nullReply, nullReply, array());
+  const catalog = push(bulk("catalog"), bulk(EPOCH), integer(5n), integer(13n), bulk("admin"), array(map({
+    kind: bulk("table"), action: bulk("create"), name: bulk("t"), table: nullReply, data: map({ dims: integer(3n) }), extra: array(),
+  })), integer((1n << 64n) - 1n), array());
+  const server = await startFakeServer(({ line }) => {
+    if (line === "HELLO 3") return FAKE_HELLO;
+    if (line === "DESCRIBE t") return describeReply("u8");
+    if (line === "WATCH t SLOT 'consumer'") return encode(watchStart()) + encode(schemaPush(3)) + encode(chunks) + encode(catalog);
+    if (line.startsWith("ACK ")) return null;
+    if (line === "UNWATCH") return "+OK\r\n";
+    throw new Error(line);
+  });
+  const client = new ChunkClient({ port: server.port });
+  let watch;
+  try {
+    watch = await client.watch("t", { slot: "consumer" });
+    await watch.next();
+    await assert.rejects(watch.ack(4n), ChunkProtocolError);
+    const event = (await watch.next()).value;
+    assert.equal(event.kind, "chunks"); assert.equal(event.chunks[0].cz, 3n); assert.equal(event.chunks[0].version, 4n); assert.equal(event.chunks[0].form, null);
+    await watch.ack(4n);
+    const record = (await watch.next()).value;
+    assert.equal(record.kind, "catalog"); assert.equal(record.events[0].kind, "table"); assert.equal(record.txn, (1n << 64n) - 1n);
+    await assert.rejects(watch.ack(5n), ChunkProtocolError);
+  } finally { await watch?.close(); await client.close(); await server.close(); }
+});
+
+test("foundation: transaction metadata rejects a string and uint64 overflow", { timeout: 5000 }, async () => {
+  for (const txn of [bulk("opaque-id"), integer(1n << 64n), integer(-1n)]) {
+    const server = await startFakeServer(({ line }) => {
+      if (line === "HELLO 3") return FAKE_HELLO;
+      if (line === "DESCRIBE t") return describeReply("u8");
+      if (line === "WATCH t") return encode(watchStart()) + encode(changePush(2, txn));
+      if (line === "UNWATCH") return "+OK\r\n";
+      throw new Error(line);
+    });
+    const client = new ChunkClient({ port: server.port });
+    let watch;
+    try { watch = await client.watch("t"); await assert.rejects(watch.next(), /transaction id is not uint64/); }
+    finally { await watch?.close(); await client.close(); await server.close(); }
+  }
+});
+
+test("foundation: CREATE SLOT and WATCH keep filter clauses explicit, including timeout and takeover", { timeout: 5000 }, async () => {
+  const server = await startFakeServer(({ line }) => {
+    if (line === "HELLO 3") return FAKE_HELLO;
+    if (line === "DESCRIBE t") return describeReply("u8");
+    if (line.startsWith("WATCH ")) return encode(watchStart());
+    return "+OK\r\n";
+  });
+  const client = new ChunkClient({ port: server.port });
+  let watch;
+  try {
+    const filters = { area: { cx0: -1, cy0: 0, cx1: 2, cy1: 3 }, columns: ["h", "id"], noBefore: true, chunks: true };
+    await client.createSlot("t", "consumer", { ...filters, ifNotExists: true });
+    watch = await client.watch("t", { ...filters, slot: "consumer", takeover: true, ackTimeoutMs: 5000 });
+    assert.ok(server.requests.some(({ line }) => line === "CREATE SLOT IF NOT EXISTS 'consumer' ON t AREA -1 0 TO 2 3 COLUMNS h, id NO BEFORE CHUNKS"));
+    assert.ok(server.requests.some(({ line }) => line === "WATCH t SLOT 'consumer' TAKEOVER AREA -1 0 TO 2 3 COLUMNS h, id NO BEFORE CHUNKS ACK TIMEOUT 5000"));
+    await assert.rejects(client.watch("t", { takeover: true }), /requires a slot/);
+    await assert.rejects(client.watch("t", { ackTimeoutMs: 1 }), /requires a slot/);
+  } finally { await watch?.close(); await client.close(); await server.close(); }
+});
+
+
+test("foundation: read metadata preserves absent/private versions, exact schema versions and unknown neighbors", { timeout: 5000 }, async () => {
+  const version = (1n << 64n) - 1n;
+  const description = addFields(parsed(describeReply("future(17)")), { version: integer(version) });
+  let reads = 0;
+  const server = await startFakeServer(({ line }) => {
+    if (line === "HELLO 3") return FAKE_HELLO;
+    if (line === "DESCRIBE t") return encode(description);
+    if (line === "GET BLOCK 0 0 FROM t COLUMNS id, h WITH VERSION WITH SCHEMA") {
+      reads++;
+      return encode(array(reads === 1 ? integer(version) : nullReply, integer(version), reads === 3 ? nullReply : array(integer(7n), bulk("opaque"), map({ extra: array() })), bulk("extension")));
+    }
+    if (line === "GET AREA 0 0 TO 0 0 FROM t COLUMNS id, h WITH SCHEMA") return encode(array(integer(version), array(), map({ extra: array() })));
+    if (["BEGIN", "ROLLBACK"].includes(line)) return "+OK\r\n";
+    if (line === "COMMIT") return "_\r\n";
+    throw new Error(line);
+  });
+  const client = new ChunkClient({ port: server.port, table: "t" });
+  try {
+    assert.equal((await client.describe()).version, version);
+    assert.deepEqual(await client.getBlockWithMetadata(0, 0), { version, schemaVersion: version, row: { id: 7, h: Buffer.from("opaque") } });
+    await client.transaction(async (tx) => {
+      assert.deepEqual(await tx.getBlockWithMetadata(0, 0), { version: null, schemaVersion: version, row: { id: 7, h: Buffer.from("opaque") } });
+      assert.deepEqual(await tx.getAreaWithSchema({ cx0: 0, cy0: 0, cx1: 0, cy1: 0 }), { schemaVersion: version, entries: [] });
+    });
+    assert.deepEqual(await client.getBlockWithMetadata(0, 0), { version: null, schemaVersion: version, row: null });
+    assert.deepEqual(await client.getAreaRawWithSchema({ cx0: 0, cy0: 0, cx1: 0, cy1: 0 }), { schemaVersion: version, entries: [] });
+  } finally { await client.close(); await server.close(); }
+});
+
+test("foundation: read metadata refreshes schema before decoding a changed layout", { timeout: 5000 }, async () => {
+  let descriptions = 0;
+  const server = await startFakeServer(({ line }) => {
+    if (line === "HELLO 3") return FAKE_HELLO;
+    if (line === "DESCRIBE t") return encode(addFields(parsed(describeReply(descriptions++ ? "text(8)" : "u8")), { version: integer(BigInt(descriptions)) }));
+    if (line.startsWith("GET BLOCK")) return encode(array(integer(3n), integer(2n), array(integer(7n), bulk("known"))));
+    throw new Error(line);
+  });
+  const pool = new ChunkPool({ port: server.port, table: "t", maxConnections: 1 });
+  try {
+    assert.deepEqual(await pool.getBlockWithMetadata(0, 0), { version: 3n, schemaVersion: 2n, row: { id: 7, h: "known" } });
+    assert.equal(descriptions, 2);
+  } finally { await pool.close(); await server.close(); }
+});
+
+test("foundation: unknown types leave known columns on both sides typed", () => {
+  const description = parsed(describeReply("future(17)"));
+  assert.equal(description.type, "map");
+  const columns = description.entries.find(([key]) => key.type === "bulk" && key.value.toString() === "columns")![1];
+  assert.equal(columns.type, "array");
+  columns.items.push(map({ id: integer(3n), name: bulk("tail"), type: bulk("text(8)"), null: { type: "boolean", value: false }, required: { type: "boolean", value: false }, default: nullReply }));
+  const layout = parseDescribe(description);
+  const values = [integer(7n), bulk("unknown"), bulk("typed")];
+  assert.deepEqual(layout.schema.columns.map((column, i) => valueFromReply(column, values[i])), [7, Buffer.from("unknown"), "typed"]);
+});
+
+test("foundation: HELLO WITH reports pending options and quotes literal parameter text", { timeout: 5000 }, async () => {
+  const line = "HELLO 3 WITH client_name = 'renderer $1', statement_timeout_ms = 500, default_tag = x'00ff'";
+  const server = await startFakeServer(({ line: request, frames }) => {
+    assert.equal(request, line); assert.deepEqual(frames, []);
+    return encode(addFields(parsed(FAKE_HELLO), { options: map({ client_name: bulk("renderer $1") }), not_applied: map({
+      statement_timeout_ms: map({ reason: bulk("implementation_pending") }), default_tag: map({ reason: bulk("implementation_pending") }),
+    }) }));
+  });
+  const client = new ChunkClient({ port: server.port, helloOptions: { client_name: "renderer $1", statement_timeout_ms: 500, default_tag: Buffer.from([0, 255]) } });
+  try {
+    await client.connect();
+    assert.equal(client.serverInfo()?.options?.client_name, "renderer $1");
+    assert.equal(client.serverInfo()?.notApplied?.default_tag.reason, "implementation_pending");
+  } finally { await client.close(); await server.close(); }
+});
+
+test("foundation: STATUS and slot filters retain exact masks, dropped-column IDs and future reasons", { timeout: 5000 }, async () => {
+  const features = map({ enabled: array(bulk("feed"), bulk("future_feature")), compat: integer((1n << 64n) - 1n), ro_compat: integer(1n), incompat: integer(1n << 63n), future: array() });
+  const slot = map({ table: bulk("t"), name: bulk("consumer"), epoch: bulk(EPOCH), acked: integer(4n), retained_bytes: integer(6n), lost: { type: "boolean", value: true },
+    filters: map({ area: array(integer(-2n), integer(-3n), integer(1n), integer(2n)), columns: array(bulk("renamed"), nullReply), column_ids: array(integer(7n), integer((1n << 64n) - 1n)), no_before: { type: "boolean", value: true }, chunks: { type: "boolean", value: false }, future: map({ nested: array() }) }), lost_reason: bulk("future_reason"), future: array() });
+  const server = await startFakeServer(({ line }) => {
+    if (line === "HELLO 3") return FAKE_HELLO;
+    if (line === "SHOW STATUS") return encode(map({ directory: features, tables: array(addFields(parsed(encode(features)), { name: bulk("t") })), activation_pending: { type: "boolean", value: true }, future: array() }));
+    if (line === "SHOW SLOTS ON t") return encode(array(slot));
+    if (line === "ENABLE FEATURE feed") return "+OK\r\n";
+    throw new Error(line);
+  });
+  const pool = new ChunkPool({ port: server.port, maxConnections: 1 });
+  try {
+    const status = await pool.showStatus();
+    assert.equal(status.directory.compat, (1n << 64n) - 1n); assert.equal(status.directory.incompat, 1n << 63n);
+    assert.deepEqual(status.directory.enabled, ["feed", "future_feature"]); assert.equal(status.tables[0].name, "t"); assert.equal(status.activationPending, true);
+    const [result] = await pool.listSlots("t");
+    assert.deepEqual(result.filters, { area: [-2n, -3n, 1n, 2n], columns: ["renamed", null], columnIds: [7n, (1n << 64n) - 1n], noBefore: true, chunks: false });
+    assert.equal(result.lostReason, "future_reason");
+    await pool.enableFeature("feed");
+  } finally { await pool.close(); await server.close(); }
+});
+
+test("foundation: a missing default table fails locally rather than addressing an implicit table", async () => {
+  const client = new ChunkClient();
+  try {
+    assert.equal(client.defaultTable(), "");
+    await assert.rejects(client.getBlock(0, 0), (error: unknown) => error instanceof ChunkProtocolError && error.phase === "request" && /name a table/.test(error.message));
+  } finally { await client.close(); }
+});
+
+
+test("foundation: typed integer replies reject signed and unsigned overflow before conversion", () => {
+  for (const [type, valid, invalid] of [
+    ["u64", (1n << 64n) - 1n, 1n << 64n], ["i64", -(1n << 63n), -(1n << 63n) - 1n],
+    ["u53", (1n << 53n) - 1n, 1n << 53n], ["i53", (1n << 52n) - 1n, 1n << 52n],
+  ] as const) {
+    const column = parseDescribe(parsed(describeReply(type))).schema.columns[1];
+    assert.equal(BigInt(valueFromReply(column, integer(valid)) as number | bigint), valid);
+    assert.throws(() => valueFromReply(column, integer(invalid)), ChunkProtocolError);
+  }
+});
+
+test("foundation: unknown prototype-named error codes stay fatal server errors", { timeout: 5000 }, async () => {
+  const server = await startFakeServer(({ line }) => line === "HELLO 3" ? FAKE_HELLO : `-ERR ${line} reason=future unknown code\r\n`);
+  const client = new ChunkClient({ port: server.port });
+  try {
+    for (const code of ["constructor", "__proto__", "FUTURE_CODE"]) {
+      await assert.rejects(client.execute(code), (error: unknown) => error instanceof ChunkServerError && error.serverCode === code && error.retryClass === "fatal");
+    }
+  } finally { await client.close(); await server.close(); }
+});
+
+test("foundation: raw AREA metadata uses described 3D coordinate prefixes and ignores trailing fields", { timeout: 5000 }, async () => {
+  const server = await startFakeServer(({ line }) => {
+    if (line === "HELLO 3") return FAKE_HELLO;
+    if (line === "DESCRIBE t") return encode(addFields(parsed(describeReply("u8")), { dims: integer(3n) }));
+    if (line.startsWith("GET AREA")) return encode(array(integer(1n), array(array(integer(-1n), integer(2n), integer(3n), bulk("raw"), map({ extension: array() }))), array()));
+    throw new Error(line);
+  });
+  const client = new ChunkClient({ port: server.port, table: "t" });
+  try {
+    assert.deepEqual(await client.getAreaRawWithSchema({ cx0: 0, cy0: 0, cx1: 0, cy1: 0 }), { schemaVersion: 1n, entries: [{ cx: -1, cy: 2, cz: 3n, chunk: Buffer.from("raw") }] });
+  } finally { await client.close(); await server.close(); }
+});
+
+
+test("foundation: DESCRIBE distinguishes an unavailable read-only frontier from numeric read-write frontiers", () => {
+  assert.equal(parseDescribe(addFields(parsed(describeReply("u8")), { revision: nullReply })).schema.revision, null);
+  assert.equal(parseDescribe(addFields(parsed(describeReply("u8")), { revision: integer(0n) })).schema.revision, 0n);
+  assert.equal(parseDescribe(addFields(parsed(describeReply("u8")), { revision: integer((1n << 64n) - 1n) })).schema.revision, (1n << 64n) - 1n);
+  for (const revision of [bulk("unknown"), integer(-1n), integer(1n << 64n)]) {
+    assert.throws(() => parseDescribe(addFields(parsed(describeReply("u8")), { revision })), ChunkProtocolError);
+  }
+});
+
+test("foundation: WATCH schema and change keep uint64 schema versions above the number range", { timeout: 5000 }, async () => {
+  const version = (1n << 64n) - 1n;
+  const schema = schemaPush(); assert.equal(schema.type, "push"); assert.equal(schema.items[1].type, "map"); addFields(schema.items[1], { schema_version: integer(version) });
+  const change = changePush(); assert.equal(change.type, "push"); change.items[5] = integer(version);
+  const server = await startFakeServer(({ line }) => {
+    if (line === "HELLO 3") return FAKE_HELLO;
+    if (line === "DESCRIBE t") return encode(addFields(parsed(describeReply("u8")), { version: integer(version) }));
+    if (line === "WATCH t") return encode(watchStart()) + encode(schema) + encode(change);
+    if (line === "UNWATCH") return "+OK\r\n";
+    throw new Error(line);
+  });
+  const client = new ChunkClient({ port: server.port }); let watch;
+  try {
+    watch = await client.watch("t");
+    const first = (await watch.next()).value; assert.equal(first.kind, "schema"); assert.equal(first.version, version);
+    const second = (await watch.next()).value; assert.equal(second.kind, "change"); assert.equal(second.schemaVersion, version);
+  } finally { await watch?.close(); await client.close(); await server.close(); }
+});
+
+
+test("foundation: status masks and persisted filter metadata reject invalid signedness and alignment", () => {
+  const base = { area: nullReply, columns: nullReply, column_ids: nullReply, no_before: { type: "boolean", value: false } as ChunkReply, chunks: { type: "boolean", value: false } as ChunkReply };
+  for (const fields of [
+    { ...base, columns: array(bulk("n")), column_ids: array() },
+    { ...base, column_ids: array(integer(1n)) },
+    { ...base, area: array(integer(0n), integer(0n), integer(1n)) },
+    { ...base, area: array(integer(-(1n << 63n) - 1n), integer(0n), integer(1n), integer(1n)) },
+    { ...base, columns: array(bulk("n")), column_ids: array(integer(-1n)) },
+    { ...base, chunks: bulk("true") },
+  ]) {
+    assert.throws(() => parseSlots(array(map({ table: bulk("t"), name: bulk("consumer"), epoch: bulk(EPOCH), acked: integer(0n), retained_bytes: integer(0n), lost: { type: "boolean", value: false }, filters: map(fields) }))), ChunkProtocolError);
+  }
+  for (const mask of [integer(-1n), integer(1n << 64n), bulk("1")]) {
+    assert.throws(() => parseStatus(map({ directory: map({ enabled: array(), compat: mask, ro_compat: integer(0n), incompat: integer(0n) }), tables: array(), activation_pending: { type: "boolean", value: false } })), ChunkProtocolError);
+  }
 });

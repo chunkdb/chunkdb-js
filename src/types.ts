@@ -1,3 +1,4 @@
+import type { ChunkReply } from "./protocol";
 import type { ChunkBits } from "./values";
 
 export type ChunkScheme = "chunk" | "chunks";
@@ -43,7 +44,7 @@ export interface ChunkClientOptions {
   pipelineDepth?: number;
   /**
    * The table of calls that do not name one. Defaults to the URI path
-   * (`chunk://host:4242/terrain`), then to `"default"`. Selecting a name
+   * (`chunk://host:4242/terrain`), with no fallback. Selecting a name
    * does not create its table; a fresh server has no tables.
    */
   table?: string;
@@ -63,7 +64,7 @@ export interface ChunkServerInfo {
   serverVersion: string;
   /** The longest statement line, terminator included. */
   maxLineBytes: number;
-  /** The most `$n` parameters in one statement. */
+  /** The most lexical parameter occurrences in one statement. */
   maxParameters: number;
   /** The most chunks one `getArea` call covers. */
   maxAreaChunks: number;
@@ -137,6 +138,18 @@ export type ChunkValue = number | bigint | boolean | string | Uint8Array | Chunk
 /** Values by column name. */
 export type ChunkRow = Record<string, ChunkValue>;
 
+/** Exact schema version: number within the safe range, bigint above it. */
+export type ChunkSchemaVersion = number | bigint;
+
+export interface ChunkBlockMetadata {
+  version: bigint | null;
+  schemaVersion: bigint;
+  row: ChunkRow | null;
+}
+export interface ChunkAreaMetadata<T> { schemaVersion: bigint; entries: T[] }
+export interface ChunkFeatureStatus { enabled: string[]; compat: bigint; roCompat: bigint; incompat: bigint }
+export interface ChunkStatus { directory: ChunkFeatureStatus; tables: Array<ChunkFeatureStatus & { name: string }>; activationPending: boolean }
+
 export interface ChunkPosition {
   epoch: string;
   revision: bigint;
@@ -151,9 +164,23 @@ export interface ChunkWatchOptions {
   /** Inclusive chunk coordinates. */
   area?: { cx0: number; cy0: number; cx1: number; cy1: number };
   after?: ChunkPosition;
+  columns?: readonly string[];
+  noBefore?: boolean;
+  chunks?: boolean;
+  ackTimeoutMs?: number;
+  takeover?: boolean;
 }
 
-/** A durable slot's written acknowledgement and retained history. */
+/** Filters persisted when a durable slot is created. */
+export interface ChunkSlotOptions {
+  area?: ChunkWatchOptions["area"];
+  columns?: readonly string[];
+  noBefore?: boolean;
+  chunks?: boolean;
+  ifNotExists?: boolean;
+}
+
+/** A durable slot's written acknowledgement, retained history and filter identity. */
 export interface ChunkSlot {
   table: string;
   name: string;
@@ -161,6 +188,8 @@ export interface ChunkSlot {
   acked: bigint;
   retainedBytes: bigint;
   lost: boolean;
+  filters?: { area: bigint[] | null; columns: Array<string | null> | null; columnIds: bigint[] | null; noBefore: boolean; chunks: boolean };
+  lostReason?: string | null;
 }
 
 export interface ChunkChangeEvent {
@@ -168,28 +197,55 @@ export interface ChunkChangeEvent {
   position: ChunkPosition;
   commitTimeMs: bigint;
   user: string | null;
-  schemaVersion: number;
+  schemaVersion: ChunkSchemaVersion;
   blocks: Array<{
     x: ChunkWatchCoordinate;
     y: ChunkWatchCoordinate;
+    z?: ChunkWatchCoordinate;
     before: ChunkRow | null;
     after: ChunkRow | null;
   }>;
+  tag?: Buffer | null;
+  txn?: bigint | null;
+  chunkChanges?: Array<{ cx: bigint; cy: bigint; cz?: bigint; before: ChunkRow | null; after: ChunkRow | null }>;
 }
 
 export interface ChunkSchemaEvent {
   kind: "schema";
   position: ChunkPosition;
-  version: number;
+  version: ChunkSchemaVersion;
   columns: ChunkColumn[];
+  dims?: number;
+  chunkColumns?: ChunkColumn[];
 }
 
 export interface ChunkResyncEvent {
   kind: "resync";
   position: ChunkPosition;
+  parentEpoch?: string | null;
+  forkRevision?: bigint | null;
 }
 
-export type ChunkWatchEvent = ChunkChangeEvent | ChunkSchemaEvent | ChunkResyncEvent;
+export interface ChunkProgressEvent { kind: "progress"; position: ChunkPosition }
+export interface ChunkChunksEvent {
+  kind: "chunks";
+  position: ChunkPosition;
+  commitTimeMs: bigint;
+  user: string | null;
+  schemaVersion: ChunkSchemaVersion;
+  chunks: Array<{ cx: bigint; cy: bigint; cz?: bigint; version: bigint; form: Buffer | null }>;
+  tag: Buffer | null;
+  txn: bigint | null;
+}
+export interface ChunkCatalogEvent {
+  kind: "catalog";
+  position: ChunkPosition;
+  commitTimeMs: bigint;
+  user: string | null;
+  events: Array<{ kind: string; action: string | null; name: string | null; table: string | null; data: ChunkReply | null }>;
+  txn: bigint | null;
+}
+export type ChunkWatchEvent = ChunkChangeEvent | ChunkSchemaEvent | ChunkResyncEvent | ChunkProgressEvent | ChunkChunksEvent | ChunkCatalogEvent;
 
 export type ChunkColumnType =
   | { readonly kind: "u"; readonly bits: number }
@@ -253,7 +309,7 @@ export interface ChunkTableOptionValues {
 export interface ChunkTableSchema {
   table: string;
   /** The schema version; every column change writes a new one. */
-  version: number;
+  version: ChunkSchemaVersion;
   columns: ChunkColumn[];
   /** Blocks per chunk. */
   chunk: ChunkSize;
@@ -261,7 +317,7 @@ export interface ChunkTableSchema {
   large: ChunkSize;
   options: ChunkTableOptionValues;
   epoch?: string;
-  revision?: bigint;
+  revision?: bigint | null;
   dims?: number;
   chunkColumns?: ChunkColumn[];
 }
@@ -321,7 +377,7 @@ export interface ChunkState extends ChunkStateInput {
   /** The chunk version this state was read at. */
   version: bigint;
   /** The schema version (`describe(table).version`) the columns follow. */
-  schemaVersion: number;
+  schemaVersion: ChunkSchemaVersion;
   /** Blocks per row. */
   width: number;
   height: number;
@@ -340,10 +396,12 @@ export type ChunkArea =
   | { cx: number; cy: number; radius: number };
 
 export interface ChunkAreaEntry extends ChunkCoord {
+  cz?: bigint;
   chunk: ChunkState;
 }
 
 export interface ChunkAreaRawEntry extends ChunkCoord {
+  cz?: bigint;
   /** The chunk form (docs/CQL.md). */
   chunk: Buffer;
 }
@@ -393,6 +451,7 @@ export interface ChunkTransactionOptions {
  */
 export interface ChunkTransaction {
   getBlock(x: number, y: number, options?: ChunkReadOptions): Promise<ChunkRow | null>;
+  getBlockWithMetadata(x: number, y: number, options?: ChunkReadOptions): Promise<ChunkBlockMetadata>;
   setBlock(x: number, y: number, values: Readonly<Record<string, ChunkValue>>, options?: ChunkTableOption): Promise<void>;
   deleteBlock(x: number, y: number, options?: ChunkTableOption): Promise<void>;
   getChunk(cx: number, cy: number, options?: ChunkReadOptions): Promise<ChunkState | null>;
@@ -401,6 +460,8 @@ export interface ChunkTransaction {
   setChunkRaw(cx: number, cy: number, form: Uint8Array, options?: ChunkTableOption): Promise<void>;
   getArea(area: ChunkArea, options?: ChunkReadOptions): Promise<ChunkAreaEntry[]>;
   getAreaRaw(area: ChunkArea, options?: ChunkReadOptions): Promise<ChunkAreaRawEntry[]>;
+  getAreaWithSchema(area: ChunkArea, options?: ChunkReadOptions): Promise<ChunkAreaMetadata<ChunkAreaEntry>>;
+  getAreaRawWithSchema(area: ChunkArea, options?: ChunkReadOptions): Promise<ChunkAreaMetadata<ChunkAreaRawEntry>>;
 }
 
 export type ChunkErrorPhase =

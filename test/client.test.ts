@@ -240,7 +240,7 @@ test("pipelined statements reach the server in call order", async () => {
   }
 });
 
-test("a frame of the wrong size refreshes the schema and retries once", async () => {
+test("a scalar width error is fatal until the caller explicitly refreshes its schema", async () => {
   let hType = "f32";
   const server = await startFakeServer((request) => {
     if (request.line.startsWith("DESCRIBE")) {
@@ -253,12 +253,15 @@ test("a frame of the wrong size refreshes the schema and retries once", async ()
       const frame = request.frames[0];
       return frame !== null && frame.length === 8
         ? ":5\r\n"
-        : `-ERR INVALID_ARGUMENT $1 for column h (f64) must be 8 bytes, got ${frame?.length ?? 0}\r\n`;
+        : `-ERR INVALID_ARGUMENT reason=parameter_width column=h a scalar has no schema version\r\n`;
     }
     return hello(request);
   });
   try {
     const client = await connect({ port: server.port, table: "t" });
+    await assert.rejects(client.setBlock(0, 0, { h: 0.5 }), (error: unknown) => error instanceof ChunkServerError && error.retryClass === "fatal");
+    assert.equal(server.requests.filter(({ line }) => line === "DESCRIBE t").length, 1);
+    client.clearSchemaCache("t");
     assert.equal(await client.setBlock(0, 0, { h: 0.5 }), 5n);
     assert.deepEqual(
       server.requests.slice(1).map((request) => [request.line, request.frames[0]?.length]),
@@ -281,7 +284,7 @@ test("VERSION_MISMATCH rejects with the current version", async () => {
     request.line.startsWith("DELETE") ? "-ERR VERSION_MISMATCH current=18446744073709551615\r\n" : hello(request),
   );
   try {
-    const client = await connect({ port: server.port });
+    const client = await connect({ port: server.port, table: "default" });
     await assert.rejects(client.deleteBlock(0, 0, { ifVersion: 3n }), (error: unknown) => {
       assert.ok(error instanceof ChunkVersionMismatchError);
       assert.equal(error.serverCode, "VERSION_MISMATCH");
@@ -299,7 +302,7 @@ test("VERSION_MISMATCH rejects with the current version", async () => {
 test("statements that cannot be framed are refused before sending", async () => {
   const server = await startFakeServer((request) => hello(request) ?? "+OK\r\n");
   try {
-    const client = await connect({ port: server.port });
+    const client = await connect({ port: server.port, table: "t" });
     await assert.rejects(client.execute("PING\r\nPING"), /one line/);
     await assert.rejects(client.getBlock(0.5, 0), /x must be a safe integer/);
     await assert.rejects(client.getBlock(0, 0, { table: "Bad-Name" }), /a table name must match/);

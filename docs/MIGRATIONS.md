@@ -44,7 +44,7 @@ console.log((await client.execute("SHOW MIGRATIONS")).type);
 ```
 
 ```output
-realm_table 0 CONFLICT
+realm_table 0 MIGRATION_MISMATCH
 array
 ```
 
