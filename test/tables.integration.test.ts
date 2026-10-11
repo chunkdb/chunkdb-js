@@ -22,13 +22,13 @@ test("tables: create, describe, alter, list, drop", async () => {
       ],
       chunk: { width: 4, height: 2 },
       large: { width: 2, height: 2 },
-      options: { durabilityMode: "fsync-wal", varMaxChunkBytes: 4096, checkpointUpdates: 128 },
+      options: { durabilityMode: "fsync-wal", varMaxChunkBytes: 4096, checkpointUpdates: 128, feedBufferBytes: 2097152, slotMaxBytes: 4194304 },
     });
     await assert.rejects(
       client.createTable("land", { columns: [{ name: "a", type: "u8" }], chunk: { width: 4, height: 4 } }),
       serverError("TABLE_EXISTS"),
     );
-    assert.deepEqual(await client.listTables(), ["default", "land"]);
+    assert.deepEqual(await client.listTables(), ["land"]);
 
     const schema = await client.describe("land");
     assert.deepEqual(schema, {
@@ -49,6 +49,8 @@ test("tables: create, describe, alter, list, drop", async () => {
         walGroupCommitUpdates: schema.options.walGroupCommitUpdates,
         checkpointCompression: "none",
         varMaxChunkBytes: 4096,
+        feedBufferBytes: 2097152,
+        slotMaxBytes: 4194304,
       },
     });
 
@@ -65,15 +67,19 @@ test("tables: create, describe, alter, list, drop", async () => {
     await client.alterTable("land", { kind: "setOption", option: "checkpointUpdates", value: 64 });
     assert.deepEqual(await client.getBlock(0, 0, { table: "land" }), { id: 7, light: 15, label: "hi", h: 1.5, depth: 7 });
     await client.alterTable("land", { kind: "dropColumn", column: "label" });
+    await client.alterTable("land", { kind: "setOption", option: "feedBufferBytes", value: 3145728 });
+    await client.alterTable("land", { kind: "setOption", option: "slotMaxBytes", value: 5242880 });
     const altered = await client.describe("land");
     assert.deepEqual(altered.columns.map((column) => column.name), ["id", "light", "h", "depth"]);
     assert.equal(altered.options.checkpointUpdates, 64);
+    assert.equal(altered.options.feedBufferBytes, 3145728);
+    assert.equal(altered.options.slotMaxBytes, 5242880);
     assert.ok(altered.version > 1);
 
     await client.dropTable("land");
     await assert.rejects(client.getBlock(0, 0, { table: "land" }), serverError("NO_TABLE"));
     await assert.rejects(client.dropTable("land"), serverError("NO_TABLE"));
-    assert.deepEqual(await client.listTables(), ["default"]);
+    assert.deepEqual(await client.listTables(), []);
     await client.close();
   } finally {
     await server.stop();

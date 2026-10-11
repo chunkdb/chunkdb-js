@@ -163,6 +163,8 @@ export function parseDescribe(reply: ChunkReply): TableLayout {
         walGroupCommitUpdates: integerOf(option("wal_group_commit_updates"), "wal_group_commit_updates", command),
         checkpointCompression: textOf(option("checkpoint_compression"), "checkpoint_compression", command),
         varMaxChunkBytes: integerOf(option("var_max_chunk_bytes"), "var_max_chunk_bytes", command),
+        feedBufferBytes: integerOf(option("feed_buffer_bytes"), "feed_buffer_bytes", command),
+        slotMaxBytes: integerOf(option("slot_max_bytes"), "slot_max_bytes", command),
       },
     },
     ids: parsed.map(({ id }) => id),

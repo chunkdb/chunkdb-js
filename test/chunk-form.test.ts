@@ -30,6 +30,8 @@ function layout(
       walGroupCommitUpdates: 8,
       checkpointCompression: "none",
       varMaxChunkBytes: 1048576,
+      feedBufferBytes: 67108864,
+      slotMaxBytes: 1073741824,
     },
   };
   return { schema, ids };

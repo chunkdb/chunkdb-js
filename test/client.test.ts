@@ -329,7 +329,7 @@ test("table statements are written from their definitions", async () => {
       ],
       chunk: { width: 16, height: 16 },
       large: { width: 8, height: 8 },
-      options: { durabilityMode: "fsync-wal", varMaxChunkBytes: 4096 },
+      options: { durabilityMode: "fsync-wal", varMaxChunkBytes: 4096, feedBufferBytes: 2097152, slotMaxBytes: 4194304 },
     });
     await client.alterTable("land", { kind: "addColumn", column: { name: "depth", type: "i8", nullable: true } });
     await client.alterTable("land", { kind: "dropColumn", column: "depth" });
@@ -337,16 +337,20 @@ test("table statements are written from their definitions", async () => {
     await client.alterTable("land", { kind: "alterColumnType", column: "light", type: "u2", using: "clamp" });
     await client.alterTable("land", { kind: "setOption", option: "checkpointUpdates", value: 64 });
     await client.alterTable("land", { kind: "setOption", option: "durabilityMode", value: "relaxed" });
+    await client.alterTable("land", { kind: "setOption", option: "feedBufferBytes", value: 3145728 });
+    await client.alterTable("land", { kind: "setOption", option: "slotMaxBytes", value: 5242880 });
     await client.dropTable("land");
     assert.deepEqual(server.requests.slice(1).map((request) => request.line), [
       "CREATE TABLE land (id u10 REQUIRED, light u4 DEFAULT 15, sign text(8) NULL DEFAULT 'it''s', h f32 DEFAULT 1.5) " +
-        "CHUNK 16 x 16 LARGE 8 x 8 WITH durability_mode = 'fsync-wal', var_max_chunk_bytes = 4096",
+        "CHUNK 16 x 16 LARGE 8 x 8 WITH durability_mode = 'fsync-wal', var_max_chunk_bytes = 4096, feed_buffer_bytes = 2097152, slot_max_bytes = 4194304",
       "ALTER TABLE land ADD COLUMN depth i8 NULL",
       "ALTER TABLE land DROP COLUMN depth",
       "ALTER TABLE land RENAME COLUMN sign TO label",
       "ALTER TABLE land ALTER COLUMN light TYPE u2 USING CLAMP",
       "ALTER TABLE land SET checkpoint_updates = 64",
       "ALTER TABLE land SET durability_mode = 'relaxed'",
+      "ALTER TABLE land SET feed_buffer_bytes = 3145728",
+      "ALTER TABLE land SET slot_max_bytes = 5242880",
       "DROP TABLE land",
     ]);
     await client.close();
@@ -410,5 +414,19 @@ test("never-written chunks are null; versioned empty forms remain decoded", asyn
         await server.close();
       }
     });
+  }
+});
+
+
+test("DESCRIBE exposes per-table feed and slot limits", async () => {
+  const server = await startFakeServer((request) => hello(request) ?? describeReply("f32"));
+  try {
+    const client = await connect({ port: server.port });
+    const schema = await client.describe("t");
+    assert.equal(schema.options.feedBufferBytes, 67108864);
+    assert.equal(schema.options.slotMaxBytes, 1073741824);
+    await client.close();
+  } finally {
+    await server.close();
   }
 });

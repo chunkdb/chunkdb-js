@@ -29,10 +29,11 @@ export function describeReply(hType: string): string {
     `%6\r\n${bulk("table")}${bulk("t")}${bulk("version")}:1\r\n${bulk("columns")}*2\r\n` +
     column(1, "id", "u10", true) +
     column(2, "h", hType, false) +
-    `${bulk("chunk")}*2\r\n:4\r\n:4\r\n${bulk("large")}*2\r\n:8\r\n:8\r\n${bulk("options")}%6\r\n` +
+    `${bulk("chunk")}*2\r\n:4\r\n:4\r\n${bulk("large")}*2\r\n:8\r\n:8\r\n${bulk("options")}%8\r\n` +
     `${bulk("durability_mode")}${bulk("relaxed")}${bulk("checkpoint_updates")}:256\r\n` +
     `${bulk("checkpoint_wal_bytes")}:1048576\r\n${bulk("wal_group_commit_updates")}:8\r\n` +
-    `${bulk("checkpoint_compression")}${bulk("none")}${bulk("var_max_chunk_bytes")}:1048576\r\n`
+    `${bulk("checkpoint_compression")}${bulk("none")}${bulk("var_max_chunk_bytes")}:1048576\r\n` +
+    `${bulk("feed_buffer_bytes")}:67108864\r\n${bulk("slot_max_bytes")}:1073741824\r\n`
   );
 }
 
