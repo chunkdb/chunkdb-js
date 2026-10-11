@@ -25,19 +25,46 @@ async function createWorld(client: ChunkClient, name = "world"): Promise<void> {
   });
 }
 
+test("chunks: never-written NULL and written empty versions", async () => {
+  const server = await startServer();
+  try {
+    const client = await connectUri(`${server.uri}world`);
+    try {
+      await createWorld(client);
+      // Repeated reads, including projected reads, must not create a chunk.
+      assert.equal(await client.getChunk(0, 0), null);
+      assert.equal(await client.getChunk(0, 0, { columns: ["id"] }), null);
+      assert.equal(await client.getChunkRaw(0, 0), null);
+      assert.deepEqual(await client.getArea({ cx0: 0, cy0: 0, cx1: 0, cy1: 0 }), []);
+      assert.deepEqual((await client.scanChunks()).chunks, []);
+      await client.setBlock(0, 0, { id: 1 });
+      const version = await client.deleteBlock(0, 0);
+      const empty = await client.getChunk(0, 0);
+      assert.ok(empty);
+      assert.equal(empty.version, version);
+      assert.equal(empty.present.some(Boolean), false);
+      const raw = await client.getChunkRaw(0, 0, { columns: ["id"] });
+      assert.ok(raw);
+      assert.equal(raw.readBigUInt64LE(0), version);
+      assert.deepEqual(await client.getArea({ cx0: 0, cy0: 0, cx1: 0, cy1: 0 }), []);
+      assert.deepEqual((await client.scanChunks()).chunks, []);
+    } finally {
+      await client.close();
+    }
+  } finally {
+    await server.stop();
+  }
+});
+
 test("chunks: typed reads and writes, IF VERSION, COLUMNS", async () => {
   const server = await startServer();
   try {
     const client = await connectUri(`${server.uri}world`);
     await createWorld(client);
 
-    // A chunk without blocks reads as an empty state with its version, so
-    // a write can create it only while it is still empty.
-    const empty = await client.getChunk(2, 2);
-    assert.equal(empty.width, 4);
-    assert.equal(empty.height, 4);
-    assert.ok(empty.present.every((present) => !present));
-    assert.deepEqual(Object.keys(empty.columns), ["id", "temp", "mask", "name", "blob"]);
+    // NULL supplies no version. Build a fresh form and write it normally.
+    assert.equal(await client.getChunk(2, 2), null);
+    assert.equal(await client.getChunkRaw(2, 2), null);
 
     const state = emptyChunk(await client.describe());
     state.present[0] = true;
@@ -52,14 +79,15 @@ test("chunks: typed reads and writes, IF VERSION, COLUMNS", async () => {
     state.columns.mask[5] = ChunkBits.from("001");
     state.columns.name[5] = null;
     state.columns.blob[5] = Buffer.alloc(0);
-    const created = await client.setChunk(2, 2, state, { ifVersion: empty.version });
-    await assert.rejects(client.setChunk(2, 2, state, { ifVersion: empty.version }), (error: unknown) => {
+    const created = await client.setChunk(2, 2, state);
+    await assert.rejects(client.setChunk(2, 2, state, { ifVersion: created + 1n }), (error: unknown) => {
       assert.ok(error instanceof ChunkVersionMismatchError);
       assert.equal(error.currentVersion, created);
       return true;
     });
 
     const back = await client.getChunk(2, 2);
+    assert.ok(back);
     assert.equal(back.version, created);
     assert.deepEqual(back.present, state.present);
     assert.deepEqual(back.columns.id.slice(0, 6), [3, null, null, null, null, 1023]);
@@ -78,6 +106,7 @@ test("chunks: typed reads and writes, IF VERSION, COLUMNS", async () => {
     back.columns.id[0] = 4;
     await assert.rejects(client.setChunk(2, 2, back, { ifVersion: back.version }), ChunkVersionMismatchError);
     const fresh = await client.getChunk(2, 2);
+    assert.ok(fresh);
     assert.equal(fresh.columns.name[2], "late");
     fresh.columns.id[0] = 4;
     await client.setChunk(2, 2, fresh, { ifVersion: fresh.version });
@@ -85,6 +114,7 @@ test("chunks: typed reads and writes, IF VERSION, COLUMNS", async () => {
 
     // COLUMNS: only the named columns, in the named order.
     const some = await client.getChunk(2, 2, { columns: ["name", "id"] });
+    assert.ok(some);
     assert.deepEqual(Object.keys(some.columns), ["name", "id"]);
     assert.deepEqual(some.columns.name.slice(0, 3), ["ab", null, "late"]);
     assert.deepEqual(some.columns.id.slice(0, 3), [4, null, 7]);
@@ -107,7 +137,8 @@ test("raw chunk forms copy chunks between places and tables", async () => {
     await client.setBlock(1, 0, { id: 4, temp: -1, mask: ChunkBits.from("111") });
 
     const raw = await client.getChunkRaw(0, 0);
-    assert.equal(raw.readBigUInt64LE(0), (await client.getChunk(0, 0)).version);
+    assert.ok(raw);
+    assert.equal(raw.readBigUInt64LE(0), (await client.getChunk(0, 0))?.version);
     // The version in a written form is not read.
     raw.writeBigUInt64LE(0x7fn, 0);
     await client.setChunkRaw(1, 1, raw);
@@ -128,6 +159,7 @@ test("raw chunk forms copy chunks between places and tables", async () => {
     }
     // A COLUMNS form holds the named sections only.
     const idOnly = await client.getChunkRaw(0, 0, { columns: ["id"] });
+    assert.ok(idOnly);
     assert.equal(idOnly.length, 16 + 2 + 20);
     // A form longer than the table takes is refused before sending.
     await assert.rejects(client.setChunkRaw(0, 0, Buffer.alloc(2 * 1024 * 1024)), /takes at most/);
@@ -189,8 +221,10 @@ test("a chunk form of another schema version: setChunk re-encodes, setChunkRaw r
     const client = await connectUri(`${server.uri}world`);
     await client.setBlock(0, 0, { id: 3, name: "ab", blob: Buffer.from("x") });
     const state = await client.getChunk(0, 0);
+    assert.ok(state);
     assert.equal(state.schemaVersion, 1);
     const raw = await client.getChunkRaw(0, 0);
+    assert.ok(raw);
     assert.equal(raw.readBigUInt64LE(8), 1n);
 
     // Another client widens a column: the cached schema is version 1, the
@@ -200,7 +234,7 @@ test("a chunk form of another schema version: setChunk re-encodes, setChunkRaw r
     state.columns.id[0] = 5;
     await client.setChunk(0, 0, state);
     assert.deepEqual(await client.getBlock(0, 0, { columns: ["id", "temp", "name"] }), { id: 5, temp: -1, name: "ab" });
-    assert.equal((await client.getChunk(0, 0)).schemaVersion, 2);
+    assert.equal((await client.getChunk(0, 0))?.schemaVersion, 2);
 
     // A raw form keeps the schema version it was read at.
     await assert.rejects(client.setChunkRaw(1, 1, raw), (error: unknown) => {

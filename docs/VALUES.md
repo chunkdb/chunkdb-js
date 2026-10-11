@@ -23,20 +23,25 @@ await client.deleteBlock(10, 4);
 console.log(await client.getBlock(10, 4)); // null
 ```
 
+`getChunk` and `getChunkRaw` return `null` for a never-written chunk. A written chunk with all blocks deleted still returns its empty form and version until its disk artifacts and cached state are removed.
+
 A chunk state contains `version`, `schemaVersion`, `width`, `height`, `present` and per-column arrays.
 Index `i` represents local coordinates `(i % width, Math.floor(i / width))`.
 `setChunk` replaces the entire chunk; values at absent blocks are ignored.
 
 ```ts
-const chunk = await client.getChunk(0, 0);
+import { emptyChunk } from "@chunkdb/client";
+
+const previous = await client.getChunk(0, 0);
+const chunk = previous ?? emptyChunk(await client.describe());
 chunk.present[0] = true;
 chunk.columns.id[0] = 7;
 chunk.columns.light[0] = 15;
-await client.setChunk(0, 0, chunk, { ifVersion: chunk.version });
+await client.setChunk(0, 0, chunk, { ifVersion: previous?.version });
 console.log(await client.getBlock(0, 0)); // { id: 7, light: 15 }
 ```
 
-Conditional writes compare the whole chunk's version for equality and reject with `ChunkVersionMismatchError` without changing anything if it changed.
+A missing chunk has no version: the first write above is unconditional. Once it exists, conditional writes compare the whole chunk's version for equality and reject with `ChunkVersionMismatchError` without changing anything if it changed.
 Do not compare versions with time or assume they are consecutive.
 Build a new state with exported `emptyChunk(await client.describe())`.
 `getChunkRaw`, `setChunkRaw` and `getAreaRaw` transfer binary forms; a stale raw form rejects with `ChunkSchemaMismatchError`.

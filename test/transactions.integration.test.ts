@@ -32,8 +32,8 @@ test("transactions: a commit applies writes to two chunks together, with one ver
       assert.deepEqual(await tx.getBlock(0, 0), { n: 1 });
     });
     assert.equal(typeof version, "bigint");
-    assert.equal((await other.getChunk(0, 0)).version, version);
-    assert.equal((await other.getChunk(5, 5)).version, version);
+    assert.equal((await other.getChunk(0, 0))?.version, version);
+    assert.equal((await other.getChunk(5, 5))?.version, version);
     assert.deepEqual(await other.getBlock(21, 21), { n: 2 });
     assert.equal(await client.transaction(async (tx) => void (await tx.getBlock(0, 0))), null);
   });
@@ -78,7 +78,7 @@ test("transactions: a CONFLICT at a statement is rolled back, nothing after it a
     assert.ok(caught instanceof ChunkConflictError);
     assert.equal(caught.reason, "table_changed");
     assert.equal(runs, 2);
-    assert.equal((await other.getChunk(0, 0)).version, version);
+    assert.equal((await other.getChunk(0, 0))?.version, version);
     assert.deepEqual(await other.getBlock(0, 0, { columns: ["n"] }), { n: 2 });
     assert.equal(await other.getBlock(2, 2), null);
   });

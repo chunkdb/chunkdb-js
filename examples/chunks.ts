@@ -1,16 +1,17 @@
-import { ChunkVersionMismatchError, connectUri } from "../src/index";
+import { ChunkVersionMismatchError, connectUri, emptyChunk } from "../src/index";
 
 // The URI path names the client's table.
 const client = await connectUri("chunk://admin:change-me@127.0.0.1:4242/world");
 
-// Read a chunk, change it, and write it back only if nobody else wrote the
-// chunk in between.
-const chunk = await client.getChunk(0, 0);
+// Create a never-written chunk normally, or update an existing chunk only
+// if nobody else wrote it in between.
+const previous = await client.getChunk(0, 0);
+const chunk = previous ?? emptyChunk(await client.describe());
 chunk.present[0] = true;
 chunk.columns.id[0] = 7;
 chunk.columns.light[0] = 15;
 try {
-  console.log("written, version", await client.setChunk(0, 0, chunk, { ifVersion: chunk.version }));
+  console.log("written, version", await client.setChunk(0, 0, chunk, { ifVersion: previous?.version }));
 } catch (error) {
   if (!(error instanceof ChunkVersionMismatchError)) throw error;
   console.log("conflict, current version", error.currentVersion);

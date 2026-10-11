@@ -791,15 +791,15 @@ export class ChunkClient {
 
   /**
    * A chunk decoded by the table's schema: its version, which blocks are
-   * present, and per column the values of the present blocks. A chunk
-   * without blocks reads as an empty state with its version.
+   * present, and per column the values of the present blocks. A never-written
+   * chunk is null; a written empty chunk keeps its form and version until collected.
    */
-  getChunk(cx: number, cy: number, options: ChunkReadOptions = {}): Promise<ChunkState> {
+  getChunk(cx: number, cy: number, options: ChunkReadOptions = {}): Promise<ChunkState | null> {
     return this.enqueue(() => this.getChunkOp(cx, cy, options));
   }
 
-  /** The chunk form as the server sends it (docs/CQL.md), for copying chunks. */
-  getChunkRaw(cx: number, cy: number, options: ChunkReadOptions = {}): Promise<Buffer> {
+  /** The chunk form as the server sends it, or null for a never-written chunk. */
+  getChunkRaw(cx: number, cy: number, options: ChunkReadOptions = {}): Promise<Buffer | null> {
     return this.enqueue(() => this.getChunkRawOp(cx, cy, options));
   }
 
@@ -1086,22 +1086,23 @@ export class ChunkClient {
     return await this.run(statement, [], "DELETE BLOCK");
   }
 
-  private async getChunkOp(cx: number, cy: number, options: ChunkReadOptions): Promise<ChunkState> {
+  private async getChunkOp(cx: number, cy: number, options: ChunkReadOptions): Promise<ChunkState | null> {
     const table = this.tableOf(options);
     const at = `${checkCoordinate(cx, "cx")} ${checkCoordinate(cy, "cy")}`;
     return await this.withLayout(table, false, async (layout) => {
       const indexes = columnIndexes(layout, options.columns);
       const names = indexes.map((index) => layout.schema.columns[index].name);
       const reply = await this.run(`GET CHUNK ${at} FROM ${table}${columnsClause(names)}`, [], "GET CHUNK");
-      return decodeChunkForm(layout, bulkOf(reply, "GET CHUNK"), indexes);
+      return reply.type === "null" ? null : decodeChunkForm(layout, bulkOf(reply, "GET CHUNK"), indexes);
     });
   }
 
-  private async getChunkRawOp(cx: number, cy: number, options: ChunkReadOptions): Promise<Buffer> {
+  private async getChunkRawOp(cx: number, cy: number, options: ChunkReadOptions): Promise<Buffer | null> {
     const table = this.tableOf(options);
     const names = (options.columns ?? []).map((name) => checkName(name, "a column name"));
     const statement = `GET CHUNK ${checkCoordinate(cx, "cx")} ${checkCoordinate(cy, "cy")} FROM ${table}${columnsClause(names)}`;
-    return bulkOf(await this.run(statement, [], "GET CHUNK"), "GET CHUNK");
+    const reply = await this.run(statement, [], "GET CHUNK");
+    return reply.type === "null" ? null : bulkOf(reply, "GET CHUNK");
   }
 
   private async setChunkOp(cx: number, cy: number, state: ChunkStateInput, options: ChunkWriteOptions): Promise<ChunkReply> {

@@ -16,8 +16,8 @@ async function changed(watch: ChunkWatch): Promise<ChunkChangeEvent> {
   return event;
 }
 
-async function withWorld(fn: (server: StartedServer, client: ChunkClient) => Promise<void>, tls = false): Promise<void> {
-  const server = await startServer({ tls });
+async function withWorld(fn: (server: StartedServer, client: ChunkClient) => Promise<void>, tls = false, feedLingerMs?: number): Promise<void> {
+  const server = await startServer({ tls, feedLingerMs });
   const client = await connectUri(server.uri, { tlsInsecure: tls });
   try {
     await client.createTable("world", { columns: [{ name: "n", type: "u16", required: true }], chunk: { width: 4, height: 4 } });
@@ -88,10 +88,9 @@ test("WATCH: inclusive chunk area clips a transaction", { timeout: 15000 }, asyn
   });
 });
 
-test("WATCH: after resumes retained events while another watch keeps the feed", { timeout: 15000 }, async () => {
+test("WATCH: default linger resumes changes after the last watch closes", { timeout: 15000 }, async () => {
   await withWorld(async (_, client) => {
-    const anchor = await client.watch("world");
-    let watch = await client.watch("world", { after: anchor.start });
+    let watch = await client.watch("world");
     try {
       await client.setBlock(0, 0, { n: 1 }, { table: "world" });
       const first = await changed(watch);
@@ -103,7 +102,7 @@ test("WATCH: after resumes retained events while another watch keeps the feed", 
       assert.equal(resumed.position.revision, revision);
       assert.deepEqual(resumed.blocks[0].before, { n: 1 });
       assert.deepEqual(resumed.blocks[0].after, { n: 2 });
-    } finally { await watch.close(); await anchor.close(); }
+    } finally { await watch.close(); }
   });
 });
 
@@ -129,7 +128,7 @@ test("WATCH: unknown epoch and a released feed require resync", { timeout: 15000
     const reopened = await client.watch("world", { after: frontier });
     try { assert.equal((await next(reopened)).kind, "resync"); }
     finally { await reopened.close(); }
-  });
+  }, false, 0);
 });
 
 test("WATCH: schema event precedes rows using new columns", { timeout: 15000 }, async () => {

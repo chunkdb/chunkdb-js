@@ -31,7 +31,7 @@ test("ChunkPool runs concurrent typed operations against chunkdb_server", async 
       chunks.push(coord);
     }
     assert.deepEqual(chunks, [{ cx: 0, cy: 0 }, { cx: 1, cy: 0 }]);
-    assert.equal((await pool.getChunk(1, 0)).columns.name[0], "c8");
+    assert.equal((await pool.getChunk(1, 0))?.columns.name[0], "c8");
     assert.equal(await pool.ping(), "PONG");
     await pool.close();
   } finally {

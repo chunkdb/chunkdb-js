@@ -374,8 +374,8 @@ export interface ChunkTransaction {
   getBlock(x: number, y: number, options?: ChunkReadOptions): Promise<ChunkRow | null>;
   setBlock(x: number, y: number, values: Readonly<Record<string, ChunkValue>>, options?: ChunkTableOption): Promise<void>;
   deleteBlock(x: number, y: number, options?: ChunkTableOption): Promise<void>;
-  getChunk(cx: number, cy: number, options?: ChunkReadOptions): Promise<ChunkState>;
-  getChunkRaw(cx: number, cy: number, options?: ChunkReadOptions): Promise<Buffer>;
+  getChunk(cx: number, cy: number, options?: ChunkReadOptions): Promise<ChunkState | null>;
+  getChunkRaw(cx: number, cy: number, options?: ChunkReadOptions): Promise<Buffer | null>;
   setChunk(cx: number, cy: number, state: ChunkStateInput, options?: ChunkTableOption): Promise<void>;
   setChunkRaw(cx: number, cy: number, form: Uint8Array, options?: ChunkTableOption): Promise<void>;
   getArea(area: ChunkArea, options?: ChunkReadOptions): Promise<ChunkAreaEntry[]>;
