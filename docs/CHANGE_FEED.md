@@ -1,17 +1,19 @@
-# Changes and durable slots
+# Watch block changes
 
-Examples use `client` and `world` from the [README](../README.md).
-`watch` opens a dedicated connection with the same login and TLS settings; ordinary client calls keep working.
-It resolves after registration, so an update issued afterward is observable.
+A change feed reports committed block updates as an asynchronous stream.
+A revision orders commits; an epoch identifies a table across dropping and recreating it.
+Save both as a position when you need to resume.
 
-```ts
+Run this inside the [first write and read](../README.md#first-write-and-read) example's `try` block, after creating `world`:
+
+```ts docs-check
 const watch = await client.watch("world");
 try {
   await client.setBlock(0, 0, { id: 7, light: 9 });
   for await (const event of watch) {
     if (event.kind === "resync") throw new Error("rebuild state before continuing");
     if (event.kind === "schema") continue;
-    console.log(event.blocks[0].after); // { id: 7, light: 9 }
+    console.log(event.blocks[0].after);
     break;
   }
 } finally {
@@ -19,53 +21,30 @@ try {
 }
 ```
 
-Change events have `position: { epoch, revision: bigint }`, `commitTimeMs: bigint`, applying `user` (null for anonymous writes), `schemaVersion` and typed before/after `blocks`.
+```output
+{ id: 7, light: 9 }
+```
+
+## Guarantees
+
+- `watch` opens a dedicated connection with the same login and TLS settings.
+- Registration finishes before `watch` resolves, so a later update is observable.
+- Ordinary client calls keep working while you watch.
+- Revisions can have gaps; timestamps do not order commits.
+- The client does not reconnect watches or acknowledge changes automatically.
+
+Change events contain `position: { epoch, revision: bigint }`, `commitTimeMs: bigint`, `user`, `schemaVersion` and typed before/after `blocks`.
+`user` is null for anonymous writes.
 Coordinates are `bigint`, or `{ chunk: bigint, offset: number }` beyond absolute int64 coordinates.
-Schema events have `version` and `columns`; resync events name the frontier to rebuild from.
-Revisions order commits and may have gaps; timestamps do not order commits.
-`{ area: { cx0, cy0, cx1, cy1 } }` filters by inclusive chunk coordinates.
 
-Save positions with the consumer state and pass `{ after: savedPosition }` to resume.
-Without a slot, retained history depends on active watches, and resuming may require resync.
-For resync, follow the server's [state reconstruction procedure](https://github.com/chunkdb/chunkdb/blob/main/docs/CHANGE_FEED.md#resynchronizing).
-An unavailable old schema raises `ChunkProtocolError` and requires rebuilding state.
+Schema events contain `version` and `columns`.
+Resync events identify the position from which you must rebuild state.
+Use `{ area: { cx0, cy0, cx1, cy1 } }` to filter inclusive chunk coordinates.
+Close watches separately from their originating client or pool.
 
-## Durable slots
+## Resume
 
-Create a slot before producing changes; it retains history across disconnects and checkpoints.
-Creating/dropping requires `ADMIN`, watching requires `READ`, and only one watcher can claim a slot (`BUSY`).
-
-```ts
-await client.createSlot("world", "consumer");
-const watch = await client.watch("world", { slot: "consumer" });
-try {
-  await client.setBlock(1, 0, { id: 8, light: 10 });
-  while (true) {
-    const next = await watch.next();
-    if (next.done) throw new Error("watch ended before a change");
-    if (next.value.kind === "schema") continue;
-    if (next.value.kind === "resync") throw new Error("rebuild state before continuing");
-    console.log(next.value.blocks[0].after); // { id: 8, light: 10 }
-    // Persist consumer output and next.value.position together before ACK.
-    await watch.ack(next.value.position.revision);
-    break;
-  }
-} finally {
-  await watch.close();
-}
-console.log((await client.listSlots("world"))[0].lost); // false
-await client.dropSlot("world", "consumer");
-```
-
-A slot stream can send a schema description before the change using that schema.
-`listSlots(table?)` returns `{ table, name, epoch, acked, retainedBytes, lost }`; `acked` and `retainedBytes` are `bigint`.
-`ack` accepts a uint64 revision through the last returned change or starting position; its promise means written to the socket, not accepted or durable.
-Rejected ACKs appear in `next()` as `ChunkServerError` with `command === "ACK"`; after handling a rejection, another `next()` can continue the stream.
-`close()` sends `UNWATCH`, waits for its acknowledgment and persists accepted slot ACKs; it discards queued ACK rejections while closing.
-Breaking out of `for await` also closes the watch.
-Close watches separately from the originating client or pool.
-
-`after` does not acknowledge history, and ACK alone cannot make external output atomic.
-Store output and its position atomically in your own system, then ACK; resume from that stored position after disconnects.
-Retention loss raises `SLOT_LOST`; follow the server's [slot recovery and ACK persistence rules](https://github.com/chunkdb/chunkdb/blob/main/docs/CHANGE_FEED.md#durable-slots).
-The client does not reconnect a watch or acknowledge automatically.
+Save positions with your consumer state and pass `{ after: savedPosition }` when watching again.
+Without a slot, retained history depends on active watches; resuming can require rebuilding state.
+Follow the [server resume guide](https://github.com/chunkdb/chunkdb/blob/main/docs/FEED_RESUME.md) after a resync event or unavailable schema error.
+See [durable slots](SLOTS.md) to retain history across disconnects.

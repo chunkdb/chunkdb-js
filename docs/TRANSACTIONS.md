@@ -1,28 +1,51 @@
-# Transactions
+# Update blocks together
 
-Examples use the connected `client` and `world` table from the [README](../README.md).
-`transaction` gives the callback snapshot reads plus its own writes, and publishes all changes together at commit.
+A transaction reads one snapshot and publishes all its writes together at commit.
+Use it when two block updates must succeed together.
+Run this inside the [first write and read](../README.md#first-write-and-read) example's `try` block, after creating `world`:
 
-```ts
+```ts docs-check
 await client.setBlock(10, 4, { id: 23, light: 15 });
 const committed = await client.transaction(async (tx) => {
   const row = await tx.getBlock(10, 4);
   await tx.setBlock(10, 4, { light: Number(row?.light ?? 0) - 1 });
   await tx.setBlock(20, 4, { id: 24, light: 1 });
 }, { retries: 5 });
-console.log(typeof committed); // bigint
-console.log(await client.getBlock(10, 4)); // { id: 23, light: 14 }
+console.log(typeof committed);
+console.log(await client.getBlock(10, 4));
 ```
 
-The result is the version assigned to written chunks, or `null` when no chunks were written.
-A transaction covers one table, selected by its first call; its methods accept `table` but never `ifVersion`.
-It supports block, chunk and area methods, including raw forms; scan and DDL helpers are outside transactions.
-The server checks every chunk read or written at commit, so another block's write in the same chunk can conflict.
+```output
+bigint
+{ id: 23, light: 14 }
+```
 
-`CONFLICT` rolls back the attempt and reruns the callback up to `retries` times (5 by default), then rejects with `ChunkConflictError`.
-Keep external side effects out of the callback because it can run several times.
-A callback that throws rolls back and is not retried.
-The connection is held until the transaction ends; ordinary calls on that client wait, and calls on the client inside the callback are refused: use `tx` there.
-`pool.transaction` holds one pooled connection and leaves the others available.
-A disconnected attempt rolls back; a failure after sending `COMMIT` reports that the outcome is unknown.
-See [server transactions](https://github.com/chunkdb/chunkdb/blob/main/docs/TRANSACTIONS.md) for limits and conflict reasons.
+A chunk version is an equality token identifying its written state.
+The result is the version assigned to written chunks, or `null` when nothing was written.
+
+## Guarantees and limits
+
+- Reads see the snapshot and the transaction's own writes.
+- A transaction covers one table, selected by its first call.
+- Methods accept `table`, but never `ifVersion`.
+- You can use block, chunk and area methods, including raw forms.
+- Scans and schema changes run outside transactions.
+- Another write in any chunk you read or wrote can cause a conflict.
+
+The connection stays reserved until the transaction ends.
+Ordinary calls on that client wait.
+Inside the callback, use `tx`; calls on the originating client are refused.
+`pool.transaction` reserves one connection and leaves others available.
+
+## If it fails
+
+| Failure | What happens | What you do |
+|---|---|---|
+| `CONFLICT` | The attempt rolls back and the callback reruns. | Keep external side effects outside the callback. |
+| Retry limit | The helper raises `ChunkConflictError`. | Inspect `reason` and retry when appropriate. |
+| Callback throws | The attempt rolls back without retrying. | Handle the original error. |
+| Disconnect | The attempt rolls back unless commit already reached the server. | Check application state before repeating a possibly committed write. |
+
+`retries` allows 5 additional attempts by default.
+A failure after sending `COMMIT` reports an unknown outcome.
+See [server transactions](https://github.com/chunkdb/chunkdb/blob/main/docs/TRANSACTIONS.md) for server limits and conflict reasons.

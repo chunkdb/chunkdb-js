@@ -1,20 +1,36 @@
-# Backup
+# Copy server data
 
-`execute` exposes the server's backup command; it copies data on the server, not to the client's machine.
+`execute` exposes the server's backup command.
+The copy stays on the server's machine.
 The server must have `--backup-dir` configured, and the login needs `MANAGES USERS` when authentication is enabled.
 
-```ts
+Run this inside the [first write and read](../README.md#first-write-and-read) example's `try` block, with an administrator login:
+
+```ts docs-check
 const backup = await client.execute("BACKUP TO 'world_snapshot'");
 if (backup.type !== "map") throw new Error("expected backup summary");
-console.log(backup.entries.length); // 4
+console.log(backup.entries.length);
 ```
 
-This example uses the connected administrator `client` from the [README](../README.md).
-Choose a new destination name for each copy; the destination must be absent or empty.
+```output
+4
+```
+
+## Destinations
+
+Choose a new destination name for each copy.
+The destination must be absent or empty.
 Use a relative name under `--backup-dir` with `/` separators, no absolute paths, backslashes or `..` components.
-The reply map contains `tables`, `files`, `bytes` and `cuts`; each cut identifies a table's epoch and revision.
+The reply map contains `tables`, `files`, `bytes` and `cuts`.
+
+A revision orders committed changes; an epoch identifies the table across dropping and recreating it.
+Each cut identifies a table's epoch and revision.
 The copy holds a per-table revision cut, preserves migration history, and restores with new data-directory and table identities.
-Concurrent backups return `BUSY`; do not infer failure or success from a lost reply without checking the destination.
+Concurrent backups return `BUSY`.
+
+After a lost reply, check the destination before deciding whether the copy succeeded.
+
+## Restore
 
 Restore and verify run on the server host using `chunkdb_restore <backup> <destination>` and `chunkdb_verify --data-dir <backup>`.
 There is no client-side restore helper.
