@@ -1,7 +1,10 @@
 # Values, chunks and areas
 
-Examples use the connected `client` and `world` table from the [README](../README.md).
-Block coordinates are integers; chunk coordinates address whole chunks.
+A block is one grid cell with named, typed columns.
+A chunk groups a fixed rectangle of blocks; an area selects chunks by rectangle or radius.
+Run these snippets inside the [first write and read](../README.md#first-write-and-read) example's `try` block, after creating `world`.
+
+## Values
 
 | Column type | JavaScript value |
 |---|---|
@@ -13,49 +16,78 @@ Block coordinates are integers; chunk coordinates address whole chunks.
 | `bytes(max)` | `Uint8Array`; reads return `Buffer` |
 | `NULL` | `null` |
 
-Values are parameters, and the client rejects values that do not fit the column before sending.
-An absent block reads as `null`; setting a block fills omitted columns from their defaults and preserves existing values on updates.
+The client sends values as parameters and rejects values outside their column's range before sending.
+An absent block reads as `null`.
+A new block fills omitted columns from defaults; updating a block preserves omitted columns.
 
-```ts
+```ts docs-check
 await client.setBlock(10, 4, { id: 23, light: 7 });
-console.log(await client.getBlock(10, 4, { columns: ["id"] })); // { id: 23 }
+console.log(await client.getBlock(10, 4, { columns: ["id"] }));
 await client.deleteBlock(10, 4);
-console.log(await client.getBlock(10, 4)); // null
+console.log(await client.getBlock(10, 4));
 ```
 
-`getChunk` and `getChunkRaw` return `null` for a never-written chunk. A written chunk with all blocks deleted still returns its empty form and version until its disk artifacts and cached state are removed.
+```output
+{ id: 23 }
+null
+```
+
+## Chunks and conditional writes
+
+A chunk version is an equality token that identifies its written state.
+A schema version identifies the table's column layout.
+`getChunk` and `getChunkRaw` return `null` for a never-written chunk.
+Deleting every block retains an empty form and version until the chunk's disk artifacts and cached state are removed.
 
 A chunk state contains `version`, `schemaVersion`, `width`, `height`, `present` and per-column arrays.
 Index `i` represents local coordinates `(i % width, Math.floor(i / width))`.
-`setChunk` replaces the entire chunk; values at absent blocks are ignored.
+`setChunk` replaces the entire chunk; it ignores values at absent blocks.
+Import `emptyChunk` alongside `connectUri` for this example:
 
-```ts
-import { emptyChunk } from "@chunkdb/client";
-
+```ts docs-check
 const previous = await client.getChunk(0, 0);
 const chunk = previous ?? emptyChunk(await client.describe());
 chunk.present[0] = true;
 chunk.columns.id[0] = 7;
 chunk.columns.light[0] = 15;
 await client.setChunk(0, 0, chunk, { ifVersion: previous?.version });
-console.log(await client.getBlock(0, 0)); // { id: 7, light: 15 }
+console.log(await client.getBlock(0, 0));
 ```
 
-A missing chunk has no version: the first write above is unconditional. Once it exists, conditional writes compare the whole chunk's version for equality and reject with `ChunkVersionMismatchError` without changing anything if it changed.
+```output
+{ id: 7, light: 15 }
+```
+
+A missing chunk has no version, so its first write here is unconditional.
+`ifVersion` compares the whole chunk's version for equality.
+A mismatch raises `ChunkVersionMismatchError` without changing data.
 Do not compare versions with time or assume they are consecutive.
-Build a new state with exported `emptyChunk(await client.describe())`.
-`getChunkRaw`, `setChunkRaw` and `getAreaRaw` transfer binary forms; a stale raw form rejects with `ChunkSchemaMismatchError`.
 
-```ts
+`getChunkRaw`, `setChunkRaw` and `getAreaRaw` transfer binary forms.
+A stale raw form raises `ChunkSchemaMismatchError`.
+
+## Areas and scans
+
+Area boxes use inclusive chunk coordinates and return populated chunks only.
+`serverInfo()` reports the server's area and response limits.
+
+```ts docs-check
 const area = await client.getArea({ cx0: 0, cy0: 0, cx1: 1, cy1: 1 });
-console.log(area.map(({ cx, cy }) => [cx, cy])); // [ [ 0, 0 ] ]
-const nearby = await client.getArea({ cx: 0, cy: 0, radius: 1 });
-console.log(nearby.length); // 1
-for await (const { cx, cy } of client.scanAllChunks()) console.log(cx, cy); // 0 0
+console.log(area.map(({ cx, cy }) => [cx, cy]));
+console.log((await client.getArea({ cx: 0, cy: 0, radius: 1 })).length);
+for await (const { cx, cy } of client.scanAllChunks()) console.log(cx, cy);
 ```
 
-Area boxes are inclusive chunk coordinates and return populated chunks only; calls are bounded by `serverInfo()` limits.
-`scanChunks({ after, limit })` returns `{ chunks, more }`; pass the last returned coordinate as `after` for the next page.
-The client caches table schemas, refreshes on its own DDL, and retries a stale-schema typed operation once after refreshing.
-`describe(table?)` explicitly refreshes the schema; `clearSchemaCache(table?)` drops cached layouts.
-See [tables](TABLES.md) and the [server chunk-form reference](https://github.com/chunkdb/chunkdb/blob/main/docs/CQL.md).
+```output
+[ [ 0, 0 ] ]
+1
+0 0
+```
+
+`scanChunks({ after, limit })` returns `{ chunks, more }`.
+Pass the last returned coordinate as `after` for the next page.
+The client caches schemas and refreshes them after its own schema changes.
+A stale-schema typed operation refreshes and retries once.
+
+`describe(table?)` refreshes the schema; `clearSchemaCache(table?)` removes cached layouts.
+See [tables](TABLES.md) and the [server chunks reference](https://github.com/chunkdb/chunkdb/blob/main/docs/reference/CHUNKS.md).

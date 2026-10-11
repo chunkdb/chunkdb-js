@@ -1,7 +1,11 @@
 # API reference
 
 The package exports `ChunkClient`, `connect`, `connectUri`, `ChunkPool`, `connectPool` and the types below from `@chunkdb/client`.
-All methods return promises unless stated otherwise; [examples](../README.md) use a chunkdb 2.x server.
+All methods return promises unless stated otherwise.
+Start with the [first write and read](../README.md#first-write-and-read) example.
+
+A block is one grid cell; a chunk groups a fixed rectangle of blocks.
+A chunk version is an equality token identifying its written state.
 
 | Client method | Result / purpose |
 |---|---|
@@ -33,26 +37,52 @@ All methods return promises unless stated otherwise; [examples](../README.md) us
 | `connect()`, `close()` | establish / permanently close client |
 | `serverInfo()`, `defaultTable()`, `uri()` | synchronous connection information |
 
-`readOptions` is `{ table?, columns? }`; `writeOptions` is `{ table?, ifVersion?: bigint }`.
-`ChunkRow` maps column names to `ChunkValue`; see [values](VALUES.md) for encoding and chunk state.
+`readOptions` is `{ table?, columns? }`.
+`writeOptions` is `{ table?, ifVersion?: bigint }`.
+
+`ChunkRow` maps column names to `ChunkValue`.
+See [values](VALUES.md) for encoding and chunk state.
 `ChunkArea` is `{ cx0, cy0, cx1, cy1 }` or `{ cx, cy, radius }`.
-`ChunkTableDefinition` is `{ columns, chunk, large?, options? }`; [tables](TABLES.md) lists changes and options.
+`ChunkTableDefinition` is `{ columns, chunk, large?, options? }`.
+
+
+[Tables](TABLES.md) lists changes and options.
+
 `ChunkTransaction` exposes block, chunk and area operations (including raw forms), with no `ifVersion`.
-`ChunkPosition` is `{ epoch: string, revision: bigint }`; [feed](CHANGE_FEED.md) describes events, slots, ACK and close.
+A position identifies a committed change in a table.
+`ChunkPosition` is `{ epoch: string, revision: bigint }`.
+The [change feed](CHANGE_FEED.md) describes events.
+
+[Durable slots](SLOTS.md) explains acknowledgments.
 
 The pool exposes the same data, table, user, transaction, watch, slot, raw execute, ping, flush, metrics and schema methods.
-It also has `withClient(fn)` and `close()`, but no `migrate`, `serverInfo`, `uri` or `defaultTable`; use a leased client when needed.
-[Connections](CONNECTIONS.md) documents `ChunkClientOptions`; `ChunkPoolOptions` additionally requires `maxConnections` and accepts `minConnections` and `acquireTimeoutMs`.
+It also has `withClient(fn)` and `close()`.
+Use a leased client for `migrate`, `serverInfo`, `uri` or `defaultTable`.
+[Connections](CONNECTIONS.md) documents `ChunkClientOptions`.
+
+
+`ChunkPoolOptions` additionally requires `maxConnections` and accepts `minConnections` and `acquireTimeoutMs`.
 
 ## Low-level exports
 
 `execute` takes one CQL line and `ChunkParameter[]` (`Uint8Array | null`) for `$1` through `$n`.
-`encodeParameter(column, value)` encodes one typed value; `encodeStatement(statement, parameters?)` builds its wire request.
-`parseReply(buffer)` parses a reply; `ChunkReply` is a discriminated union of simple, error, integer, double, boolean, null, bulk, array, map and push replies.
+`encodeParameter(column, value)` encodes one typed value.
+`encodeStatement(statement, parameters?)` builds its wire request.
+`parseReply(buffer)` parses a reply.
+
+
+`ChunkReply` is a discriminated union of simple, error, integer, double, boolean, null, bulk, array, map and push replies.
+
 Bulk values are Buffers, array/push replies have `items`, and maps have ordered `[key, value]` pairs in `entries`.
 
 `emptyChunk(schema)` creates an absent-block state for a schema.
 `ChunkBits`, `formatColumnType` and `parseColumnType` represent or translate typed columns.
-`parseChunkUri`, `formatChunkUri` and `tableFromUriPath` handle connection URIs; `formatChunkUri` includes the supplied password; use `client.uri()` when logging an endpoint.
+`parseChunkUri`, `formatChunkUri` and `tableFromUriPath` handle connection URIs.
+`formatChunkUri` includes the supplied password.
+
+
+Use `client.uri()` when logging an endpoint.
+
 `scramVerifier(password, options?)` derives a verifier for raw user statements.
-All public error classes are listed in [connections and errors](CONNECTIONS.md); their base is `ChunkError`.
+All public error classes derive from `ChunkError`.
+See [connections and errors](CONNECTIONS.md).

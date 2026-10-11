@@ -1,17 +1,23 @@
-# Connections and errors
+# Connect and handle errors
 
 `connect(options)` and `connectUri(uri, overrides?)` return an authenticated `ChunkClient`.
-`new ChunkClient(options)` constructs a client; call `connect()` or let its first operation connect.
-`user`, `password`, `host`, `port`, `table` and `tls` options override the corresponding URI settings.
-`uri()` omits the password; `defaultTable()` returns the chosen table and `serverInfo()` is null until login completes.
+With `new ChunkClient(options)`, call `connect()` or let the first operation connect.
+Use `user`, `password`, `host`, `port`, `table` and `tls` options to override URI settings.
 
-A client has one socket; calls are sent and replied to in order.
-`pipelineDepth` defaults to 1 and allows more requests in flight on that connection.
-A pool leases warm clients to independent calls:
+`uri()` omits the password; `defaultTable()` returns the chosen table.
+`serverInfo()` is null until login completes.
+A client has one connection, with replies in request order.
+`pipelineDepth` defaults to 1 and limits requests in flight.
 
-Import `connectPool` from `@chunkdb/client` and set `CHUNKDB_URI` to the authenticated URI from the [README](../README.md).
+## Use a pool
 
-```ts
+A pool lends separate connections to independent calls.
+Set `CHUNKDB_URI` as described in the [first write and read](../README.md#first-write-and-read).
+Save this as `pool.mts` and run `npx tsx pool.mts`:
+
+```ts docs-check
+import { connectPool } from "@chunkdb/client";
+
 const pool = await connectPool({
   uri: process.env.CHUNKDB_URI,
   table: "world",
@@ -20,38 +26,56 @@ const pool = await connectPool({
   acquireTimeoutMs: 5000,
 });
 try {
+  await pool.withClient((client) => client.migrate([{
+    name: "world_table",
+    statement: "CREATE TABLE world (id u16, light u4 DEFAULT 15) CHUNK 16 x 16",
+  }]));
   await Promise.all([pool.setBlock(2, 0, { id: 2 }), pool.setBlock(3, 0, { id: 3 })]);
-  console.log((await pool.getBlock(2, 0))?.id); // 2
+  console.log((await pool.getBlock(2, 0))?.id);
 } finally {
   await pool.close();
 }
 ```
 
-`pool.withClient(fn)` leases one client for several operations; `pool.transaction(fn)` uses one connection throughout the callback.
+```output
+2
+```
+
+`pool.withClient(fn)` lends one connection for several operations.
+`pool.transaction(fn)` keeps one connection throughout the callback.
 Closing a client or pool is final; create a new instance afterward.
 
-`connectTimeoutMs` bounds TCP/TLS connection establishment; `commandTimeoutMs` bounds each reply, including login (both default 5000).
-A timeout closes the connection; a later ordinary call reconnects, but a watch ends and must be resumed explicitly.
-An operation is not replayed after a connection loss; writes can have an unknown outcome after sending.
+## Timeouts and TLS
+
+`connectTimeoutMs` bounds connection establishment; `commandTimeoutMs` bounds each reply, including login.
+Both default to 5000 milliseconds.
+A timeout closes the connection; a later ordinary call reconnects.
+A watch ends and requires explicit resumption.
+
+The client does not replay operations after connection loss.
+A sent write can have an unknown outcome.
 
 Use `chunks://` or `tls: true` for TLS.
-`ca`, `cert` and `key` accept PEM strings or Buffers; `tlsServerName` overrides certificate hostname verification.
-`tlsInsecure: true` disables certificate verification and is for local tests only.
+`ca`, `cert` and `key` accept PEM strings or Buffers.
+`tlsServerName` overrides certificate hostname verification.
+`tlsInsecure: true` disables certificate verification; use it only for local tests.
 
-| Error | Meaning |
+## Errors
+
+| Error | Meaning and action |
 |---|---|
-| `ChunkAuthError` | `AUTH_REQUIRED` or `AUTH_FAILED`: check user/password |
-| `ChunkPermissionError` | required right and table are in `serverMessage` |
-| `ChunkVersionMismatchError` | conditional write refused; `currentVersion` is the current chunk version |
-| `ChunkSchemaMismatchError` | stale raw chunk form; `currentSchemaVersion` is the current schema version |
-| `ChunkConflictError` | transaction conflict, with `reason` |
-| `ChunkMigrationError` | migration list stopped, with step/index/earlier results/cause |
-| `ChunkServerError` | server reply, with `serverCode` and `serverMessage` |
-| `ChunkConnectionError` | transport failure; inspect endpoint, `code` and `cause` |
-| `ChunkTimeoutError` | connect or command timeout |
-| `ChunkTlsError` | TLS connection/certificate failure |
-| `ChunkProtocolError` | invalid request/value/reply or incompatible protocol |
+| `ChunkAuthError` | Check the user and password. |
+| `ChunkPermissionError` | Inspect `serverMessage` for the required right and table. |
+| `ChunkVersionMismatchError` | Re-read the chunk; `currentVersion` identifies its current state. |
+| `ChunkSchemaMismatchError` | Re-read the schema; `currentSchemaVersion` identifies its current layout. |
+| `ChunkConflictError` | Retry the transaction; inspect `reason`. |
+| `ChunkMigrationError` | Inspect the failed step, earlier results and cause. |
+| `ChunkServerError` | Inspect `serverCode` and `serverMessage`. |
+| `ChunkConnectionError` | Check the endpoint, `code` and `cause`. |
+| `ChunkTimeoutError` | Check the endpoint and timeout settings. |
+| `ChunkTlsError` | Check certificates and TLS settings. |
+| `ChunkProtocolError` | Check request values and server compatibility. |
 
-All derive from `ChunkError` and carry `phase`, optional `code`, `command` and `cause`.
-A SCRAM server signature mismatch is a `ChunkConnectionError` saying the server could not prove it knows the password.
-See [API reference](API.md) for the connection options and lower-level helpers.
+All derive from `ChunkError`, with `phase` and optional `code`, `command` and `cause` fields.
+A server signature mismatch raises `ChunkConnectionError`: the server cannot prove it knows the password.
+See the [API reference](API.md) for connection options and helpers.
