@@ -178,7 +178,7 @@ function tlsFixtures(): { cert: string; key: string } {
  * Starts a server with an administrator (`admin`, whose password `uri`
  * carries), or with `--auth none`.
  */
-export async function startServer(options: { tls?: boolean; auth?: "users" | "none"; slotMaxBytes?: number } = {}): Promise<StartedServer> {
+export async function startServer(options: { tls?: boolean; auth?: "users" | "none"; slotMaxBytes?: number; backupDir?: string } = {}): Promise<StartedServer> {
   const host = "127.0.0.1";
   const port = await pickFreePort();
   const auth = options.auth ?? "users";
@@ -206,6 +206,7 @@ export async function startServer(options: { tls?: boolean; auth?: "users" | "no
     "warn",
   ];
   if (options.slotMaxBytes !== undefined) args.push("--slot-max-bytes", String(options.slotMaxBytes));
+  if (options.backupDir !== undefined) args.push("--backup-dir", options.backupDir);
 
   if (auth === "users") {
     // Outside the data directory, which must start empty.
