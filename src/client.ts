@@ -4,6 +4,19 @@ import tls from "node:tls";
 
 import {
   ChunkAuthError,
+  ChunkConditionFailedError,
+  ChunkBusyError,
+  ChunkDiskFullError,
+  ChunkRateLimitedError,
+  ChunkOutcomeUnknownError,
+  ChunkMigrationMismatchError,
+  ChunkSlotBusyError,
+  ChunkCheckFailedError,
+  ChunkCancelledError,
+  ChunkStatementTimeoutError,
+  ChunkKilledError,
+  ChunkUnknownCommandError,
+  parseErrorFields,
   ChunkConflictError,
   ChunkConnectionError,
   ChunkMigrationError,
@@ -96,6 +109,7 @@ interface ResolvedOptions {
   uri: ParsedChunkUri;
   pipelineDepth: number;
   table: string;
+  helloOptions?: Readonly<Record<string, ChunkValue>>;
 }
 
 // The place of one operation in the order statements are written: it
@@ -176,15 +190,8 @@ const TABLE_OPTION_NAMES: Record<keyof ChunkTableOptions, string> = {
 // cannot frame (BAD_REQUEST), and a statement with parameters refused before
 // its frames are read, which could not be told apart from the next
 // statement (src/server_connection.cpp, CommandEngine::PlanParameters).
-function closesConnection(reply: ErrorReply, withParameters: boolean): boolean {
-  if (reply.code === "BAD_REQUEST") {
-    return true;
-  }
-  return (
-    withParameters &&
-    (["SYNTAX", "NO_TABLE"].includes(reply.code) ||
-      (reply.code === "INVALID_ARGUMENT" && NO_COLUMN.test(reply.message)))
-  );
+function closesConnection(reply: ErrorReply, _withParameters: boolean): boolean {
+  return reply.code === "BAD_REQUEST" || reply.code === "PROTOCOL";
 }
 
 /** The table a `CREATE` / `ALTER` / `DROP TABLE` statement names, or null. */
@@ -242,6 +249,7 @@ function resolveOptions(options: ChunkClientOptions = {}): ResolvedOptions {
     key: options.key,
     pipelineDepth: Math.max(1, options.pipelineDepth ?? 1),
     table: named ?? DEFAULT_TABLE,
+    helloOptions: options.helloOptions,
     uri: {
       scheme: secure ? "chunks" : "chunk",
       secure,
@@ -1044,7 +1052,7 @@ export class ChunkClient {
       if (reply.type === "null") {
         return null;
       }
-      if (reply.type !== "array" || reply.items.length !== indexes.length) {
+      if (reply.type !== "array" || reply.items.length < indexes.length) {
         throw new StaleSchemaError(`GET BLOCK answered ${reply.type === "array" ? reply.items.length : reply.type} values for ${indexes.length} columns`, {
           phase: "protocol",
           command: "GET BLOCK",
@@ -1331,7 +1339,7 @@ export class ChunkClient {
   private areaEntries(reply: ChunkReply): ChunkAreaRawEntry[] {
     const command = "GET AREA";
     return itemsOf(reply, command).map((item) => {
-      if (item.type !== "array" || item.items.length !== 3) {
+      if (item.type !== "array" || item.items.length < 3) {
         throw new ChunkProtocolError("malformed GET AREA entry", { phase: "protocol", command });
       }
       return { ...coordOf(item, command), chunk: bulkOf(item.items[2], command) };
@@ -1521,11 +1529,13 @@ export class ChunkClient {
     const user = this.options.user;
     let login: ScramLogin | null = null;
     let reply: ChunkReply;
+    const options = Object.entries(this.options.helloOptions ?? {});
+    const withClause = options.length === 0 ? "" : " WITH " + options.map(([name, value]) => `${checkName(name.toLowerCase(), "a HELLO option")} = ${formatLiteral(value)}`).join(", ");
     if (user === "") {
-      reply = await this.send(`HELLO ${PROTOCOL_VERSION}`, [], "HELLO");
+      reply = await this.send(`HELLO ${PROTOCOL_VERSION}${withClause}`, [], "HELLO");
     } else {
       login = startScramLogin(user);
-      reply = await this.send(`HELLO ${PROTOCOL_VERSION} USER ${user} $1`, [Buffer.from(login.first, "utf8")], "HELLO");
+      reply = await this.send(`HELLO ${PROTOCOL_VERSION} USER ${user} $1${withClause}`, [Buffer.from(login.first, "utf8")], "HELLO");
     }
     if (reply.type === "error") {
       // An older chunkdb answers `-ERR PROTOCOL expected HELLO 2`; a 1.x
@@ -1590,29 +1600,28 @@ export class ChunkClient {
     if (reply.code === "PERMISSION_DENIED") {
       return new ChunkPermissionError(reply.code, reply.message, { phase: "response", command });
     }
-    if (reply.code === "VERSION_MISMATCH") {
-      const current = /^current=([0-9]+)$/.exec(reply.message);
-      if (current === null) {
-        return new ChunkProtocolError(`unexpected VERSION_MISMATCH message: ${reply.message}`, {
-          phase: "protocol",
-          command,
-        });
+    const fields = parseErrorFields(reply.message).keys;
+    const current = fields.current;
+    if (reply.code === "VERSION_MISMATCH" || reply.code === "SCHEMA_MISMATCH") {
+      if (!/^[0-9]+$/.test(current ?? "") || BigInt(current) > (1n << 64n) - 1n) {
+        return new ChunkProtocolError(`unexpected ${reply.code} metadata: ${reply.message}`, { phase: "protocol", command });
       }
-      return new ChunkVersionMismatchError(reply.message, BigInt(current[1]), { phase: "response", command });
+      return reply.code === "VERSION_MISMATCH"
+        ? new ChunkVersionMismatchError(reply.message, BigInt(current), { phase: "response", command })
+        : new ChunkSchemaMismatchError(reply.message, BigInt(current), { phase: "response", command });
     }
-    if (reply.code === "CONFLICT" && command !== "MIGRATE") {
-      return new ChunkConflictError(reply.message, reply.message.split(" ", 1)[0], { phase: "response", command });
+    if (reply.code === "CONFLICT") {
+      return new ChunkConflictError(reply.message, fields.reason ?? reply.message.split(" ", 1)[0], { phase: "response", command });
     }
-    if (reply.code === "SCHEMA_MISMATCH") {
-      const current = /^current=([0-9]+)(?: |$)/.exec(reply.message);
-      if (current === null) {
-        return new ChunkProtocolError(`unexpected SCHEMA_MISMATCH message: ${reply.message}`, {
-          phase: "protocol",
-          command,
-        });
-      }
-      return new ChunkSchemaMismatchError(reply.message, BigInt(current[1]), { phase: "response", command });
-    }
+    const classes: Record<string, typeof ChunkServerError> = {
+      CONDITION_FAILED: ChunkConditionFailedError, BUSY: ChunkBusyError, DISK_FULL: ChunkDiskFullError,
+      RATE_LIMITED: ChunkRateLimitedError, OUTCOME_UNKNOWN: ChunkOutcomeUnknownError,
+      MIGRATION_MISMATCH: ChunkMigrationMismatchError, SLOT_BUSY: ChunkSlotBusyError,
+      CHECK_FAILED: ChunkCheckFailedError, CANCELLED: ChunkCancelledError,
+      TIMEOUT: ChunkStatementTimeoutError, KILLED: ChunkKilledError, UNKNOWN_COMMAND: ChunkUnknownCommandError,
+    };
+    const ErrorClass = classes[reply.code];
+    if (ErrorClass !== undefined) return new ErrorClass(reply.code, reply.message, { phase: "response", command });
     return new ChunkServerError(reply.code, reply.message, { phase: "response", command });
   }
 
@@ -1742,7 +1751,8 @@ export class ChunkClient {
       if (reply === null) {
         return;
       }
-      if (reply.type === "push" && this.watchReceiver !== null) {
+      if (reply.type === "push") {
+        if (this.watchReceiver === null) continue;
         if (!this.watchStarted) {
           const socket = this.socket;
           this.clearConnectionState(new ChunkProtocolError("WATCH push preceded its start reply", { phase: "protocol", command: "WATCH" }));

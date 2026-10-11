@@ -1,5 +1,30 @@
 import type { ChunkErrorPhase, ChunkMigration, ChunkMigrationResult } from "./types";
 
+export type ChunkRetryClass = "reread" | "rerun" | "backoff" | "unknown_outcome" | "fatal";
+
+export function retryClassOf(code: string): ChunkRetryClass {
+  if (["VERSION_MISMATCH", "CONDITION_FAILED", "SCHEMA_MISMATCH"].includes(code)) return "reread";
+  if (code === "CONFLICT") return "rerun";
+  if (["BUSY", "DISK_FULL", "RATE_LIMITED"].includes(code)) return "backoff";
+  return code === "OUTCOME_UNKNOWN" ? "unknown_outcome" : "fatal";
+}
+
+/** Leading structured keys; malformed percent escapes remain opaque diagnostics. */
+export function parseErrorFields(message: string): { keys: Record<string, string>; message: string } {
+  const entries: Array<[string, string]> = [];
+  let remaining = message;
+  while (true) {
+    const match = /^([a-z_][a-z0-9_]*)=([^\s]*)(?:\s+|$)/.exec(remaining);
+    if (match === null) break;
+    let value = match[2];
+    try { value = decodeURIComponent(value); }
+    catch (error) { if (!(error instanceof URIError)) throw error; }
+    entries.push([match[1], value]);
+    remaining = remaining.slice(match[0].length);
+  }
+  return { keys: Object.fromEntries(entries), message: remaining };
+}
+
 export interface ChunkErrorOptions {
   phase: ChunkErrorPhase;
   code?: string;
@@ -60,6 +85,21 @@ export class ChunkMigrationError extends ChunkError {
 export class ChunkServerError extends ChunkError {
   readonly serverCode: string;
   readonly serverMessage: string;
+  readonly retryClass: ChunkRetryClass;
+  readonly keys: Readonly<Record<string, string>>;
+  /** Free text after structured keys, independent of retry classification. */
+  readonly detail: string;
+  readonly current?: bigint;
+  readonly expected?: bigint;
+  readonly actual?: bigint;
+  readonly revision?: bigint;
+  readonly connectionId?: bigint;
+  readonly retryAfterMs?: bigint;
+  readonly reason?: string;
+  readonly table?: string;
+  readonly column?: string;
+  readonly epoch?: string;
+  readonly stage?: string;
 
   constructor(serverCode: string, serverMessage: string, options: Omit<ChunkErrorOptions, "code">) {
     super(`chunkdb server error ${serverCode}: ${serverMessage}`, {
@@ -68,8 +108,39 @@ export class ChunkServerError extends ChunkError {
     });
     this.serverCode = serverCode;
     this.serverMessage = serverMessage;
+    this.retryClass = retryClassOf(serverCode);
+    const parsed = parseErrorFields(serverMessage);
+    this.keys = Object.freeze(parsed.keys);
+    this.detail = parsed.message;
+    const integer = (name: string) => /^-?[0-9]+$/.test(parsed.keys[name] ?? "") ? BigInt(parsed.keys[name]) : undefined;
+    this.current = integer("current");
+    this.expected = integer("expected");
+    this.actual = integer("actual");
+    this.revision = integer("revision");
+    this.connectionId = integer("connection_id");
+    this.retryAfterMs = integer("retry_after_ms");
+    this.reason = parsed.keys.reason;
+    this.table = parsed.keys.table;
+    this.column = parsed.keys.column;
+    this.epoch = parsed.keys.epoch;
+    this.stage = parsed.keys.stage;
   }
 }
+
+export class ChunkConditionFailedError extends ChunkServerError {}
+export class ChunkBusyError extends ChunkServerError {}
+export class ChunkDiskFullError extends ChunkServerError {}
+export class ChunkRateLimitedError extends ChunkServerError {}
+export class ChunkOutcomeUnknownError extends ChunkServerError {}
+export class ChunkMigrationMismatchError extends ChunkServerError {}
+export class ChunkSlotBusyError extends ChunkServerError {}
+export class ChunkCheckFailedError extends ChunkServerError {}
+export class ChunkCancelledError extends ChunkServerError {}
+export class ChunkStatementTimeoutError extends ChunkServerError {}
+export class ChunkKilledError extends ChunkServerError {}
+export class ChunkUnknownCommandError extends ChunkServerError {}
+/** A legacy packed form cannot locate a column with an unknown width. */
+export class ChunkUnknownColumnTypeError extends ChunkProtocolError {}
 
 /**
  * `AUTH_REQUIRED` (the server needs a user and password) or `AUTH_FAILED`

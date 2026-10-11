@@ -4,6 +4,22 @@ export { ChunkWatch } from "./watch";
 export { emptyChunk } from "./chunk-form";
 export {
   ChunkAuthError,
+  ChunkConditionFailedError,
+  ChunkBusyError,
+  ChunkDiskFullError,
+  ChunkRateLimitedError,
+  ChunkOutcomeUnknownError,
+  ChunkMigrationMismatchError,
+  ChunkSlotBusyError,
+  ChunkCheckFailedError,
+  ChunkCancelledError,
+  ChunkStatementTimeoutError,
+  ChunkKilledError,
+  ChunkUnknownCommandError,
+  ChunkUnknownColumnTypeError,
+  retryClassOf,
+  parseErrorFields,
+  type ChunkRetryClass,
   ChunkConflictError,
   ChunkConnectionError,
   ChunkError,
@@ -16,7 +32,7 @@ export {
   ChunkTlsError,
   ChunkVersionMismatchError,
 } from "./errors";
-export { encodeStatement, parseReply } from "./protocol";
+export { countParameters, encodeStatement, parseReply } from "./protocol";
 export type {
   ArrayReply,
   BooleanReply,

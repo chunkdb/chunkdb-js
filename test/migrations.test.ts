@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { ChunkClient, ChunkConflictError, ChunkConnectionError, ChunkMigrationError, ChunkProtocolError, ChunkServerError } from "../src/index";
+import { ChunkClient, ChunkMigrationMismatchError, ChunkConnectionError, ChunkMigrationError, ChunkProtocolError, ChunkServerError } from "../src/index";
 import { tableOfStatement } from "../src/client";
 import { FAKE_HELLO, startFakeServer } from "./fake-server";
 
@@ -26,7 +26,7 @@ test("migrations send steps in order, preserve statement identity and accept app
 
 test("migrations stop on the first server error with its code, cause, step and earlier results", async () => {
   const server = await startFakeServer(({ line }) => line === "HELLO 3" ? FAKE_HELLO :
-    line.startsWith("MIGRATE 'first'") ? "+applied\r\n" : "-ERR CONFLICT migration second has different statement\r\n");
+    line.startsWith("MIGRATE 'first'") ? "+applied\r\n" : "-ERR MIGRATION_MISMATCH migration second has different statement\r\n");
   const client = new ChunkClient({ port: server.port });
   try {
     await assert.rejects(client.migrate([
@@ -37,12 +37,13 @@ test("migrations stop on the first server error with its code, cause, step and e
       assert.ok(error instanceof ChunkMigrationError);
       assert.equal(error.index, 1);
       assert.equal(error.migration.name, "second");
-      assert.match(error.message, /second.*step 2.*CONFLICT/);
-      assert.equal(error.code, "CONFLICT");
+      assert.match(error.message, /second.*step 2.*MIGRATION_MISMATCH/);
+      assert.equal(error.code, "MIGRATION_MISMATCH");
       assert.equal(error.phase, "response");
       assert.ok(error.cause instanceof ChunkServerError);
-      assert.ok(!(error.cause instanceof ChunkConflictError));
-      assert.equal(error.cause.serverCode, "CONFLICT");
+      assert.ok(error.cause instanceof ChunkMigrationMismatchError);
+      assert.equal(error.cause.retryClass, "fatal");
+      assert.equal(error.cause.serverCode, "MIGRATION_MISMATCH");
       assert.deepEqual(error.results, [{ name: "first", status: "applied" }]);
       return true;
     });

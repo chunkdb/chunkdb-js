@@ -47,6 +47,8 @@ export interface ChunkClientOptions {
    * does not create its table; a fresh server has no tables.
    */
   table?: string;
+  /** HELLO WITH options; unknown names are reported as not applied. */
+  helloOptions?: Readonly<Record<string, ChunkValue>>;
 }
 
 export interface ChunkPoolOptions extends ChunkClientOptions {
@@ -74,6 +76,13 @@ export interface ChunkServerInfo {
    * checked; null for a login without a user.
    */
   serverSignature: string | null;
+  connectionId?: bigint;
+  features?: string[];
+  options?: Record<string, ChunkValue>;
+  notApplied?: Record<string, { reason: string }>;
+  idleTimeoutMs?: number;
+  limits?: Record<string, number>;
+
 }
 
 /** A right on a table: `ADMIN` includes `WRITE`, which includes `READ`. */
@@ -190,7 +199,8 @@ export type ChunkColumnType =
   | { readonly kind: "f64" }
   | { readonly kind: "bits"; readonly length: number }
   | { readonly kind: "text"; readonly maxBytes: number }
-  | { readonly kind: "bytes"; readonly maxBytes: number };
+  | { readonly kind: "bytes"; readonly maxBytes: number }
+  | { readonly kind: "unknown"; readonly name: string };
 
 /** A column as `describe` reports it. */
 export interface ChunkColumn {
@@ -250,6 +260,10 @@ export interface ChunkTableSchema {
   /** Chunks per large chunk. */
   large: ChunkSize;
   options: ChunkTableOptionValues;
+  epoch?: string;
+  revision?: bigint;
+  dims?: number;
+  chunkColumns?: ChunkColumn[];
 }
 
 export interface ChunkColumnDefinition {
