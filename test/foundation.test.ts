@@ -3,14 +3,14 @@ import assert from "node:assert/strict";
 import {
   ChunkClient, ChunkPool, ChunkProtocolError, ChunkServerError, ChunkVersionMismatchError,
   ChunkSchemaMismatchError, ChunkOutcomeUnknownError, ChunkUnknownColumnTypeError,
-  countParameters, encodeStatement, parseReply, retryClassOf, type ChunkReply,
+  countParameters, emptyChunk, encodeStatement, parseReply, retryClassOf, type ChunkReply,
 } from "../src/index";
 import { ReplyReader } from "../src/protocol";
 import { noTableAfterProgress, schemaAfterProgress } from "./watch-consumers";
 import { parseSlots } from "../src/slots";
 import { parseDescribe, parseServerInfo, parseStatus } from "../src/schema";
 import { valueFromReply } from "../src/values";
-import { decodeChunkForm } from "../src/chunk-form";
+import { chunkFormLimit, decodeChunkForm } from "../src/chunk-form";
 import { describeReply, FAKE_HELLO, startFakeServer } from "./fake-server";
 
 const bulk = (value: string): ChunkReply => ({ type: "bulk", value: Buffer.from(value) });
@@ -655,4 +655,144 @@ test("progress consumer review: bounded helpers reject mutations, invalid progre
     await assert.rejects(consumer({ start, next: async () => ({ done: true, value: undefined }) }), /stream ended/);
   }
   await assert.rejects(noTableAfterProgress({ start, next: async () => { throw new ChunkServerError("SLOT_LOST", "lost", { phase: "response" }); } }), (error: unknown) => error instanceof ChunkServerError && error.serverCode === "SLOT_LOST");
+});
+
+
+const maximumVersion = (1n << 64n) - 1n;
+type ProducerReplyCase = { wire: string; version?: bigint; malformedFrame?: boolean; unknownOutcome?: boolean };
+const producerCases: ProducerReplyCase[] = [
+  { wire: ":0\r\n", version: 0n }, { wire: "(" + maximumVersion + "\r\n", version: maximumVersion },
+  { wire: ":-1\r\n" }, { wire: "(" + (1n << 64n) + "\r\n" },
+  { wire: "+OK\r\n" }, { wire: "$4\r\nnope\r\n" }, { wire: ",1\r\n" },
+  { wire: "#t\r\n" }, { wire: "*0\r\n" }, { wire: "_\r\n" }, { wire: ":1.5\r\n", malformedFrame: true },
+];
+const producerSchema = parseDescribe(parsed(describeReply("u8"))).schema;
+const producerForm = Buffer.alloc(16 + 2 + 20 + 16);
+producerForm.writeBigUInt64LE(1n, 8);
+const producerOperations = [
+  { name: "SET BLOCK", send: (client: ChunkClient) => client.setBlock(0, 0, { h: 8 }) },
+  { name: "DELETE BLOCK", send: (client: ChunkClient) => client.deleteBlock(0, 0) },
+  { name: "SET CHUNK typed", command: "SET CHUNK", send: (client: ChunkClient) => client.setChunk(0, 0, emptyChunk(producerSchema)) },
+  { name: "SET CHUNK raw", command: "SET CHUNK", send: (client: ChunkClient) => client.setChunkRaw(0, 0, producerForm) },
+];
+
+for (const operation of producerOperations) {
+  test("producer review: " + operation.name + " accepts uint64 boundaries and rejects malformed versions once", { timeout: 10000 }, async () => {
+    const command = operation.command ?? operation.name;
+    for (const reply of producerCases) {
+      const server = await startFakeServer(({ line }) => {
+        if (line === "HELLO 3") return FAKE_HELLO;
+        if (line === "DESCRIBE t") return describeReply("u8");
+        if (line.startsWith(command + " ")) return reply.wire;
+        if (line === "PING") return "+PONG\r\n";
+        throw new Error(line);
+      });
+      const client = new ChunkClient({ port: server.port, table: "t" });
+      try {
+        if (reply.version !== undefined) assert.equal(await operation.send(client), reply.version);
+        else await assert.rejects(operation.send(client), (error: unknown) => error instanceof ChunkProtocolError &&
+          error.phase === "protocol" && (reply.malformedFrame || error.command === command));
+        assert.equal(await client.ping(), "PONG");
+        assert.equal(server.requests.filter(({ line }) => line.startsWith(command + " ")).length, 1);
+      } finally { await client.close(); await server.close(); }
+    }
+  });
+}
+
+test("producer review: COMMIT checks uint64, preserves null, and never replays malformed or unknown outcomes", { timeout: 10000 }, async () => {
+  const replies: ProducerReplyCase[] = [...producerCases, { wire: "-ERR OUTCOME_UNKNOWN stage=publish unknown result\r\n", unknownOutcome: true }];
+  for (const reply of replies) {
+    const server = await startFakeServer(({ line }) => {
+      if (line === "HELLO 3") return FAKE_HELLO;
+      if (line === "DESCRIBE t") return describeReply("u8");
+      if (line === "BEGIN" || line === "ROLLBACK") return "+OK\r\n";
+      if (line.startsWith("SET BLOCK ")) return "_\r\n";
+      if (line === "COMMIT") return reply.wire;
+      if (line === "PING") return "+PONG\r\n";
+      throw new Error(line);
+    });
+    const client = new ChunkClient({ port: server.port, table: "t" }); let callbacks = 0;
+    try {
+      const nullCommit = reply.wire === "_\r\n";
+      const transaction = client.transaction(async (tx) => {
+        callbacks++;
+        if (!nullCommit) await tx.setBlock(0, 0, { h: 8 });
+      }, { retries: 9 });
+      if (nullCommit) assert.equal(await transaction, null);
+      else if (reply.version !== undefined) assert.equal(await transaction, reply.version);
+      else if ("unknownOutcome" in reply) await assert.rejects(transaction, (error: unknown) =>
+        error instanceof ChunkOutcomeUnknownError && error.retryClass === "unknown_outcome" && error.stage === "publish");
+      else await assert.rejects(transaction, (error: unknown) => error instanceof ChunkProtocolError &&
+        error.phase === "protocol" && (reply.malformedFrame || error.command === "COMMIT"));
+      assert.equal(await client.ping(), "PONG");
+      assert.equal(callbacks, 1);
+      for (const command of ["BEGIN", "COMMIT"]) assert.equal(server.requests.filter(({ line }) => line === command).length, 1);
+      assert.equal(server.requests.filter(({ line }) => line.startsWith("SET BLOCK ")).length, nullCommit ? 0 : 1);
+    } finally { await client.close(); await server.close(); }
+  }
+  const arbitrary = (1n << 100n) + 123n;
+  assert.deepEqual(parseReply(Buffer.from("(" + arbitrary + "\r\n"))!.reply, integer(arbitrary));
+});
+
+const binaryBulk = (bytes: Buffer) => Buffer.concat([Buffer.from("$" + bytes.length + "\r\n"), bytes, Buffer.from("\r\n")]);
+
+test("raw write review: unknown columns retain exact raw reads and typed neighbors but cannot send SET", { timeout: 5000 }, async () => {
+  const description = parsed(describeReply("future(17)")); assert.equal(description.type, "map");
+  const columns = description.entries.find(([key]) => key.type === "bulk" && key.value.toString() === "columns")![1]; assert.equal(columns.type, "array");
+  columns.items.push(map({ id: integer(3n), name: bulk("tail"), type: bulk("text(8)"), null: { type: "boolean", value: false }, required: { type: "boolean", value: false }, default: nullReply }));
+  const raw = Buffer.from([0, 255, 13, 10, 128, 36, 0, 10]);
+  const unknownValue = Buffer.from([255, 0, 13, 10]);
+  const server = await startFakeServer(({ line }) => {
+    if (line === "HELLO 3") return FAKE_HELLO;
+    if (line === "DESCRIBE t") return encode(description);
+    if (line === "GET CHUNK 0 0 FROM t") return binaryBulk(raw);
+    if (line === "GET AREA 0 0 TO 0 0 FROM t") return Buffer.concat([Buffer.from("*1\r\n*3\r\n:0\r\n:0\r\n"), binaryBulk(raw)]);
+    if (line === "GET BLOCK 0 0 FROM t COLUMNS id, h, tail") return Buffer.concat([Buffer.from("*3\r\n:7\r\n"), binaryBulk(unknownValue), binaryBulk(Buffer.from("neighbor"))]);
+    if (line === "PING") return "+PONG\r\n";
+    if (line.startsWith("SET CHUNK ")) return ":1\r\n";
+    throw new Error(line);
+  });
+  const client = new ChunkClient({ port: server.port, table: "t" });
+  try {
+    assert.deepEqual(await client.getChunkRaw(0, 0), raw);
+    assert.deepEqual(await client.getAreaRaw({ cx0: 0, cy0: 0, cx1: 0, cy1: 0 }), [{ cx: 0, cy: 0, chunk: raw }]);
+    assert.deepEqual(await client.getBlock(0, 0), { id: 7, h: unknownValue, tail: "neighbor" });
+    await assert.rejects(client.setChunkRaw(0, 0, raw), (error: unknown) => error instanceof ChunkUnknownColumnTypeError &&
+      error.phase === "request" && error.command === "SET CHUNK" && /column h/.test(error.message) && /future\(17\)/.test(error.message) && /known column widths/.test(error.message) && !/use raw chunk forms/.test(error.message));
+    assert.equal(await client.ping(), "PONG");
+    assert.equal(server.requests.filter(({ line }) => line.startsWith("SET CHUNK ")).length, 0);
+    assert.equal(server.connections, 1);
+  } finally { await client.close(); await server.close(); }
+});
+
+test("raw write review: known-width exact frame bound is sent, one extra byte is refused without disconnect", { timeout: 5000 }, async () => {
+  const description = parsed(describeReply("bytes(6)")); assert.equal(description.type, "map");
+  const options = description.entries.find(([key]) => key.type === "bulk" && key.value.toString() === "options")![1]; assert.equal(options.type, "map");
+  addFields(options, { var_max_chunk_bytes: integer(18n) });
+  const layout = parseDescribe(description);
+  // Header16 + presence2 + sixteen u10 values20 + one variable entry12 and bytes6 = 56.
+  assert.equal(chunkFormLimit(layout), 56);
+  const form = Buffer.alloc(56); form.writeBigUInt64LE(1n, 8); form[16] = 1; form[18] = 7;
+  form.writeUInt32LE(2, 38); form.writeUInt32LE(0, 42); form.writeUInt32LE(6, 46);
+  Buffer.from([0, 255, 13, 10, 128, 36]).copy(form, 50);
+  const decoded = decodeChunkForm(layout, form, [0, 1]);
+  assert.equal(decoded.columns.id[0], 7); assert.deepEqual(decoded.columns.h[0], form.subarray(50));
+  const server = await startFakeServer(({ line, frames }) => {
+    if (line === "HELLO 3") return FAKE_HELLO;
+    if (line === "DESCRIBE t") return encode(description);
+    if (line === "SET CHUNK 0 0 IN t $1") { assert.deepEqual(frames, [form]); return "(" + maximumVersion + "\r\n"; }
+    if (line === "PING") return "+PONG\r\n";
+    throw new Error(line);
+  });
+  const client = new ChunkClient({ port: server.port, table: "t" });
+  try {
+    assert.equal(await client.setChunkRaw(0, 0, form), maximumVersion);
+    await assert.rejects(client.setChunkRaw(0, 0, Buffer.concat([form, Buffer.from([0])])), (error: unknown) =>
+      error instanceof ChunkProtocolError && error.phase === "request" && error.command === "SET CHUNK" && /at most 56 bytes, got 57/.test(error.message));
+    assert.equal(await client.ping(), "PONG");
+    assert.equal(server.requests.filter(({ line }) => line.startsWith("SET CHUNK ")).length, 1);
+    assert.equal(await client.setChunkRaw(0, 0, form), maximumVersion);
+    assert.equal(server.requests.filter(({ line }) => line.startsWith("SET CHUNK ")).length, 2);
+    assert.equal(server.connections, 1);
+  } finally { await client.close(); await server.close(); }
 });

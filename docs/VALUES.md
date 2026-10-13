@@ -119,4 +119,8 @@ bigint bigint
 An unknown DESCRIBE type keeps its original name and returns raw bytes for that row column.
 Known neighboring columns keep their usual typed values.
 Packed chunk forms need every column's width; an unknown type raises `ChunkUnknownColumnTypeError` during typed form decoding.
-Use raw form methods when you need to retain that undecoded form.
+`getChunkRaw` and `getAreaRaw` retain that undecoded form without knowing the unknown column's width.
+
+`setChunkRaw` requires every column width for its frame-size preflight.
+An unknown width raises `ChunkUnknownColumnTypeError`, naming the column and type, before sending SET.
+Writing that form requires a client that knows the type.

@@ -8,7 +8,7 @@
 // block index (u32), length (u32) and the bytes, in ascending (column id,
 // block index).
 
-import { ChunkProtocolError } from "./errors";
+import { ChunkProtocolError, ChunkUnknownColumnTypeError } from "./errors";
 import type { TableLayout } from "./schema";
 import type { ChunkColumn, ChunkState, ChunkStateInput, ChunkTableSchema, ChunkValue } from "./types";
 import {
@@ -46,6 +46,12 @@ export function chunkFormLimit(layout: TableLayout): number {
   const blocks = blockCount(layout);
   let payload = 0;
   for (const column of layout.schema.columns) {
+    if (column.type.kind === "unknown") {
+      throw new ChunkUnknownColumnTypeError(
+        `cannot size a raw SET CHUNK form: column ${column.name} has unknown type ${column.typeName}; writing requires known column widths`,
+        { phase: "request", command: "SET CHUNK" },
+      );
+    }
     payload += sectionBytes(column, blocks);
   }
   return HEADER_BYTES + presenceBytes(blocks) + payload + layout.schema.options.varMaxChunkBytes;

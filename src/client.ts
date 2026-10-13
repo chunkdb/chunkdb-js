@@ -277,10 +277,7 @@ function expectOk(reply: ChunkReply, command: string, value = "OK"): void {
 }
 
 function versionOf(reply: ChunkReply, command: string): bigint {
-  if (reply.type !== "integer" || reply.value < 0n) {
-    throw new ChunkProtocolError(`expected a chunk version from ${command}`, { phase: "protocol", command });
-  }
-  return reply.value;
+  return uint64Of(reply, "chunk version", command);
 }
 
 function bulkOf(reply: ChunkReply, command: string): Buffer {

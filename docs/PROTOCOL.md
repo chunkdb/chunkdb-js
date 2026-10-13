@@ -9,12 +9,15 @@ Known map fields decode independently of unknown keys.
 Unknown push kinds are fully consumed and ignored; they cannot take an ordinary request's reply or change ACK eligibility.
 
 An unknown column type returns raw bytes for that row column while known neighbors stay typed.
-Unknown-width packed forms require raw form methods, because their neighboring columns cannot be located safely.
+Raw chunk and area reads retain unknown-width forms, because their neighboring columns cannot be located safely.
+Raw SET still requires known column widths for frame-size preflight; an unknown width fails before sending the form.
+The error names the column and type; writing requires a client that knows that type.
 
 Both RESP3 signed integers and big numbers decode as exact bigint values.
 Typed narrow integer columns remain numbers; wide integer columns remain bigint.
 Schema versions use number within JavaScript's safe range and bigint above it.
 Chunk versions, revisions, connection IDs, commit timestamps and transaction IDs remain bigint.
+Producer versions must fit uint64; malformed producer replies raise `ChunkProtocolError`.
 
 Compare chunk versions only within the same table epoch; revisions can have gaps.
 
