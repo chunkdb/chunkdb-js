@@ -6,6 +6,7 @@ import {
   countParameters, encodeStatement, parseReply, retryClassOf, type ChunkReply,
 } from "../src/index";
 import { ReplyReader } from "../src/protocol";
+import { noTableAfterProgress, schemaAfterProgress } from "./watch-consumers";
 import { parseSlots } from "../src/slots";
 import { parseDescribe, parseServerInfo, parseStatus } from "../src/schema";
 import { valueFromReply } from "../src/values";
@@ -464,4 +465,194 @@ test("foundation: status masks and persisted filter metadata reject invalid sign
   for (const mask of [integer(-1n), integer(1n << 64n), bulk("1")]) {
     assert.throws(() => parseStatus(map({ directory: map({ enabled: array(), compat: mask, ro_compat: integer(0n), incompat: integer(0n) }), tables: array(), activation_pending: { type: "boolean", value: false } })), ChunkProtocolError);
   }
+});
+
+
+const NEXT_EPOCH = "fedcba9876543210fedcba9876543210";
+const positionReply = (epoch: string, revision: bigint) => map({ epoch: bulk(epoch), revision: integer(revision) });
+const progressPush = (epoch: string, revision: bigint) => push(bulk("progress"), bulk(epoch), integer(revision));
+const resyncPush = (epoch: string, revision: bigint, parent: ChunkReply = nullReply, fork: ChunkReply = nullReply) =>
+  push(bulk("resync"), bulk(epoch), integer(revision), parent, fork);
+const changedEpoch = (epoch: string, revision: bigint, value: ChunkReply = integer(8n)) => push(
+  bulk("change"), bulk(epoch), integer(revision), integer(123n), nullReply, integer(1n),
+  array(array(integer(0n), integer(0n), nullReply, array(integer(7n), value))), nullReply, nullReply, array());
+const chunkEpoch = (epoch: string, revision: bigint) => push(
+  bulk("chunks"), bulk(epoch), integer(revision), integer(123n), nullReply, integer(1n),
+  array(array(integer(0n), integer(0n), integer(revision), nullReply)), nullReply, nullReply);
+
+for (const initialSchemaEpoch of [EPOCH, NEXT_EPOCH]) {
+  test("resync review: ordinary transition uses epoch-owned layouts with unchanged version from " + initialSchemaEpoch, { timeout: 5000 }, async () => {
+    let descriptions = 0;
+    const server = await startFakeServer(({ line }) => {
+      if (line === "HELLO 3") return FAKE_HELLO;
+      if (line === "DESCRIBE t") {
+        const epoch = descriptions++ === 0 ? initialSchemaEpoch : NEXT_EPOCH;
+        return encode(addFields(parsed(describeReply(epoch === EPOCH ? "u8" : "text(8)")), { epoch: bulk(epoch) }));
+      }
+      if (line === "WATCH t AFTER " + EPOCH + " 900") return [
+        positionReply(EPOCH, 900n), resyncPush(NEXT_EPOCH, 4n, bulk(EPOCH), integer(3n)),
+        progressPush(NEXT_EPOCH, 5n), changedEpoch(NEXT_EPOCH, 6n, bulk("new")), chunkEpoch(NEXT_EPOCH, 7n),
+      ].map(encode).join("");
+      if (line === "UNWATCH") return "+OK\r\n";
+      throw new Error(line);
+    });
+    const client = new ChunkClient({ port: server.port }); let watch;
+    try {
+      watch = await client.watch("t", { after: { epoch: EPOCH, revision: 900n } });
+      assert.deepEqual(watch.start, { epoch: EPOCH, revision: 900n });
+      const resync = (await watch.next()).value; assert.equal(resync.kind, "resync");
+      assert.deepEqual(resync.position, { epoch: NEXT_EPOCH, revision: 4n });
+      // The otherwise-unobservable atomic state must not inherit an old epoch's ACK floor.
+      assert.equal(Reflect.get(watch, "available"), null);
+      const progress = (await watch.next()).value; assert.equal(progress.kind, "progress");
+      assert.equal(Reflect.get(watch, "available"), 5n);
+      const change = (await watch.next()).value; assert.equal(change.kind, "change");
+      assert.deepEqual(change.blocks[0].after, { id: 7, h: "new" });
+      const chunks = (await watch.next()).value; assert.equal(chunks.kind, "chunks");
+      assert.equal(chunks.chunks[0].version, 7n); assert.equal(Reflect.get(watch, "available"), 7n);
+      assert.equal(descriptions, initialSchemaEpoch === EPOCH ? 2 : 1);
+      assert.deepEqual(watch.start, { epoch: EPOCH, revision: 900n });
+    } finally { await watch?.close(); await client.close(); await server.close(); }
+  });
+}
+
+test("resync review: eligible wrong epochs and schema pushes cannot authorize a transition", { timeout: 5000 }, async () => {
+  const schema = schemaPush(); assert.equal(schema.type, "push"); assert.equal(schema.items[1].type, "map");
+  addFields(schema.items[1], { epoch: bulk(NEXT_EPOCH) });
+  for (const frame of [progressPush(NEXT_EPOCH, 2n), changedEpoch(NEXT_EPOCH, 2n), chunkEpoch(NEXT_EPOCH, 2n), schema]) {
+    const server = await startFakeServer(({ line }) => {
+      if (line === "HELLO 3") return FAKE_HELLO;
+      if (line === "DESCRIBE t") return encode(addFields(parsed(describeReply("u8")), { epoch: bulk(EPOCH) }));
+      if (line === "WATCH t") return encode(positionReply(EPOCH, 1n)) + encode(frame);
+      if (line === "UNWATCH") return "+OK\r\n";
+      throw new Error(line);
+    });
+    const client = new ChunkClient({ port: server.port }); let watch;
+    try {
+      watch = await client.watch("t");
+      await assert.rejects(watch.next(), /event changed its epoch/);
+      assert.equal(Reflect.get(watch, "currentEpoch"), EPOCH);
+      assert.equal(Reflect.get(watch, "available"), 1n);
+      assert.equal(server.requests.filter(({ line }) => line === "DESCRIBE t").length, 1);
+    } finally { await watch?.close(); await client.close(); await server.close(); }
+  }
+});
+
+test("resync review: malformed lineage leaves active epoch and eligible bound unchanged", { timeout: 5000 }, async () => {
+  const frames = [
+    resyncPush(NEXT_EPOCH, 2n, bulk(EPOCH), nullReply), resyncPush(NEXT_EPOCH, 2n, nullReply, integer(1n)),
+    resyncPush(NEXT_EPOCH, 2n, bulk("invalid"), integer(1n)), resyncPush(NEXT_EPOCH, 2n, bulk(EPOCH), integer(-1n)),
+    resyncPush(NEXT_EPOCH, 2n, bulk(EPOCH), integer(1n << 64n)), resyncPush(NEXT_EPOCH, -1n),
+    push(bulk("resync"), bulk(NEXT_EPOCH), integer(2n)),
+  ];
+  for (const frame of frames) {
+    const server = await startFakeServer(({ line }) => {
+      if (line === "HELLO 3") return FAKE_HELLO;
+      if (line === "DESCRIBE t") return encode(addFields(parsed(describeReply("u8")), { epoch: bulk(EPOCH) }));
+      if (line === "WATCH t") return encode(positionReply(EPOCH, 900n)) + encode(frame) + encode(progressPush(NEXT_EPOCH, 3n));
+      if (line === "UNWATCH") return "+OK\r\n";
+      throw new Error(line);
+    });
+    const client = new ChunkClient({ port: server.port }); let watch;
+    try {
+      watch = await client.watch("t");
+      let failure: unknown;
+      await assert.rejects(watch.next(), (error: unknown) => { failure = error; return error instanceof ChunkProtocolError; });
+      assert.equal(Reflect.get(watch, "currentEpoch"), EPOCH);
+      assert.equal(Reflect.get(watch, "available"), 900n);
+      assert.deepEqual(watch.start, { epoch: EPOCH, revision: 900n });
+      await assert.rejects(watch.next(), (error: unknown) => error === failure);
+    } finally { await watch?.close(); await client.close(); await server.close(); }
+  }
+});
+
+test("resync review: slots reject cross-epoch resync and retain same-epoch delivered bounds", { timeout: 5000 }, async () => {
+  for (const epoch of [EPOCH, NEXT_EPOCH]) {
+    const server = await startFakeServer(({ line }) => {
+      if (line === "HELLO 3") return FAKE_HELLO;
+      if (line === "DESCRIBE t") return encode(addFields(parsed(describeReply("u8")), { epoch: bulk(EPOCH) }));
+      if (line === "WATCH t SLOT 'consumer'") return [positionReply(EPOCH, 9n), changedEpoch(EPOCH, 10n), resyncPush(epoch, 20n), progressPush(EPOCH, 11n)].map(encode).join("");
+      if (line.startsWith("ACK ")) return null;
+      if (line === "UNWATCH") return "+OK\r\n";
+      throw new Error(line);
+    });
+    const client = new ChunkClient({ port: server.port }); let watch;
+    try {
+      watch = await client.watch("t", { slot: "consumer" });
+      assert.equal((await watch.next()).value.kind, "change");
+      await assert.rejects(watch.ack(11n), ChunkProtocolError);
+      if (epoch !== EPOCH) {
+        await assert.rejects(watch.next(), /slot resync changed its epoch/);
+        assert.equal(Reflect.get(watch, "currentEpoch"), EPOCH);
+        assert.equal(Reflect.get(watch, "available"), 10n);
+      } else {
+        assert.equal((await watch.next()).value.kind, "resync");
+        await assert.rejects(watch.ack(20n), ChunkProtocolError);
+        await watch.ack(10n);
+        assert.equal((await watch.next()).value.kind, "progress"); await watch.ack(11n);
+        await watch.close();
+        assert.deepEqual(server.requests.filter(({ line }) => line.startsWith("ACK ")).map(({ line }) => line), ["ACK 10", "ACK 11"]);
+      }
+      assert.deepEqual(watch.start, { epoch: EPOCH, revision: 9n });
+    } finally { await watch?.close(); await client.close(); await server.close(); }
+  }
+});
+
+test("progress consumer review: progress before schema preserves schema-before-row ordering", { timeout: 5000 }, async () => {
+  const description = parsed(describeReply("u64")); assert.equal(description.type, "map");
+  const columns = description.entries.find(([key]) => key.type === "bulk" && key.value.toString() === "columns")![1];
+  const schema = push(bulk("schema"), map({ epoch: bulk(EPOCH), revision: integer(3n), schema_version: integer(2n), dims: integer(2n), columns, chunk_columns: array() }));
+  const change = changedEpoch(EPOCH, 4n, integer(9007199254740993n)); assert.equal(change.type, "push"); change.items[5] = integer(2n);
+  const server = await startFakeServer(({ line }) => {
+    if (line === "HELLO 3") return FAKE_HELLO;
+    if (line === "DESCRIBE t") return encode(addFields(parsed(describeReply("u8")), { epoch: bulk(EPOCH) }));
+    if (line === "WATCH t") return [positionReply(EPOCH, 1n), progressPush(EPOCH, 2n), schema, change].map(encode).join("");
+    if (line === "UNWATCH") return "+OK\r\n";
+    throw new Error(line);
+  });
+  const client = new ChunkClient({ port: server.port }); let watch;
+  try {
+    watch = await client.watch("t");
+    const received = await schemaAfterProgress(watch); assert.equal(received.version, 2);
+    assert.equal(received.columns[1].typeName, "u64");
+    const row = (await watch.next()).value; assert.equal(row.kind, "change");
+    assert.equal(row.schemaVersion, received.version); assert.equal(row.blocks[0].after!.h, 9007199254740993n);
+  } finally { await watch?.close(); await client.close(); await server.close(); }
+});
+
+test("progress consumer review: delivered progress precedes the actual NO_TABLE terminal error", { timeout: 5000 }, async () => {
+  let delivered!: () => void; const observed = new Promise<void>((resolve) => { delivered = resolve; });
+  let terminate!: () => void;
+  const server = await startFakeServer(({ line }, socket) => {
+    if (line === "HELLO 3") return FAKE_HELLO;
+    if (line === "DESCRIBE t") return describeReply("u8");
+    if (line === "WATCH t") { terminate = () => { socket.write("-ERR NO_TABLE table=t dropped\r\n"); }; return encode(positionReply(EPOCH, 1n)) + encode(progressPush(EPOCH, 2n)); }
+    if (line === "UNWATCH") return "+OK\r\n";
+    throw new Error(line);
+  });
+  const client = new ChunkClient({ port: server.port }); let watch;
+  try {
+    watch = await client.watch("t"); let progressCount = 0;
+    const terminated = noTableAfterProgress({ start: watch.start, next: async () => {
+      const next = await watch!.next();
+      if (!next.done && next.value.kind === "progress") { progressCount++; delivered(); }
+      return next;
+    } });
+    await observed; terminate(); await terminated;
+    assert.equal(progressCount, 1);
+    await assert.rejects(watch.next(), (error: unknown) => error instanceof ChunkServerError && error.serverCode === "NO_TABLE");
+  } finally { await watch?.close(); await client.close(); await server.close(); }
+});
+
+test("progress consumer review: bounded helpers reject mutations, invalid progress and non-NO_TABLE endings", { timeout: 5000 }, async () => {
+  const start = { epoch: EPOCH, revision: 1n };
+  const progress = { kind: "progress" as const, position: { epoch: EPOCH, revision: 2n } };
+  const mutation = { kind: "change" as const, position: start, commitTimeMs: 1n, user: null, schemaVersion: 1, blocks: [] };
+  for (const consumer of [schemaAfterProgress, noTableAfterProgress]) {
+    await assert.rejects(consumer({ start, next: async () => ({ done: false, value: mutation }) }), /unexpected change/);
+    await assert.rejects(consumer({ start, next: async () => ({ done: false, value: { ...progress, position: { epoch: NEXT_EPOCH, revision: 2n } } }) }), /invalid progress/);
+    await assert.rejects(consumer({ start, next: async () => ({ done: false, value: progress }) }), /more than 16 progress/);
+    await assert.rejects(consumer({ start, next: async () => ({ done: true, value: undefined }) }), /stream ended/);
+  }
+  await assert.rejects(noTableAfterProgress({ start, next: async () => { throw new ChunkServerError("SLOT_LOST", "lost", { phase: "response" }); } }), (error: unknown) => error instanceof ChunkServerError && error.serverCode === "SLOT_LOST");
 });

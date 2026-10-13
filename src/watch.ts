@@ -114,7 +114,7 @@ export function filterClause(options: Pick<ChunkWatchOptions, "area" | "columns"
 /** A dedicated change stream. Close it explicitly, or break out of for-await. */
 export class ChunkWatch implements AsyncIterableIterator<ChunkWatchEvent> {
   readonly start: ChunkPosition;
-  private readonly schemas = new Map<ChunkSchemaVersion, { columns: ChunkColumn[]; chunkColumns: ChunkColumn[]; dims: number }>();
+  private readonly schemas = new Map<string, { columns: ChunkColumn[]; chunkColumns: ChunkColumn[]; dims: number }>();
   private readonly queued: Array<PushReply | Error> = [];
   private wake: (() => void) | null = null;
   private failure: Error | null = null;
@@ -123,7 +123,8 @@ export class ChunkWatch implements AsyncIterableIterator<ChunkWatchEvent> {
   private closePromise: Promise<void> | null = null;
   private nextTurn: Promise<void> = Promise.resolve();
   private description: ChunkClient | null = null;
-  private available: bigint;
+  private available: bigint | null;
+  private currentEpoch: string;
 
   private constructor(
     private readonly stream: ChunkClient,
@@ -136,10 +137,12 @@ export class ChunkWatch implements AsyncIterableIterator<ChunkWatchEvent> {
     private readonly foundation: boolean,
     dims = 2,
     chunkColumns: ChunkColumn[] = [],
+    schemaEpoch = start.epoch,
   ) {
     this.start = start;
     this.available = start.revision;
-    this.schemas.set(version, { columns, chunkColumns, dims });
+    this.currentEpoch = start.epoch;
+    this.schemas.set(this.schemaKey(schemaEpoch, version), { columns, chunkColumns, dims });
   }
 
   static async open(createClient: () => ChunkClient, table: string, options: ChunkWatchOptions): Promise<ChunkWatch> {
@@ -180,7 +183,7 @@ export class ChunkWatch implements AsyncIterableIterator<ChunkWatchEvent> {
         start = { epoch: match[1].toLowerCase(), revision: BigInt(match[2]) };
       }
       watch = new ChunkWatch(stream, createClient, table, start, schema.version, schema.columns,
-        options.slot !== undefined, reply.type === "map", schema.dims ?? 2, schema.chunkColumns ?? []);
+        options.slot !== undefined, reply.type === "map", schema.dims ?? 2, schema.chunkColumns ?? [], schema.epoch ?? start.epoch);
       for (const push of early) watch.receive(push);
       if (earlyFailure !== null) watch.fail(earlyFailure);
       return watch;
@@ -217,7 +220,7 @@ export class ChunkWatch implements AsyncIterableIterator<ChunkWatchEvent> {
     if (typeof revision !== "bigint" || revision < 0n || revision > MAX_UINT64) {
       return Promise.reject(requestError("ACK needs a uint64 bigint revision", "ACK"));
     }
-    if (revision > this.available) {
+    if (this.available === null || revision > this.available) {
       return Promise.reject(requestError("ACK exceeds the last returned change, chunks, progress or starting position", "ACK"));
     }
     return this.stream[kWatchAck](revision).catch((error: Error) => {
@@ -281,9 +284,14 @@ export class ChunkWatch implements AsyncIterableIterator<ChunkWatchEvent> {
           const value = await this.decode(push);
           if (this.closing || this.ended) return { done: true, value: undefined };
           if (value === null) continue;
+          if (value.kind === "resync" && value.position.epoch !== this.currentEpoch) {
+            if (this.slot) throw malformed("slot resync changed its epoch");
+            this.currentEpoch = value.position.epoch;
+            this.available = null;
+          }
           if (value.kind === "change" || value.kind === "chunks" || value.kind === "progress") {
-            if (value.position.epoch !== this.start.epoch) throw malformed("eligible event changed its epoch");
-            if (value.position.revision > this.available) this.available = value.position.revision;
+            if (value.position.epoch !== this.currentEpoch) throw malformed("eligible event changed its epoch");
+            if (this.available === null || value.position.revision > this.available) this.available = value.position.revision;
           }
           return { done: false, value };
         } catch (error) {
@@ -307,16 +315,20 @@ export class ChunkWatch implements AsyncIterableIterator<ChunkWatchEvent> {
       const fields = mapOf(items[1], "WATCH");
       const field = (name: string): ChunkReply => fields.get(name) ?? (() => { throw malformed(`schema missing ${name}`); })();
       const position = { epoch: epochOf(field("epoch")), revision: unsigned(field("revision"), "revision") };
+      if (position.epoch !== this.currentEpoch) throw malformed("schema event changed its epoch");
       const version = schemaVersionOf(field("schema_version"), "WATCH");
       const dims = integerOf(field("dims"), "dims", "WATCH");
       if (version < 0 || (dims !== 2 && dims !== 3)) throw malformed("invalid schema version or dimensions");
       const columns = parseColumns(field("columns"), "WATCH");
       const chunkColumns = parseColumns(field("chunk_columns"), "WATCH", true);
-      this.schemas.set(version, { columns: copyColumns(columns), chunkColumns: copyColumns(chunkColumns), dims });
+      this.schemas.set(this.schemaKey(position.epoch, version), { columns: copyColumns(columns), chunkColumns: copyColumns(chunkColumns), dims });
       return { kind, position, version, dims, columns, chunkColumns };
     }
     if (items.length < 3) throw malformed("missing position");
     const position = { epoch: epochOf(items[1]), revision: unsigned(items[2], "revision") };
+    if ((kind === "change" || kind === "chunks" || kind === "progress") && position.epoch !== this.currentEpoch) {
+      throw malformed("eligible event changed its epoch");
+    }
     if (kind === "progress") return { kind, position };
     if (kind === "resync") {
       if (!this.foundation && items.length < 5) return { kind, position };
@@ -327,11 +339,12 @@ export class ChunkWatch implements AsyncIterableIterator<ChunkWatchEvent> {
       return { kind, position, parentEpoch, forkRevision };
     }
     if (kind === "schema") {
+      if (position.epoch !== this.currentEpoch) throw malformed("schema event changed its epoch");
       if (items.length < 5) throw malformed("missing schema fields");
       const version = schemaVersionOf(items[3], "WATCH");
       if (version < 0) throw malformed("negative schema version");
       const columns = parseColumns(items[4], "WATCH");
-      this.schemas.set(version, { columns: copyColumns(columns), chunkColumns: [], dims: 2 });
+      this.schemas.set(this.schemaKey(position.epoch, version), { columns: copyColumns(columns), chunkColumns: [], dims: 2 });
       return { kind, position, version, columns };
     }
     const nullableText = (reply: ChunkReply, name: string) => reply.type === "null" ? null : textOf(reply, name, "WATCH");
@@ -358,12 +371,13 @@ export class ChunkWatch implements AsyncIterableIterator<ChunkWatchEvent> {
     const user = nullableText(items[4], "user");
     const schemaVersion = schemaVersionOf(items[5], "WATCH");
     if (schemaVersion < 0) throw malformed("negative schema version");
-    let schema = this.schemas.get(schemaVersion);
+    let schema = this.schemas.get(this.schemaKey(position.epoch, schemaVersion));
     if (schema === undefined) {
       const described = await this.describe();
+      if (described.epoch !== undefined && described.epoch !== position.epoch) throw malformed("described schema changed its epoch");
       if (described.version !== schemaVersion) throw malformed(`schema version ${schemaVersion} is unavailable; re-read state before resuming`);
       schema = { columns: described.columns, chunkColumns: described.chunkColumns ?? [], dims: described.dims ?? 2 };
-      this.schemas.set(schemaVersion, schema);
+      this.schemas.set(this.schemaKey(position.epoch, schemaVersion), schema);
     }
     if (schema.dims !== 2 && schema.dims !== 3) throw malformed("unsupported dimensions");
     const dims = schema.dims;
@@ -399,6 +413,10 @@ export class ChunkWatch implements AsyncIterableIterator<ChunkWatchEvent> {
         before: row(entry.items[dims], schema.chunkColumns), after: row(entry.items[dims + 1], schema.chunkColumns) };
     });
     return { kind: "change", position, commitTimeMs, user, schemaVersion, blocks, tag: bytes(items[7]), txn: txn(items[8]), chunkChanges };
+  }
+
+  private schemaKey(epoch: string, version: ChunkSchemaVersion): string {
+    return epoch + ":" + version;
   }
 
   private async describe(): Promise<ChunkTableSchema> {

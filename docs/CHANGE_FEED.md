@@ -51,6 +51,9 @@ Close watches separately from their originating client or pool.
 
 ## Resume
 
+The public watch start remains the initial reply, even when an ordinary watch receives a resync into the table's actual epoch.
+Only a validated resync permits that epoch change; later events use schema layouts belonging to the new epoch.
+
 Save positions with your consumer state and pass `{ after: savedPosition }` when watching again.
 Without a slot, retained history depends on active watches; resuming can require rebuilding state.
 Follow the [server resume guide](https://github.com/chunkdb/chunkdb/blob/main/docs/FEED_RESUME.md) after a resync event or unavailable schema error.

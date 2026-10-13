@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import { ChunkBits, ChunkServerError, connectPool, connectUri, type ChunkChangeEvent, type ChunkClient, type ChunkWatch, type ChunkWatchEvent } from "../src/index";
 import { startServer, type StartedServer } from "./helpers";
+import { noTableAfterProgress, schemaAfterProgress } from "./watch-consumers";
 
 async function next(watch: ChunkWatch): Promise<ChunkWatchEvent> {
   const event = await watch.next();
@@ -138,8 +139,7 @@ test("WATCH: schema event precedes rows using new columns", { timeout: 15000 }, 
     const watch = await client.watch("world");
     try {
       await client.alterTable("world", { kind: "addColumn", column: { name: "wide", type: "u64", nullable: true } });
-      const schema = await next(watch);
-      assert.equal(schema.kind, "schema");
+      const schema = await schemaAfterProgress(watch);
       assert.deepEqual(schema.columns.map(({ name, typeName }) => [name, typeName]), [["n", "u16"], ["wide", "u64"]]);
       await client.setBlock(0, 0, { n: 7, wide: 9007199254740993n }, { table: "world" });
       const event = await changed(watch);
@@ -172,9 +172,9 @@ test("WATCH: dropped table ends iteration with NO_TABLE", { timeout: 15000 }, as
   await withWorld(async (_, client) => {
     const watch = await client.watch("world");
     try {
-      const pending = watch.next();
+      const terminated = noTableAfterProgress(watch);
       await client.dropTable("world");
-      await assert.rejects(pending, (error: unknown) => error instanceof ChunkServerError && error.serverCode === "NO_TABLE");
+      await terminated;
     } finally { await watch.close(); }
     assert.equal(await client.ping(), "PONG");
   });
