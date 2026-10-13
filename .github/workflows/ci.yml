@@ -29,17 +29,21 @@ jobs:
         env:
           CANDIDATE_BRANCH: ${{ github.head_ref || github.ref_name }}
         run: |
-          if git ls-remote --exit-code --heads \
+          SERVER_REF=main
+          if REMOTE_REFS=$(git ls-remote --exit-code --heads \
             https://github.com/chunkdb/chunkdb.git \
-            "refs/heads/${CANDIDATE_BRANCH}" > /dev/null; then
-            SERVER_REF="${CANDIDATE_BRANCH}"
+            "refs/heads/${CANDIDATE_BRANCH}"); then
+            while IFS=$'\t' read -r object_id remote_ref; do
+              if [ "$remote_ref" = "refs/heads/${CANDIDATE_BRANCH}" ]; then
+                SERVER_REF="${CANDIDATE_BRANCH}"
+              fi
+            done <<< "$REMOTE_REFS"
           else
             status=$?
             if [ "$status" -ne 2 ]; then
               echo "Failed to look up chunkdb branch (git exit $status)" >&2
               exit "$status"
             fi
-            SERVER_REF=main
           fi
           echo "ref=${SERVER_REF}" >> "$GITHUB_OUTPUT"
 
