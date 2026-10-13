@@ -4,6 +4,22 @@ export { ChunkWatch } from "./watch";
 export { emptyChunk } from "./chunk-form";
 export {
   ChunkAuthError,
+  ChunkConditionFailedError,
+  ChunkBusyError,
+  ChunkDiskFullError,
+  ChunkRateLimitedError,
+  ChunkOutcomeUnknownError,
+  ChunkMigrationMismatchError,
+  ChunkSlotBusyError,
+  ChunkCheckFailedError,
+  ChunkCancelledError,
+  ChunkStatementTimeoutError,
+  ChunkKilledError,
+  ChunkUnknownCommandError,
+  ChunkUnknownColumnTypeError,
+  retryClassOf,
+  parseErrorFields,
+  type ChunkRetryClass,
   ChunkConflictError,
   ChunkConnectionError,
   ChunkError,
@@ -16,7 +32,7 @@ export {
   ChunkTlsError,
   ChunkVersionMismatchError,
 } from "./errors";
-export { encodeStatement, parseReply } from "./protocol";
+export { countParameters, encodeStatement, parseReply } from "./protocol";
 export type {
   ArrayReply,
   BooleanReply,
@@ -35,6 +51,11 @@ export { ChunkBits, encodeParameter, formatColumnType, parseColumnType } from ".
 export { formatChunkUri, parseChunkUri, tableFromUriPath } from "./uri";
 export { scramVerifier } from "./scram";
 export type {
+  ChunkBlockMetadata,
+  ChunkAreaMetadata,
+  ChunkSchemaVersion,
+  ChunkFeatureStatus,
+  ChunkStatus,
   ChunkArea,
   ChunkAreaEntry,
   ChunkAreaRawEntry,
@@ -42,6 +63,10 @@ export type {
   ChunkClientOptions,
   ChunkColumn,
   ChunkChangeEvent,
+  ChunkProgressEvent,
+  ChunkChunksEvent,
+  ChunkCatalogEvent,
+  ChunkSlotOptions,
   ChunkSchemaEvent,
   ChunkResyncEvent,
   ChunkPosition,

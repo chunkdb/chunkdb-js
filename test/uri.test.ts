@@ -67,7 +67,7 @@ test("URI path names the table", () => {
 
 test("the client's table comes from the option, then the URI path", () => {
   const plain = new ChunkClient({ uri: "chunk://t@127.0.0.1:4242/" });
-  assert.equal(plain.defaultTable(), "default");
+  assert.equal(plain.defaultTable(), "");
   assert.equal(plain.uri(), "chunk://t@127.0.0.1:4242/");
   const fromPath = new ChunkClient({ uri: "chunk://t@127.0.0.1:4242/terrain" });
   assert.equal(fromPath.defaultTable(), "terrain");

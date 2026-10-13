@@ -4,6 +4,19 @@ import tls from "node:tls";
 
 import {
   ChunkAuthError,
+  ChunkConditionFailedError,
+  ChunkBusyError,
+  ChunkDiskFullError,
+  ChunkRateLimitedError,
+  ChunkOutcomeUnknownError,
+  ChunkMigrationMismatchError,
+  ChunkSlotBusyError,
+  ChunkCheckFailedError,
+  ChunkCancelledError,
+  ChunkStatementTimeoutError,
+  ChunkKilledError,
+  ChunkUnknownCommandError,
+  parseErrorFields,
   ChunkConflictError,
   ChunkConnectionError,
   ChunkMigrationError,
@@ -18,7 +31,7 @@ import {
 } from "./errors";
 import { chunkFormLimit, decodeChunkForm, encodeChunkForm } from "./chunk-form";
 import { encodeStatement, ReplyReader, type ChunkParameter, type ChunkReply, type ErrorReply, type PushReply } from "./protocol";
-import { ChunkWatch, kWatchAck, kWatchPause, kWatchStream } from "./watch";
+import { filterClause, ChunkWatch, kWatchAck, kWatchPause, kWatchStream } from "./watch";
 import { parseSlots, slotName } from "./slots";
 import {
   MIN_SCRAM_ITERATIONS,
@@ -29,9 +42,12 @@ import {
   type ScramFinal,
   type ScramLogin,
 } from "./scram";
-import { integerOf, mapOf, parseDescribe, parseServerInfo, textOf, type TableLayout } from "./schema";
+import { integerOf, mapOf, parseDescribe, parseServerInfo, parseStatus, uint64Of, textOf, type TableLayout } from "./schema";
 import { formatChunkUri, parseChunkUri, tableFromUriPath } from "./uri";
 import type {
+  ChunkBlockMetadata,
+  ChunkAreaMetadata,
+  ChunkStatus,
   ChunkArea,
   ChunkAreaEntry,
   ChunkAreaRawEntry,
@@ -49,6 +65,7 @@ import type {
   ChunkScanPage,
   ChunkServerInfo,
   ChunkSlot,
+  ChunkSlotOptions,
   ChunkState,
   ChunkStateInput,
   ChunkTableChange,
@@ -96,6 +113,7 @@ interface ResolvedOptions {
   uri: ParsedChunkUri;
   pipelineDepth: number;
   table: string;
+  helloOptions?: Readonly<Record<string, ChunkValue>>;
 }
 
 // The place of one operation in the order statements are written: it
@@ -148,18 +166,14 @@ const PROTOCOL_VERSION = 3;
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 4242;
 const DEFAULT_TIMEOUT_MS = 5000;
-const DEFAULT_TABLE = "default";
+const DEFAULT_TABLE = "";
 const DEFAULT_TRANSACTION_RETRIES = 5;
 
-// Server messages (src/engine_cql.cpp) that mean the cached schema is out
-// of date: a parameter frame of the wrong size for its column, or a column
-// the table no longer has.
-const WRONG_SIZE = /^\$[0-9]+ for column .+ must be [0-9]+ bytes, got [0-9]+$/;
-const NO_COLUMN = /^the table has no column /;
 const TABLE_STATEMENT = /^\s*(?:migrate\s+'[a-z_][a-z0-9_]{0,62}'\s+)?(?:create|alter|drop)\s+table\s+([a-z_][a-z0-9_]*)/i;
 const RIGHTS: readonly ChunkRight[] = ["READ", "WRITE", "ADMIN"];
 // The statements of the login, sent while connecting.
 const HANDSHAKE = new Set(["HELLO", "AUTH"]);
+const PUSH_KINDS = new Set(["schema", "change", "progress", "resync", "chunks", "catalog"]);
 
 const TABLE_OPTION_NAMES: Record<keyof ChunkTableOptions, string> = {
   durabilityMode: "durability_mode",
@@ -172,19 +186,9 @@ const TABLE_OPTION_NAMES: Record<keyof ChunkTableOptions, string> = {
   slotMaxBytes: "slot_max_bytes",
 };
 
-// Error replies after which the server closes the connection: a request it
-// cannot frame (BAD_REQUEST), and a statement with parameters refused before
-// its frames are read, which could not be told apart from the next
-// statement (src/server_connection.cpp, CommandEngine::PlanParameters).
-function closesConnection(reply: ErrorReply, withParameters: boolean): boolean {
-  if (reply.code === "BAD_REQUEST") {
-    return true;
-  }
-  return (
-    withParameters &&
-    (["SYNTAX", "NO_TABLE"].includes(reply.code) ||
-      (reply.code === "INVALID_ARGUMENT" && NO_COLUMN.test(reply.message)))
-  );
+// Framing failures close the connection; semantic failures have drained their frames.
+function closesConnection(reply: ErrorReply, _withParameters: boolean): boolean {
+  return reply.code === "BAD_REQUEST" || reply.code === "PROTOCOL";
 }
 
 /** The table a `CREATE` / `ALTER` / `DROP TABLE` statement names, or null. */
@@ -242,6 +246,7 @@ function resolveOptions(options: ChunkClientOptions = {}): ResolvedOptions {
     key: options.key,
     pipelineDepth: Math.max(1, options.pipelineDepth ?? 1),
     table: named ?? DEFAULT_TABLE,
+    helloOptions: options.helloOptions,
     uri: {
       scheme: secure ? "chunks" : "chunk",
       secure,
@@ -272,10 +277,7 @@ function expectOk(reply: ChunkReply, command: string, value = "OK"): void {
 }
 
 function versionOf(reply: ChunkReply, command: string): bigint {
-  if (reply.type !== "integer" || reply.value < 0n) {
-    throw new ChunkProtocolError(`expected a chunk version from ${command}`, { phase: "protocol", command });
-  }
-  return reply.value;
+  return uint64Of(reply, "chunk version", command);
 }
 
 function bulkOf(reply: ChunkReply, command: string): Buffer {
@@ -676,10 +678,23 @@ export class ChunkClient {
     });
   }
 
-  /** Creates a durable slot; requires ADMIN on the table. */
-  createSlot(table: string, name: string): Promise<void> {
+  /** Enables a directory feature explicitly; requires ADMIN on `*`. */
+  enableFeature(name: string): Promise<void> {
     return this.enqueue(async () => {
-      const statement = `CREATE SLOT ${slotName(name)} ON ${checkName(table, "a table name")}`;
+      const statement = `ENABLE FEATURE ${checkName(name, "a feature name")}`;
+      expectOk(await this.run(statement, [], "ENABLE FEATURE"), "ENABLE FEATURE");
+    });
+  }
+
+  /** Protected directory and table feature masks; requires ADMIN on `*`. */
+  showStatus(): Promise<ChunkStatus> {
+    return this.enqueue(async () => parseStatus(await this.run("SHOW STATUS", [], "SHOW STATUS")));
+  }
+
+  /** Creates a durable slot; requires ADMIN on the table. */
+  createSlot(table: string, name: string, options: ChunkSlotOptions = {}): Promise<void> {
+    return this.enqueue(async () => {
+      const statement = `CREATE SLOT ${options.ifNotExists ? "IF NOT EXISTS " : ""}${slotName(name)} ON ${checkName(table, "a table name")}${filterClause(options)}`;
       expectOk(await this.run(statement, [], "CREATE SLOT"), "CREATE SLOT");
     });
   }
@@ -778,6 +793,11 @@ export class ChunkClient {
     return this.enqueue(() => this.getBlockOp(x, y, options));
   }
 
+  /** Row, chunk version and schema version from one read boundary. */
+  getBlockWithMetadata(x: number, y: number, options: ChunkReadOptions = {}): Promise<ChunkBlockMetadata> {
+    return this.enqueue(() => this.getBlockWithMetadataOp(x, y, options));
+  }
+
   /**
    * Sets columns of a block; a new block takes defaults for the others.
    * Values travel as parameters. Resolves the chunk version after the write.
@@ -831,6 +851,14 @@ export class ChunkClient {
    */
   getArea(area: ChunkArea, options: ChunkReadOptions = {}): Promise<ChunkAreaEntry[]> {
     return this.enqueue(() => this.getAreaOp(area, options));
+  }
+
+  getAreaWithSchema(area: ChunkArea, options: ChunkReadOptions = {}): Promise<ChunkAreaMetadata<ChunkAreaEntry>> {
+    return this.enqueue(() => this.getAreaWithSchemaOp(area, options, false));
+  }
+
+  getAreaRawWithSchema(area: ChunkArea, options: ChunkReadOptions = {}): Promise<ChunkAreaMetadata<ChunkAreaRawEntry>> {
+    return this.enqueue(() => this.getAreaWithSchemaOp(area, options, true));
   }
 
   /** `getArea` with each chunk as the server sends its form. */
@@ -1044,19 +1072,41 @@ export class ChunkClient {
       if (reply.type === "null") {
         return null;
       }
-      if (reply.type !== "array" || reply.items.length !== indexes.length) {
+      if (reply.type !== "array" || reply.items.length < indexes.length) {
         throw new StaleSchemaError(`GET BLOCK answered ${reply.type === "array" ? reply.items.length : reply.type} values for ${indexes.length} columns`, {
           phase: "protocol",
           command: "GET BLOCK",
         });
       }
-      const row: ChunkRow = {};
-      indexes.forEach((index, i) => {
+      return Object.fromEntries(indexes.map((index, i) => {
         const column = layout.schema.columns[index];
-        row[column.name] = valueFromReply(column, reply.items[i]);
-      });
-      return row;
+        return [column.name, valueFromReply(column, reply.items[i])];
+      }));
     });
+  }
+
+  private async getBlockWithMetadataOp(x: number, y: number, options: ChunkReadOptions): Promise<ChunkBlockMetadata> {
+    const table = this.tableOf(options);
+    return this.withLayout(table, false, async (layout) => {
+      const indexes = columnIndexes(layout, options.columns);
+      const names = indexes.map((index) => layout.schema.columns[index].name);
+      const statement = `GET BLOCK ${checkCoordinate(x, "x")} ${checkCoordinate(y, "y")} FROM ${table}${columnsClause(names)} WITH VERSION WITH SCHEMA`;
+      const reply = await this.run(statement, [], "GET BLOCK");
+      const items = itemsOf(reply, "GET BLOCK");
+      if (items.length < 3) throw new ChunkProtocolError("GET BLOCK metadata is missing fields", { phase: "protocol", command: "GET BLOCK" });
+      const version = items[0].type === "null" ? null : uint64Of(items[0], "version", "GET BLOCK");
+      const schemaVersion = uint64Of(items[1], "schema version", "GET BLOCK");
+      this.checkReadSchema(layout, schemaVersion);
+      const values = items[2];
+      if (values.type === "null") return { version, schemaVersion, row: null };
+      if (values.type !== "array" || values.items.length < indexes.length) throw new StaleSchemaError("GET BLOCK row does not match schema", { phase: "protocol", command: "GET BLOCK" });
+      const row = Object.fromEntries(indexes.map((index, i) => [layout.schema.columns[index].name, valueFromReply(layout.schema.columns[index], values.items[i])]));
+      return { version, schemaVersion, row };
+    });
+  }
+
+  private checkReadSchema(layout: TableLayout, version: bigint): void {
+    if (version !== BigInt(layout.schema.version)) throw new StaleSchemaError("read metadata differs from cached schema", { phase: "protocol" });
   }
 
   private async setBlockOp(
@@ -1146,19 +1196,39 @@ export class ChunkClient {
       const indexes = columnIndexes(layout, options.columns);
       const names = indexes.map((index) => layout.schema.columns[index].name);
       const reply = await this.run(`GET AREA ${clause} FROM ${table}${columnsClause(names)}`, [], "GET AREA");
-      return this.areaEntries(reply).map(({ cx, cy, chunk }) => ({
+      return this.areaEntries(reply, layout.schema.dims).map(({ cx, cy, cz, chunk }) => ({
         cx,
         cy,
+        ...(cz === undefined ? {} : { cz }),
         chunk: decodeChunkForm(layout, chunk, indexes),
       }));
     });
   }
 
+  private getAreaWithSchemaOp(area: ChunkArea, options: ChunkReadOptions, raw: false): Promise<ChunkAreaMetadata<ChunkAreaEntry>>;
+  private getAreaWithSchemaOp(area: ChunkArea, options: ChunkReadOptions, raw: true): Promise<ChunkAreaMetadata<ChunkAreaRawEntry>>;
+  private async getAreaWithSchemaOp(area: ChunkArea, options: ChunkReadOptions, raw: boolean): Promise<ChunkAreaMetadata<ChunkAreaEntry | ChunkAreaRawEntry>> {
+    const table = this.tableOf(options);
+    return this.withLayout(table, false, async (layout) => {
+      const indexes = columnIndexes(layout, options.columns);
+      const names = indexes.map((index) => layout.schema.columns[index].name);
+      const reply = await this.run(`GET AREA ${areaClause(area)} FROM ${table}${columnsClause(names)} WITH SCHEMA`, [], "GET AREA");
+      const items = itemsOf(reply, "GET AREA");
+      if (items.length < 2) throw new ChunkProtocolError("GET AREA metadata is missing fields", { phase: "protocol", command: "GET AREA" });
+      const schemaVersion = uint64Of(items[0], "schema version", "GET AREA");
+      this.checkReadSchema(layout, schemaVersion);
+      const entries = this.areaEntries(items[1], layout.schema.dims);
+      return { schemaVersion, entries: raw ? entries : entries.map(({ cx, cy, cz, chunk }) => ({ cx, cy, ...(cz === undefined ? {} : { cz }), chunk: decodeChunkForm(layout, chunk, indexes) })) };
+    });
+  }
+
   private async getAreaRawOp(area: ChunkArea, options: ChunkReadOptions): Promise<ChunkAreaRawEntry[]> {
     const table = this.tableOf(options);
-    const names = (options.columns ?? []).map((name) => checkName(name, "a column name"));
-    const reply = await this.run(`GET AREA ${areaClause(area)} FROM ${table}${columnsClause(names)}`, [], "GET AREA");
-    return this.areaEntries(reply);
+    return this.withLayout(table, false, async (layout) => {
+      const names = (options.columns ?? []).map((name) => checkName(name, "a column name"));
+      const reply = await this.run(`GET AREA ${areaClause(area)} FROM ${table}${columnsClause(names)}`, [], "GET AREA");
+      return this.areaEntries(reply, layout.schema.dims);
+    });
   }
 
   // BEGIN, the callback of one attempt, then COMMIT; ROLLBACK when it
@@ -1241,6 +1311,7 @@ export class ChunkClient {
     };
     return {
       getBlock: (x, y, options = {}) => call(() => this.getBlockOp(x, y, options)),
+      getBlockWithMetadata: (x, y, options = {}) => call(() => this.getBlockWithMetadataOp(x, y, options)),
       setBlock: (x, y, values, options = {}) => write(options, "SET BLOCK", () => this.setBlockOp(x, y, values, options)),
       deleteBlock: (x, y, options = {}) => write(options, "DELETE BLOCK", () => this.deleteBlockOp(x, y, options)),
       getChunk: (cx, cy, options = {}) => call(() => this.getChunkOp(cx, cy, options)),
@@ -1249,6 +1320,8 @@ export class ChunkClient {
       setChunkRaw: (cx, cy, form, options = {}) => write(options, "SET CHUNK", () => this.setChunkRawOp(cx, cy, form, options)),
       getArea: (area, options = {}) => call(() => this.getAreaOp(area, options)),
       getAreaRaw: (area, options = {}) => call(() => this.getAreaRawOp(area, options)),
+      getAreaWithSchema: (area, options = {}) => call(() => this.getAreaWithSchemaOp(area, options, false)),
+      getAreaRawWithSchema: (area, options = {}) => call(() => this.getAreaWithSchemaOp(area, options, true)),
     };
   }
 
@@ -1312,7 +1385,9 @@ export class ChunkClient {
   }
 
   private tableOf(options: ChunkTableOption | undefined): string {
-    return checkName(options?.table ?? this.options.table, "a table name");
+    const table = options?.table ?? this.options.table;
+    if (table === "") throw requestError("name a table through the URI path, table option or method");
+    return checkName(table, "a table name");
   }
 
   private async tableStatement(table: string, statement: string, command: string): Promise<void> {
@@ -1328,13 +1403,16 @@ export class ChunkClient {
     this.schemaFetches.delete(table);
   }
 
-  private areaEntries(reply: ChunkReply): ChunkAreaRawEntry[] {
+  private areaEntries(reply: ChunkReply, dims = 2): ChunkAreaRawEntry[] {
     const command = "GET AREA";
+    if (dims !== 2 && dims !== 3) throw new ChunkProtocolError("unsupported GET AREA dimensions", { phase: "protocol", command });
     return itemsOf(reply, command).map((item) => {
-      if (item.type !== "array" || item.items.length !== 3) {
+      if (item.type !== "array" || item.items.length < dims + 1) {
         throw new ChunkProtocolError("malformed GET AREA entry", { phase: "protocol", command });
       }
-      return { ...coordOf(item, command), chunk: bulkOf(item.items[2], command) };
+      const z = dims === 3 ? item.items[2] : undefined;
+      if (z !== undefined && (z.type !== "integer" || z.value < -(1n << 63n) || z.value >= (1n << 63n))) throw new ChunkProtocolError("invalid GET AREA z coordinate", { phase: "protocol", command });
+      return { ...coordOf(item, command), ...(z?.type === "integer" ? { cz: z.value } : {}), chunk: bulkOf(item.items[dims], command) };
     });
   }
 
@@ -1395,24 +1473,14 @@ export class ChunkClient {
     }
   }
 
-  private isStaleSchema(error: unknown, write: boolean): boolean {
-    if (error instanceof StaleSchemaError) {
-      return true;
-    }
-    if (!(error instanceof ChunkServerError) || error.serverCode !== "INVALID_ARGUMENT") {
-      return false;
-    }
-    const message = error.serverMessage;
-    // A write with parameters naming a column the table no longer has is
-    // refused before its frames are read, and the server closes the
-    // connection: it is not retried.
-    return WRONG_SIZE.test(message) || (!write && NO_COLUMN.test(message));
+  private isStaleSchema(error: unknown, _write: boolean): boolean {
+    return error instanceof StaleSchemaError || error instanceof ChunkSchemaMismatchError;
   }
 
   private forgetAfter(table: string, error: unknown, write: boolean): void {
     if (
       error instanceof ChunkServerError &&
-      (error.serverCode === "NO_TABLE" || (write && error.serverCode === "INVALID_ARGUMENT" && NO_COLUMN.test(error.serverMessage)))
+      error.serverCode === "NO_TABLE"
     ) {
       this.forget(table);
     }
@@ -1521,11 +1589,13 @@ export class ChunkClient {
     const user = this.options.user;
     let login: ScramLogin | null = null;
     let reply: ChunkReply;
+    const options = Object.entries(this.options.helloOptions ?? {});
+    const withClause = options.length === 0 ? "" : " WITH " + options.map(([name, value]) => `${checkName(name.toLowerCase(), "a HELLO option")} = ${formatLiteral(value)}`).join(", ");
     if (user === "") {
-      reply = await this.send(`HELLO ${PROTOCOL_VERSION}`, [], "HELLO");
+      reply = await this.send(`HELLO ${PROTOCOL_VERSION}${withClause}`, [], "HELLO");
     } else {
       login = startScramLogin(user);
-      reply = await this.send(`HELLO ${PROTOCOL_VERSION} USER ${user} $1`, [Buffer.from(login.first, "utf8")], "HELLO");
+      reply = await this.send(`HELLO ${PROTOCOL_VERSION} USER ${user} $1${withClause}`, [Buffer.from(login.first, "utf8")], "HELLO");
     }
     if (reply.type === "error") {
       // An older chunkdb answers `-ERR PROTOCOL expected HELLO 2`; a 1.x
@@ -1590,29 +1660,28 @@ export class ChunkClient {
     if (reply.code === "PERMISSION_DENIED") {
       return new ChunkPermissionError(reply.code, reply.message, { phase: "response", command });
     }
-    if (reply.code === "VERSION_MISMATCH") {
-      const current = /^current=([0-9]+)$/.exec(reply.message);
-      if (current === null) {
-        return new ChunkProtocolError(`unexpected VERSION_MISMATCH message: ${reply.message}`, {
-          phase: "protocol",
-          command,
-        });
+    const fields = parseErrorFields(reply.message).keys;
+    const current = fields.current;
+    if (reply.code === "VERSION_MISMATCH" || reply.code === "SCHEMA_MISMATCH") {
+      if (!/^[0-9]+$/.test(current ?? "") || BigInt(current) > (1n << 64n) - 1n) {
+        return new ChunkProtocolError(`unexpected ${reply.code} metadata: ${reply.message}`, { phase: "protocol", command });
       }
-      return new ChunkVersionMismatchError(reply.message, BigInt(current[1]), { phase: "response", command });
+      return reply.code === "VERSION_MISMATCH"
+        ? new ChunkVersionMismatchError(reply.message, BigInt(current), { phase: "response", command })
+        : new ChunkSchemaMismatchError(reply.message, BigInt(current), { phase: "response", command });
     }
-    if (reply.code === "CONFLICT" && command !== "MIGRATE") {
-      return new ChunkConflictError(reply.message, reply.message.split(" ", 1)[0], { phase: "response", command });
+    if (reply.code === "CONFLICT") {
+      return new ChunkConflictError(reply.message, fields.reason ?? reply.message.split(" ", 1)[0], { phase: "response", command });
     }
-    if (reply.code === "SCHEMA_MISMATCH") {
-      const current = /^current=([0-9]+)(?: |$)/.exec(reply.message);
-      if (current === null) {
-        return new ChunkProtocolError(`unexpected SCHEMA_MISMATCH message: ${reply.message}`, {
-          phase: "protocol",
-          command,
-        });
-      }
-      return new ChunkSchemaMismatchError(reply.message, BigInt(current[1]), { phase: "response", command });
-    }
+    const classes: Record<string, typeof ChunkServerError> = {
+      CONDITION_FAILED: ChunkConditionFailedError, BUSY: ChunkBusyError, DISK_FULL: ChunkDiskFullError,
+      RATE_LIMITED: ChunkRateLimitedError, OUTCOME_UNKNOWN: ChunkOutcomeUnknownError,
+      MIGRATION_MISMATCH: ChunkMigrationMismatchError, SLOT_BUSY: ChunkSlotBusyError,
+      CHECK_FAILED: ChunkCheckFailedError, CANCELLED: ChunkCancelledError,
+      TIMEOUT: ChunkStatementTimeoutError, KILLED: ChunkKilledError, UNKNOWN_COMMAND: ChunkUnknownCommandError,
+    };
+    const ErrorClass = Object.hasOwn(classes, reply.code) ? classes[reply.code] : undefined;
+    if (ErrorClass !== undefined) return new ErrorClass(reply.code, reply.message, { phase: "response", command });
     return new ChunkServerError(reply.code, reply.message, { phase: "response", command });
   }
 
@@ -1728,7 +1797,7 @@ export class ChunkClient {
   }
 
   private drainReplies(): void {
-    while (this.pendingQueue.length > 0 || (this.watchReceiver !== null && !this.watchPaused)) {
+    while (this.pendingQueue.length > 0 || !this.watchPaused) {
       let reply: ChunkReply | null;
       try {
         reply = this.reader.next();
@@ -1742,7 +1811,11 @@ export class ChunkClient {
       if (reply === null) {
         return;
       }
-      if (reply.type === "push" && this.watchReceiver !== null) {
+      if (reply.type === "push") {
+        const head = reply.items[0];
+        const kind = head?.type === "bulk" ? head.value.toString("utf8") : head?.type === "simple" ? head.value : null;
+        if (kind !== null && !PUSH_KINDS.has(kind)) continue;
+        if (this.watchReceiver === null) continue;
         if (!this.watchStarted) {
           const socket = this.socket;
           this.clearConnectionState(new ChunkProtocolError("WATCH push preceded its start reply", { phase: "protocol", command: "WATCH" }));

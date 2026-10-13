@@ -373,7 +373,7 @@ test("WATCH rows preserve a column named __proto__ as an own value", async () =>
 });
 
 test("WATCH fails malformed event rows and unsolicited replies", async () => {
-  for (const frame of [change().replace("*2\r\n:3\r\n:7\r\n", "*1\r\n:3\r\n"), "+PONG\r\n", ">3\r\n" + bulk("other") + bulk(EPOCH) + ":2\r\n"]) {
+  for (const frame of [change().replace("*2\r\n:3\r\n:7\r\n", "*1\r\n:3\r\n"), "+PONG\r\n"]) {
     const ready = deferred<Socket>();
     const server = await startFakeServer(({ line }, socket) => {
       if (line === "HELLO 3") return FAKE_HELLO;
