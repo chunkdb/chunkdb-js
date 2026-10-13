@@ -155,6 +155,9 @@ test("the schema cache follows changes another client makes", async () => {
     // A table dropped and created again with other columns.
     await admin.dropTable("t");
     await admin.createTable("t", { columns: [{ name: "flag", type: "bool" }], chunk: { width: 2, height: 2 } });
+    await assert.rejects(client.getBlock(0, 0), (error: unknown) =>
+      error instanceof ChunkServerError && error.serverCode === "INVALID_ARGUMENT" && error.retryClass === "fatal");
+    client.clearSchemaCache("t");
     assert.equal(await client.getBlock(0, 0), null);
     await client.setBlock(0, 0, { flag: true });
     assert.deepEqual(await client.getBlock(0, 0), { flag: true });
