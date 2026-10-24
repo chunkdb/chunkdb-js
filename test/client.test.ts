@@ -240,6 +240,20 @@ test("pipelined statements reach the server in call order", async () => {
   }
 });
 
+test("calls made before the first connect wait for it", async () => {
+  const server = await startFakeServer((request) => hello(request) ?? "+PONG\r\n");
+  try {
+    // The default pipeline depth of 1 queues the second and third calls
+    // while the first one connects.
+    const client = new ChunkClient({ port: server.port });
+    assert.deepEqual(await Promise.all([client.ping(), client.ping(), client.ping()]), ["PONG", "PONG", "PONG"]);
+    assert.deepEqual(server.requests.map((request) => request.line), ["HELLO 3", "PING", "PING", "PING"]);
+    await client.close();
+  } finally {
+    await server.close();
+  }
+});
+
 test("a frame of the wrong size refreshes the schema and retries once", async () => {
   let hType = "f32";
   const server = await startFakeServer((request) => {
