@@ -1537,7 +1537,8 @@ export class ChunkClient {
   }
 
   private async connectInternal(): Promise<this> {
-    this.clearConnectionState();
+    // Calls queued behind the one that started this connect wait for it.
+    this.clearConnectionState(undefined, true);
     this.info = null;
     const socket = await this.openSocket();
     if (this.disposed) {
@@ -1922,7 +1923,9 @@ export class ChunkClient {
     }
   }
 
-  private clearConnectionState(error?: Error): void {
+  // Resets the connection. Operations still waiting to start are rejected
+  // unless `keepWaiters` is set: a new connection is about to serve them.
+  private clearConnectionState(error?: Error, keepWaiters = false): void {
     const failed = this.watchFailure;
     this.watchReceiver = null;
     this.watchFailure = null;
@@ -1935,8 +1938,10 @@ export class ChunkClient {
     this.socket = null;
     const connErr = error ?? new ChunkConnectionError("connection closed", { phase: "connect" });
     // Reject enqueue waiters that haven't started yet
-    const waiters = this.opWaiters.splice(0);
-    for (const w of waiters) w.reject(connErr);
+    if (!keepWaiters) {
+      const waiters = this.opWaiters.splice(0);
+      for (const w of waiters) w.reject(connErr);
+    }
     if (error !== undefined) {
       this.failAllPending(error);
       failed?.(error);
