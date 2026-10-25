@@ -5,12 +5,12 @@ import { ChunkServerError, connectPool, connectUri, type ChunkChangeEvent, type 
 import { startServer } from "./helpers";
 
 async function changed(watch: ChunkWatch): Promise<ChunkChangeEvent> {
-  let event = await watch.next();
-  assert.equal(event.done, false);
-  if (event.value.kind === "schema") event = await watch.next();
-  assert.equal(event.done, false);
-  assert.equal(event.value.kind, "change");
-  return event.value;
+  while (true) {
+    const event = await watch.next();
+    assert.equal(event.done, false);
+    if (event.value.kind === "resync") throw new Error("slot needs state rebuild");
+    if (event.value.kind === "change") return event.value;
+  }
 }
 
 for (const tls of [false, true]) {
@@ -27,7 +27,7 @@ for (const tls of [false, true]) {
       const first = await api.setBlock(0, 0, { n: 1 }, { table: "world" });
       watch = await api.watch("world", { slot: "consumer" });
       assert.deepEqual(watch.start, { epoch: slot.epoch, revision: slot.acked });
-      await assert.rejects(api.watch("world", { slot: "consumer" }), (error: unknown) => error instanceof ChunkServerError && error.serverCode === "BUSY");
+      await assert.rejects(api.watch("world", { slot: "consumer" }), (error: unknown) => error instanceof ChunkServerError && error.serverCode === "SLOT_BUSY");
       const one = await changed(watch);
       assert.equal(one.position.revision, first); assert.equal(one.user, server.user);
       assert.deepEqual(one.blocks[0].before, null); assert.deepEqual(one.blocks[0].after, { n: 1 });

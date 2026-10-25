@@ -4,10 +4,19 @@
 With `new ChunkClient(options)`, call `connect()` or let the first operation connect.
 Use `user`, `password`, `host`, `port`, `table` and `tls` options to override URI settings.
 
-`uri()` omits the password; `defaultTable()` returns the chosen table.
+`uri()` omits the password; `defaultTable()` returns the chosen table, or an empty string when none was selected.
+A table operation needs a URI path, connection `table` option or method `table` option.
+Without one it fails locally; the client does not select an implicit table.
 `serverInfo()` is null until login completes.
 A client has one connection, with replies in request order.
 `pipelineDepth` defaults to 1 and limits requests in flight.
+
+`helloOptions` sends HELLO WITH options such as `{ client_name: "renderer", statement_timeout_ms: 500 }`.
+`serverInfo()` exposes `connectionId`, `features`, applied `options`, `notApplied`, `idleTimeoutMs` and `limits` when the server provides them.
+
+`client_name` is applied; timeout and default-tag options currently return `implementation_pending` rather than changing runtime behavior.
+Inspect `notApplied` before relying on an option, including an unknown option's `unknown_option` reason.
+`commandTimeoutMs` remains the client's independent reply timeout.
 
 ## Use a pool
 
@@ -68,13 +77,30 @@ Use `chunks://` or `tls: true` for TLS.
 | `ChunkPermissionError` | Inspect `serverMessage` for the required right and table. |
 | `ChunkVersionMismatchError` | Re-read the chunk; `currentVersion` identifies its current state. |
 | `ChunkSchemaMismatchError` | Re-read the schema; `currentSchemaVersion` identifies its current layout. |
-| `ChunkConflictError` | Retry the transaction; inspect `reason`. |
+| `ChunkConflictError` | The transaction helper reruns its callback; inspect `reason`. |
+| `ChunkConditionFailedError` | Re-read state before deciding on another conditional write. |
+| `ChunkBusyError`, `ChunkDiskFullError`, `ChunkRateLimitedError` | Back off before retrying; inspect `retryAfterMs` when present. |
+| `ChunkOutcomeUnknownError` | Reconcile the write's outcome before deciding whether to retry. |
+| `ChunkMigrationMismatchError` | Keep the recorded migration name and statement unchanged. |
+| `ChunkSlotBusyError` | Release the slot's owner or request an authorized takeover. |
+| `ChunkCheckFailedError`, `ChunkCancelledError`, `ChunkStatementTimeoutError`, `ChunkKilledError` | Handle the failure explicitly; these are fatal retry classes. |
+| `ChunkUnknownCommandError` | Check command spelling and server capabilities. |
 | `ChunkMigrationError` | Inspect the failed step, earlier results and cause. |
 | `ChunkServerError` | Inspect `serverCode` and `serverMessage`. |
 | `ChunkConnectionError` | Check the endpoint, `code` and `cause`. |
 | `ChunkTimeoutError` | Check the endpoint and timeout settings. |
 | `ChunkTlsError` | Check certificates and TLS settings. |
 | `ChunkProtocolError` | Check request values and server compatibility. |
+
+Server errors expose `retryClass`, decoded leading `keys`, free-text `detail` and typed diagnostic fields.
+Classification depends on the code alone; unknown codes are fatal.
+Unknown diagnostic keys remain available in `keys`; percent escapes decode whitespace, percent signs and equals signs.
+
+The client retries schema reads once after SCHEMA_MISMATCH, and transactions after CONFLICT within the configured retry limit.
+It does not automatically replay writes after OUTCOME_UNKNOWN or backoff errors.
+
+A scalar parameter carries no schema version; a width error remains INVALID_ARGUMENT rather than proving a stale schema.
+After a known external schema change, call `clearSchemaCache(table)` before deciding whether to retry that operation.
 
 All derive from `ChunkError`, with `phase` and optional `code`, `command` and `cause` fields.
 A server signature mismatch raises `ChunkConnectionError`: the server cannot prove it knows the password.

@@ -20,7 +20,7 @@ bigint
 { id: 23, light: 14 }
 ```
 
-A chunk version is an equality token identifying its written state.
+A chunk version identifies committed state and orders writes within the same table epoch.
 The result is the version assigned to written chunks, or `null` when nothing was written.
 
 ## Guarantees and limits

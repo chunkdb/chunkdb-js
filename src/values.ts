@@ -1,4 +1,4 @@
-import { ChunkProtocolError } from "./errors";
+import { ChunkProtocolError, ChunkUnknownColumnTypeError } from "./errors";
 import type { ChunkReply } from "./protocol";
 import type { ChunkColumn, ChunkColumnType, ChunkValue } from "./types";
 
@@ -147,6 +147,7 @@ export function parseColumnType(text: string): ChunkColumnType {
 
 export function formatColumnType(type: ChunkColumnType): string {
   switch (type.kind) {
+    case "unknown": return type.name;
     case "u":
     case "i":
       return `${type.kind}${type.bits}`;
@@ -165,6 +166,7 @@ export function formatColumnType(type: ChunkColumnType): string {
 /** Bits a value of `type` takes in a chunk's payload; 0 for text and bytes. */
 export function fixedWidth(type: ChunkColumnType): number {
   switch (type.kind) {
+    case "unknown": throw new ChunkUnknownColumnTypeError(`unknown column type ${type.name}; use raw chunk forms`, { phase: "request" });
     case "u":
     case "i":
       return type.bits;
@@ -289,6 +291,7 @@ export function encodeParameter(column: ChunkColumn, value: ChunkValue): Uint8Ar
   }
   const type = column.type;
   switch (type.kind) {
+    case "unknown": throw new ChunkUnknownColumnTypeError(`unknown column type ${type.name}; use raw chunk forms`, { phase: "request" });
     case "u":
     case "i":
       return littleEndian(integerOf(column, type.bits, type.kind === "i", value), 8);
@@ -323,6 +326,7 @@ export function encodeParameter(column: ChunkColumn, value: ChunkValue): Uint8Ar
 export function encodeFixedValue(column: ChunkColumn, value: ChunkValue): Uint8Array {
   const type = column.type;
   switch (type.kind) {
+    case "unknown": throw new ChunkUnknownColumnTypeError(`unknown column type ${type.name}; use raw chunk forms`, { phase: "request" });
     case "u":
     case "i":
       return littleEndian(integerOf(column, type.bits, type.kind === "i", value), Math.ceil(type.bits / 8));
@@ -362,6 +366,7 @@ function integerValue(type: ChunkColumnType, integer: bigint): number | bigint {
 export function decodeFixedValue(column: ChunkColumn, bytes: Uint8Array): ChunkValue {
   const type = column.type;
   switch (type.kind) {
+    case "unknown": throw new ChunkUnknownColumnTypeError(`unknown column type ${type.name}; use raw chunk forms`, { phase: "request" });
     case "u":
     case "i": {
       let raw = 0n;
@@ -397,11 +402,17 @@ export function valueFromReply(column: ChunkColumn, reply: ChunkReply): ChunkVal
   }
   const type = column.type;
   switch (type.kind) {
+    case "unknown":
+      if (reply.type !== "bulk") throw mismatch(column, reply);
+      return Buffer.from(reply.value);
     case "u":
     case "i":
       if (reply.type !== "integer") {
         throw mismatch(column, reply);
       }
+      const minimum = type.kind === "i" ? -(1n << BigInt(type.bits - 1)) : 0n;
+      const maximum = type.kind === "i" ? (1n << BigInt(type.bits - 1)) - 1n : (1n << BigInt(type.bits)) - 1n;
+      if (reply.value < minimum || reply.value > maximum) throw mismatch(column, reply);
       return integerValue(type, reply.value);
     case "bool":
       if (reply.type !== "boolean") {

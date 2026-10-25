@@ -156,7 +156,13 @@ test("transactions: refused statements leave the transaction open", async () => 
 
     // The server refuses other statements inside a transaction.
     assert.equal((await client.execute("BEGIN")).type, "simple");
-    await assert.rejects(client.execute("SCAN CHUNKS FROM world"), /INVALID_ARGUMENT: inside a transaction only/);
+    await assert.rejects(client.execute("SCAN CHUNKS FROM world"), (error: unknown) => {
+      assert.ok(error instanceof ChunkServerError);
+      assert.equal(error.serverCode, "INVALID_ARGUMENT");
+      assert.equal(error.reason, "invalid_argument");
+      assert.match(error.detail, /^inside a transaction only/);
+      return true;
+    });
     await assert.rejects(client.execute("SET BLOCK 0 0 IN world n = 3 IF VERSION 1"), /IF VERSION is not used inside a transaction/);
     assert.equal((await client.execute("DESCRIBE world")).type, "map");
     assert.deepEqual(await client.execute("ROLLBACK"), { type: "simple", value: "OK" });

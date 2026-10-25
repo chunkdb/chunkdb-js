@@ -7,6 +7,7 @@ This client uses CQL protocol 3 with chunkdb 2.x; see the server's [compatibilit
 ## Unreleased
 
 ### Added
+- Add extensible RESP3 decoding, structured errors, read metadata, feed progress and CHUNKS acknowledgments, HELLO options, slot filters and explicit feature helpers. (#69).
 - Rewrite user guides with checked examples and concise runtime reference. (#5).
 - Pull requests run build, unit and plain/TLS integration tests on Linux and macOS
 - Generic `BACKUP TO` integration coverage checks summaries and copied data over plain TCP and TLS

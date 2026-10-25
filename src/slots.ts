@@ -1,6 +1,6 @@
 import { ChunkProtocolError } from "./errors";
 import type { ChunkReply } from "./protocol";
-import { textOf } from "./schema";
+import { mapOf, textOf, uint64Of } from "./schema";
 import type { ChunkSlot } from "./types";
 import { checkName, requestError } from "./values";
 
@@ -37,6 +37,32 @@ export function parseSlots(reply: ChunkReply): ChunkSlot[] {
     if (!/^[a-z_][a-z0-9_]*$/.test(table) || !/^[a-z_][a-z0-9_]{0,62}$/.test(name)) return malformed("invalid table or slot name");
     if (!/^[0-9a-f]{32}$/i.test(epoch)) return malformed("invalid epoch");
     if (lost.type !== "boolean") return malformed("lost is not a boolean");
-    return { table, name, epoch: epoch.toLowerCase(), acked: uint64("acked"), retainedBytes: uint64("retained_bytes"), lost: lost.value };
+    const slot: ChunkSlot = { table, name, epoch: epoch.toLowerCase(), acked: uint64("acked"), retainedBytes: uint64("retained_bytes"), lost: lost.value };
+    if (fields.has("lost_reason")) {
+      const value = field("lost_reason");
+      slot.lostReason = value.type === "null" ? null : textOf(value, "lost_reason", command);
+    }
+    if (fields.has("filters")) {
+      const filters = mapOf(field("filters"), command);
+      const required = (key: string): ChunkReply => filters.get(key) ?? malformed(`missing filter ${key}`);
+      const list = <T>(key: string, read: (item: ChunkReply) => T): T[] | null => {
+        const value = required(key);
+        if (value.type === "null") return null;
+        if (value.type !== "array") return malformed(`filter ${key} is not an array`);
+        return value.items.map(read);
+      };
+      const area = list("area", (item) => {
+        if (item.type !== "integer" || item.value < -(1n << 63n) || item.value >= (1n << 63n)) return malformed("area coordinate is not int64");
+        return item.value;
+      });
+      if (area !== null && (area.length < 4 || area.length % 2 !== 0)) return malformed("area needs lower and upper axes");
+      if (area !== null && area.some((value, i) => i < area.length / 2 && value > area[i + area.length / 2])) return malformed("area bounds reversed");
+      const columns = list("columns", (item) => item.type === "null" ? null : textOf(item, "column name", command));
+      const columnIds = list("column_ids", (item) => uint64Of(item, "column id", command));
+      if ((columns === null) !== (columnIds === null) || columns?.length !== columnIds?.length) return malformed("column names and ids do not align");
+      const bool = (key: string) => { const value = required(key); if (value.type !== "boolean") return malformed(`${key} is not boolean`); return value.value; };
+      slot.filters = { area, columns, columnIds, noBefore: bool("no_before"), chunks: bool("chunks") };
+    }
+    return slot;
   });
 }

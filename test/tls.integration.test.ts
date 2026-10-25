@@ -8,7 +8,7 @@ test("TLS: login, typed blocks and a chunk round trip", async () => {
   const server = await startServer({ tls: true });
   try {
     // The administrator logs in over TLS.
-    const client = await connectUri(server.uri, { tlsInsecure: true });
+    const client = await connectUri(server.uri + "default", { tlsInsecure: true });
     assert.equal(client.serverInfo()?.protocol, 3);
     assert.match(client.serverInfo()?.serverSignature ?? "", /^v=/);
     assert.equal(await client.ping(), "PONG");

@@ -7,6 +7,9 @@ import { ChunkClient, tableOfStatement } from "./client";
 import type { ChunkWatch } from "./watch";
 import type { ChunkParameter, ChunkReply } from "./protocol";
 import type {
+  ChunkBlockMetadata,
+  ChunkAreaMetadata,
+  ChunkStatus,
   ChunkArea,
   ChunkAreaEntry,
   ChunkAreaRawEntry,
@@ -20,6 +23,7 @@ import type {
   ChunkScanOptions,
   ChunkScanPage,
   ChunkSlot,
+  ChunkSlotOptions,
   ChunkState,
   ChunkStateInput,
   ChunkTableChange,
@@ -224,8 +228,24 @@ export class ChunkPool {
     return this.withClient(async (client) => await client.listTables());
   }
 
-  createSlot(table: string, name: string): Promise<void> {
-    return this.withClient((client) => client.createSlot(table, name));
+  enableFeature(name: string): Promise<void> { return this.withClient((client) => client.enableFeature(name)); }
+
+  showStatus(): Promise<ChunkStatus> { return this.withClient((client) => client.showStatus()); }
+
+  getBlockWithMetadata(x: number, y: number, options: ChunkReadOptions = {}): Promise<ChunkBlockMetadata> {
+    return this.withClient((client) => client.getBlockWithMetadata(x, y, options));
+  }
+
+  getAreaWithSchema(area: ChunkArea, options: ChunkReadOptions = {}): Promise<ChunkAreaMetadata<ChunkAreaEntry>> {
+    return this.withClient((client) => client.getAreaWithSchema(area, options));
+  }
+
+  getAreaRawWithSchema(area: ChunkArea, options: ChunkReadOptions = {}): Promise<ChunkAreaMetadata<ChunkAreaRawEntry>> {
+    return this.withClient((client) => client.getAreaRawWithSchema(area, options));
+  }
+
+  createSlot(table: string, name: string, options: ChunkSlotOptions = {}): Promise<void> {
+    return this.withClient((client) => client.createSlot(table, name, options));
   }
 
   dropSlot(table: string, name: string): Promise<void> {
