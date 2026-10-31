@@ -1,5 +1,7 @@
 # @chunkdb/client
 
+[![npm](https://img.shields.io/npm/v/%40chunkdb%2Fclient)](https://www.npmjs.com/package/@chunkdb/client)
+
 Node.js and TypeScript client for [chunkdb](https://github.com/chunkdb/chunkdb), a database for grids of typed blocks.
 A block is one grid cell.
 A chunk groups a fixed rectangle of blocks.

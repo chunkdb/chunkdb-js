@@ -1,5 +1,28 @@
 # Contributing
 
+Use the [organization contribution guide](https://github.com/chunkdb/.github/blob/main/CONTRIBUTING.md) for reporting issues and proposing changes.
+
+## Local checks
+
+Use the Node.js requirement and package manager declared in `package.json`.
+Run these checks from the repository root:
+
+```bash
+npm ci
+npm run build
+npm run test:unit
+```
+
+For the full suite, including integration tests, keep a chunkdb checkout beside this repository or set `CHUNKDB_REPO_ROOT` to its absolute path:
+
+```bash
+CHUNKDB_REPO_ROOT=/path/to/chunkdb npm test
+```
+
+The test script builds a server with TLS support using CMake and OpenSSL.
+To use an existing server build instead, set both `CHUNKDB_SERVER_BIN` and `CHUNKDB_SERVER_BIN_TLS` to the corresponding absolute executable paths.
+Both may point to one TLS-enabled executable.
+Keep `README.md` focused on package users; put contributor and release instructions in their dedicated documents.
 ## Check documentation examples
 
 Run `npm run build` and `npm run test:integration` to check the examples alongside the existing integration tests.
