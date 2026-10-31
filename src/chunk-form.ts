@@ -10,7 +10,8 @@
 
 import { ChunkProtocolError, ChunkUnknownColumnTypeError } from "./errors";
 import type { TableLayout } from "./schema";
-import type { ChunkColumn, ChunkState, ChunkStateInput, ChunkTableSchema, ChunkValue } from "./types";
+import type { ChunkColumn, ChunkRow, ChunkState, ChunkStateInput, ChunkTableSchema, ChunkValue } from "./types";
+import { sectionedBlockCount } from "./sectioned-chunk";
 import {
   StaleSchemaError,
   decodeFixedValue,
@@ -304,11 +305,8 @@ export function encodeChunkForm(layout: TableLayout, state: ChunkStateInput): Bu
 }
 
 /** A chunk state of `schema`'s table without blocks, to fill and pass to `setChunk`. */
-export function emptyChunk(schema: ChunkTableSchema): { present: boolean[]; columns: Record<string, ChunkValue[]> } {
-  const blocks = schema.chunk.width * schema.chunk.height;
-  const columns: Record<string, ChunkValue[]> = {};
-  for (const column of schema.columns) {
-    columns[column.name] = new Array<ChunkValue>(blocks).fill(null);
-  }
-  return { present: new Array<boolean>(blocks).fill(false), columns };
+export function emptyChunk(schema: ChunkTableSchema): { present: boolean[]; columns: Record<string, ChunkValue[]>; metadata?: ChunkRow } {
+  const blocks = sectionedBlockCount({ schema, ids: [] });
+  const columns = Object.fromEntries(schema.columns.map((column) => [column.name, new Array<ChunkValue>(blocks).fill(null)]));
+  return { present: new Array<boolean>(blocks).fill(false), columns, ...((schema.chunkColumns?.length ?? 0) !== 0 ? { metadata: {} } : {}) };
 }

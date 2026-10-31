@@ -273,6 +273,7 @@ export interface ChunkColumn {
 export interface ChunkSize {
   width: number;
   height: number;
+  depth?: number;
 }
 
 export type ChunkDurabilityMode = "relaxed" | "fsync-wal" | "fsync-checkpoint";
@@ -334,6 +335,7 @@ export interface ChunkColumnDefinition {
 
 export interface ChunkTableDefinition {
   columns: readonly ChunkColumnDefinition[];
+  chunkColumns?: readonly ChunkColumnDefinition[];
   chunk: ChunkSize;
   large?: ChunkSize;
   options?: ChunkTableOptions;
@@ -354,6 +356,9 @@ export type ChunkTableChange =
   | { kind: "addColumn"; column: ChunkColumnDefinition }
   | { kind: "dropColumn"; column: string }
   | { kind: "renameColumn"; column: string; to: string }
+  | { kind: "addChunkColumn"; column: ChunkColumnDefinition; ifNotExists?: boolean }
+  | { kind: "dropChunkColumn"; column: string; ifExists?: boolean }
+  | { kind: "renameChunkColumn"; column: string; to: string }
   | {
       kind: "alterColumnType";
       column: string;
@@ -371,6 +376,8 @@ export type ChunkTableChange =
 export interface ChunkStateInput {
   readonly present: readonly boolean[];
   readonly columns: Readonly<Record<string, readonly ChunkValue[]>>;
+  readonly metadata?: Readonly<ChunkRow>;
+  readonly unknownSections?: ReadonlyMap<number, Uint8Array>;
 }
 
 export interface ChunkState extends ChunkStateInput {
@@ -381,6 +388,10 @@ export interface ChunkState extends ChunkStateInput {
   /** Blocks per row. */
   width: number;
   height: number;
+  depth?: number;
+  commitTimeMs?: bigint;
+  projected?: boolean;
+  private?: boolean;
   present: boolean[];
   columns: Record<string, ChunkValue[]>;
 }

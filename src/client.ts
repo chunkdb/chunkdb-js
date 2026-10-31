@@ -722,19 +722,28 @@ export class ChunkClient {
       if (definition.columns.length === 0) {
         throw requestError("a table needs at least one column", "CREATE TABLE");
       }
-      const size = (what: string, value: { width: number; height: number }) => {
-        for (const n of [value.width, value.height]) {
-          if (!Number.isSafeInteger(n) || n < 1) {
+      const dims = definition.chunk.depth === undefined ? 2 : 3;
+      const size = (what: string, value: { width: number; height: number; depth?: number }) => {
+        if ((value.depth === undefined ? 2 : 3) !== dims) throw requestError(`${what} needs ${dims} dimensions`, "CREATE TABLE");
+        const sides = [value.width, value.height, ...(dims === 3 ? [value.depth!] : [])];
+        for (const n of sides) {
+          if (!Number.isSafeInteger(n) || n < 1 || n > (what === "chunk" ? 4096 : 1_000_000)) {
             throw requestError(`${what} sizes are positive integers`, "CREATE TABLE");
           }
         }
-        return `${value.width} x ${value.height}`;
+        return sides.join(" x ");
       };
+      if (definition.chunk.width * definition.chunk.height * (definition.chunk.depth ?? 1) > 1_048_576) {
+        throw requestError("a chunk has at most 1048576 blocks", "CREATE TABLE");
+      }
       let statement =
         `CREATE TABLE ${name} (${definition.columns.map(columnDefinition).join(", ")})` +
         ` CHUNK ${size("chunk", definition.chunk)}`;
       if (definition.large !== undefined) {
         statement += ` LARGE ${size("large chunk", definition.large)}`;
+      }
+      if (definition.chunkColumns !== undefined && definition.chunkColumns.length !== 0) {
+        statement += ` CHUNK COLUMNS (${definition.chunkColumns.map(columnDefinition).join(", ")})`;
       }
       const options = Object.entries(definition.options ?? {}).filter(([, value]) => value !== undefined);
       if (options.length > 0) {
@@ -760,6 +769,15 @@ export class ChunkClient {
           break;
         case "renameColumn":
           clause = `RENAME COLUMN ${checkName(change.column, "a column name")} TO ${checkName(change.to, "a column name")}`;
+          break;
+        case "addChunkColumn":
+          clause = `ADD CHUNK COLUMN ${change.ifNotExists === true ? "IF NOT EXISTS " : ""}${columnDefinition(change.column)}`;
+          break;
+        case "dropChunkColumn":
+          clause = `DROP CHUNK COLUMN ${change.ifExists === true ? "IF EXISTS " : ""}${checkName(change.column, "a column name")}`;
+          break;
+        case "renameChunkColumn":
+          clause = `RENAME CHUNK COLUMN ${checkName(change.column, "a column name")} TO ${checkName(change.to, "a column name")}`;
           break;
         case "alterColumnType":
           clause = `ALTER COLUMN ${checkName(change.column, "a column name")} TYPE ${typeText(change.type)}`;

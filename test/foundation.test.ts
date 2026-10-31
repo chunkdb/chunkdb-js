@@ -410,7 +410,16 @@ test("foundation: unknown prototype-named error codes stay fatal server errors",
 test("foundation: raw AREA metadata uses described 3D coordinate prefixes and ignores trailing fields", { timeout: 5000 }, async () => {
   const server = await startFakeServer(({ line }) => {
     if (line === "HELLO 3") return FAKE_HELLO;
-    if (line === "DESCRIBE t") return encode(addFields(parsed(describeReply("u8")), { dims: integer(3n) }));
+    if (line === "DESCRIBE t") {
+      const description = addFields(parsed(describeReply("u8")), { dims: integer(3n) });
+      assert.equal(description.type, "map");
+      for (const name of ["chunk", "large"]) {
+        const entry = description.entries.find(([key]) => key.type === "bulk" && key.value.toString() === name)!;
+        assert.equal(entry[1].type, "array");
+        entry[1].items.push(integer(2n));
+      }
+      return encode(description);
+    }
     if (line.startsWith("GET AREA")) return encode(array(integer(1n), array(array(integer(-1n), integer(2n), integer(3n), bulk("raw"), map({ extension: array() }))), array()));
     throw new Error(line);
   });

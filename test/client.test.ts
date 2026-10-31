@@ -376,6 +376,27 @@ test("table statements are written from their definitions", async () => {
   }
 });
 
+test("three dimensional tables and chunk columns retain their separate CQL domain", async () => {
+  const server = await startFakeServer((request) => hello(request) ?? "+OK\r\n");
+  const client = await connect({ port: server.port });
+  try {
+    await client.createTable("space", { columns: [{ name: "n", type: "u8" }], chunk: { width: 2, height: 3, depth: 4 },
+      large: { width: 1_000_000, height: 8, depth: 9 }, chunkColumns: [{ name: "title", type: "text(8)", nullable: true }] });
+    await client.alterTable("space", { kind: "addChunkColumn", column: { name: "n", type: "u10", default: 3 }, ifNotExists: true });
+    await client.alterTable("space", { kind: "renameChunkColumn", column: "n", to: "status" });
+    await client.alterTable("space", { kind: "dropChunkColumn", column: "title", ifExists: true });
+    assert.deepEqual(server.requests.slice(1).map(({ line }) => line), [
+      "CREATE TABLE space (n u8) CHUNK 2 x 3 x 4 LARGE 1000000 x 8 x 9 CHUNK COLUMNS (title text(8) NULL)",
+      "ALTER TABLE space ADD CHUNK COLUMN IF NOT EXISTS n u10 DEFAULT 3",
+      "ALTER TABLE space RENAME CHUNK COLUMN n TO status",
+      "ALTER TABLE space DROP CHUNK COLUMN IF EXISTS title",
+    ]);
+    const count = server.requests.length;
+    await assert.rejects(client.createTable("bad", { columns: [{ name: "n", type: "u8" }], chunk: { width: 2, height: 2, depth: 2 }, large: { width: 2, height: 2 } }), /3 dimensions/);
+    assert.equal(server.requests.length, count);
+  } finally { await client.close(); await server.close(); }
+});
+
 test("a statement without a reply times out and the client reconnects", async () => {
   let pings = 0;
   const server = await startFakeServer((request) => {
