@@ -22,6 +22,7 @@ CHUNKDB_REPO_ROOT=/path/to/chunkdb npm test
 The test script builds a server with TLS support using CMake and OpenSSL.
 To use an existing server build instead, set both `CHUNKDB_SERVER_BIN` and `CHUNKDB_SERVER_BIN_TLS` to the corresponding absolute executable paths.
 Both may point to one TLS-enabled executable.
+Keep `CHUNKDB_REPO_ROOT` set to the source checkout when supplying binaries from another directory.
 Keep `README.md` focused on package users; put contributor and release instructions in their dedicated documents.
 ## Check documentation examples
 

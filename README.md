@@ -1,5 +1,6 @@
 # @chunkdb/client
 
+[![CI](https://github.com/chunkdb/chunkdb-js/actions/workflows/ci.yml/badge.svg)](https://github.com/chunkdb/chunkdb-js/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/%40chunkdb%2Fclient)](https://www.npmjs.com/package/@chunkdb/client)
 
 Node.js and TypeScript client for [chunkdb](https://github.com/chunkdb/chunkdb), a database for grids of typed blocks.
