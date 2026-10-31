@@ -5,6 +5,8 @@ import { ChunkBits, decodeFixedValue, encodeFixedValue, encodeVarValue, fixedWid
 import { FormFlag, FormSection, parseFormBlockSpans, parseFormChunkColumns, parseSectionedForm, serializeSectionedForm, validFormPadding } from "./chunk-sections";
 import type { SectionedForm } from "./chunk-sections";
 
+const MAX_VARIABLE_BYTES = 64 * 1024 * 1024;
+
 export function sectionedBlockCount(layout: TableLayout): number {
   const { schema } = layout;
   const dims = schema.dims ?? 2;
@@ -53,6 +55,8 @@ export function decodeSectionedChunk(layout: TableLayout, input: Uint8Array, ind
   if ((form.flags & FormFlag.projected) !== 0 && indexes.length === 0) bad("empty projection");
   const spans = parseFormBlockSpans(form, blocks);
   if ((form.sections.get(FormSection.fixed)?.length ?? 0) + (form.sections.get(FormSection.validity)?.length ?? 0) > 64 * 1024 * 1024) bad("fixed payload exceeds byte limit");
+  const vars = form.sections.get(FormSection.variable) ?? Buffer.alloc(0);
+  if (vars.length > MAX_VARIABLE_BYTES) bad("variable data exceeds its hard byte limit");
   const byId = new Map(spans.map((span) => [span.id, span]));
   const ids = new Set<number>(), names = new Set<string>();
   const variables = new Map<number, ChunkColumn>();
@@ -91,7 +95,6 @@ export function decodeSectionedChunk(layout: TableLayout, input: Uint8Array, ind
       }
     }
   }
-  const vars = form.sections.get(FormSection.variable) ?? Buffer.alloc(0);
   let variableBytes = vars.length;
   let previousId = 0, previousBlock = -1;
   for (let offset = 0; offset < vars.length;) {
@@ -133,7 +136,8 @@ export function decodeSectionedChunk(layout: TableLayout, input: Uint8Array, ind
       }
     }
   }
-  if (variableBytes > schema.options.varMaxChunkBytes) bad("combined variable storage exceeds chunk limit");
+  // Lowering a write quota does not invalidate previously stored data.
+  if (variableBytes > MAX_VARIABLE_BYTES) bad("combined variable storage exceeds its hard byte limit");
   const unknownSections = new Map<number, Uint8Array>();
   for (const [kind, bytes] of form.sections) if (kind < 1 || kind > 6) unknownSections.set(kind, Buffer.from(bytes));
   return { version: form.version, schemaVersion: schema.version, commitTimeMs: form.commitTimeMs,

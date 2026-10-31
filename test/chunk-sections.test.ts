@@ -176,7 +176,7 @@ test("metadata and block values share the variable budget with exact null and em
   assert.deepEqual(read().metadata, { status: 3, title: "", empty: Buffer.alloc(0) });
   assert.equal(read().columns.label[0], "hi");
   layout.schema.options.varMaxChunkBytes = 25;
-  assert.throws(read, /combined variable storage/);
+  assert.deepEqual(read().metadata, { status: 3, title: "", empty: Buffer.alloc(0) });
   row.writeUInt16LE(1, 24);
   layout.schema.options.varMaxChunkBytes = 14;
   assert.equal(read().metadata?.title, null);
@@ -201,6 +201,35 @@ test("three dimensional geometry and schema preserve the third axis and metadata
   assert.equal(sectionedBlockCount(layout), 8);
   layout.schema.chunk.depth = 0;
   assert.throws(() => sectionedBlockCount(layout));
+});
+
+test("stored variable rows use the combined hard limit after lowering the write quota", () => {
+  const hard = 64 * 1024 * 1024;
+  const { layout } = typedFixture();
+  layout.schema.chunk = { width: 1, height: 1 };
+  layout.schema.columns = [column("n", "u1"), column("data", `bytes(${hard})`)];
+  layout.ids = [1, 2];
+  layout.schema.chunkColumns = [column("title", "bytes(1)", true)];
+  layout.chunkColumnIds = [3];
+  layout.schema.options.varMaxChunkBytes = 25;
+  const spans = Buffer.alloc(28);
+  [1, 1, 1, 0, 1, 0, 0].forEach((value, i) => spans.writeUInt32LE(value, i * 4));
+  const vars = Buffer.alloc(hard - 12);
+  vars.writeUInt32LE(2);
+  vars.writeUInt32LE(vars.length - 12, 8);
+  const row = Buffer.alloc(20);
+  row.writeUInt32LE(1);
+  row.writeUInt32LE(3, 4);
+  row.writeUInt32LE(20, 12);
+  const sections: Array<[number, Buffer]> = [[1, Buffer.from([1])], [2, Buffer.from([0])], [4, vars], [5, row], [6, spans]];
+  const exact = decodeSectionedChunk(layout, fixture(sections), [0, 1]);
+  assert.equal((exact.columns.data[0] as Buffer).length, hard - 24);
+  const largerRow = Buffer.concat([row, Buffer.from([0])]);
+  largerRow.writeUInt32LE(1, 16);
+  sections[3][1] = largerRow;
+  assert.throws(() => decodeSectionedChunk(layout, fixture(sections), [0, 1]), /hard byte limit/);
+  sections[2][1] = Buffer.alloc(hard + 1);
+  assert.throws(() => decodeSectionedChunk(layout, fixture(sections), [0, 1]), /hard byte limit/);
 });
 
 test("three dimensional encoder matches literal x-fastest bytes", () => {
