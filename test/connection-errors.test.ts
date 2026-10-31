@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import net from "node:net";
+import { once } from "node:events";
 import { ChunkClient, ChunkConnectionError, ChunkTimeoutError, ChunkTlsError } from "../src/index";
 import { FAKE_HELLO, startFakeServer } from "./fake-server";
 
@@ -53,7 +54,8 @@ test("TLS against a plaintext endpoint names the scheme and certificate checks",
   }
 });
 
-test("TLS handshake timeout gives address, scheme and connect timeout guidance", async () => {
+test("TLS handshake timeout gives address, scheme and connect timeout guidance", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const sockets = new Set<net.Socket>();
   const listener = net.createServer((socket) => { sockets.add(socket); socket.resume(); });
   await new Promise<void>((resolve) => listener.listen(0, "127.0.0.1", resolve));
@@ -61,13 +63,20 @@ test("TLS handshake timeout gives address, scheme and connect timeout guidance",
   assert.ok(address && typeof address !== "string");
   const client = new ChunkClient({ port: address.port, tls: true, connectTimeoutMs: 100 });
   try {
-    await assert.rejects(client.connect(), (error: unknown) => {
+    const accepted = once(listener, "connection");
+    const rejected = assert.rejects(client.connect(), (error: unknown) => {
       assert.ok(error instanceof ChunkTimeoutError);
       assert.equal(error.command, "CONNECT");
       assert.match(error.message, /connection timeout after 100ms.*127\.0\.0\.1/);
       assert.match(error.message, /firewall.*chunk:\/\/ versus chunks:\/\/.*connectTimeoutMs/);
       return true;
     });
+    // The deadline covers TCP establishment as well as TLS negotiation.
+    // Advance it only after TCP acceptance, so host load cannot turn this
+    // handshake fixture into a pre-accept connection timeout.
+    await accepted;
+    t.mock.timers.tick(100);
+    await rejected;
     assert.equal(sockets.size, 1);
   } finally {
     await client.close();
