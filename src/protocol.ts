@@ -76,6 +76,27 @@ const LF = 0x0a;
 const CRLF = Buffer.from("\r\n", "latin1");
 const NULL_FRAME = Buffer.from("$-1\r\n", "latin1");
 
+/** Parameter occurrences outside quoted literals and identifiers, including invalid indices. */
+export function countParameters(statement: string): number {
+  let count = 0;
+  let quote: string | null = null;
+  for (let at = 0; at < statement.length; at++) {
+    const character = statement[at];
+    if (quote !== null) {
+      if (character === quote) {
+        if (statement[at + 1] === quote) at++;
+        else quote = null;
+      }
+    } else if (character === "'" || character === '"') {
+      quote = character;
+    } else if (character === "$" && /[0-9]/.test(statement[at + 1] ?? "")) {
+      count++;
+      while (/[0-9]/.test(statement[at + 1] ?? "")) at++;
+    }
+  }
+  return count;
+}
+
 /**
  * The bytes of one statement and its parameter frames. A statement is one
  * line: CR or LF in it is refused before anything is sent.
@@ -85,6 +106,10 @@ export function encodeStatement(statement: string, parameters: readonly ChunkPar
     throw new ChunkProtocolError("a statement is one line: it cannot contain CR or LF", {
       phase: "request",
     });
+  }
+  const count = countParameters(statement);
+  if (count !== parameters.length) {
+    throw new ChunkProtocolError(`the statement has ${count} parameter occurrences, got ${parameters.length} frames`, { phase: "request" });
   }
   const parts: Buffer[] = [Buffer.from(statement, "utf8"), CRLF];
   for (const parameter of parameters) {
@@ -137,6 +162,7 @@ function lengthOf(text: string, what: string): number {
 // Finds where the reply starting at `start` ends without building it, so a
 // large reply is built once, after its last byte arrived.
 function scanReply(buffer: Buffer, start: number, depth = 0): number | Incomplete {
+  if (depth > 128) throw protocolError("reply nesting exceeds 128 levels");
   if (start >= buffer.length) {
     return { need: start + 1 };
   }
@@ -154,6 +180,7 @@ function scanReply(buffer: Buffer, start: number, depth = 0): number | Incomplet
     case 0x2b: // +
     case 0x2d: // -
     case 0x3a: // :
+    case 0x28: // ( big number
     case 0x2c: // ,
     case 0x23: // #
     case 0x5f: // _
@@ -211,6 +238,7 @@ function readReply(buffer: Buffer, start: number): { reply: ChunkReply; end: num
         end: next,
       };
     }
+    case 0x28:
     case 0x3a: {
       const text = buffer.toString("latin1", start + 1, end);
       if (!/^-?[0-9]+$/.test(text)) {

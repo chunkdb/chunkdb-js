@@ -52,24 +52,25 @@ test("HELLO 3, empty catalog, ping and an explicitly created default table", asy
     await client.flushWal();
     assert.match(await client.metrics(), /^# (HELP|TYPE) /m);
     assert.deepEqual(await client.listTables(), []);
-    assert.equal(client.defaultTable(), "default");
+    assert.equal(client.defaultTable(), "");
 
-    // Client-side fallback selects a name; it does not create that table.
-    await assert.rejects(client.describe(), serverError("NO_TABLE"));
+    // No implicit table is selected; an explicit absent name still reaches the server.
+    await assert.rejects(client.describe(), ChunkProtocolError);
+    await assert.rejects(client.describe("default"), serverError("NO_TABLE"));
     await client.createTable("default", {
       columns: [{ name: "bits", type: "bits(16)" }],
       chunk: { width: 16, height: 16 },
     });
     assert.deepEqual(await client.listTables(), ["default"]);
-    const schema = await client.describe();
+    const schema = await client.describe("default");
     assert.equal(schema.table, "default");
     assert.deepEqual(schema.columns.map((column) => column.typeName), ["bits(16)"]);
-    const version = await client.setBlock(0, 0, { bits: ChunkBits.from("1011001110110011") });
+    const version = await client.setBlock(0, 0, { bits: ChunkBits.from("1011001110110011") }, { table: "default" });
     assert.equal(typeof version, "bigint");
-    const row = await client.getBlock(0, 0);
+    const row = await client.getBlock(0, 0, { table: "default" });
     assert.ok(row !== null && row.bits instanceof ChunkBits);
     assert.equal(row.bits.toString(), "1011001110110011");
-    assert.equal(await client.getBlock(1, 0), null);
+    assert.equal(await client.getBlock(1, 0, { table: "default" }), null);
     await client.close();
   } finally {
     await server.stop();
@@ -241,7 +242,7 @@ test("execute sends a statement with parameter frames", async () => {
     // closes the connection; the next statement reconnects.
     await assert.rejects(
       client.execute("SET BLOCK 4 4 IN kinds name = $1", [Buffer.alloc(17)]),
-      serverError("BAD_REQUEST", /longer than its column holds/),
+      serverError("PROTOCOL", /longer than its column holds/),
     );
     assert.equal(await client.ping(), "PONG");
     await client.close();

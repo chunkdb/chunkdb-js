@@ -24,11 +24,34 @@ jobs:
       - name: Check out chunkdb-js
         uses: actions/checkout@v5
 
-      - name: Check out chunkdb main
+      - name: Select chunkdb branch
+        id: chunkdb-ref
+        env:
+          CANDIDATE_BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          SERVER_REF=main
+          if REMOTE_REFS=$(git ls-remote --exit-code --heads \
+            https://github.com/chunkdb/chunkdb.git \
+            "refs/heads/${CANDIDATE_BRANCH}"); then
+            while IFS=$'\t' read -r object_id remote_ref; do
+              if [ "$remote_ref" = "refs/heads/${CANDIDATE_BRANCH}" ]; then
+                SERVER_REF="${CANDIDATE_BRANCH}"
+              fi
+            done <<< "$REMOTE_REFS"
+          else
+            status=$?
+            if [ "$status" -ne 2 ]; then
+              echo "Failed to look up chunkdb branch (git exit $status)" >&2
+              exit "$status"
+            fi
+          fi
+          echo "ref=${SERVER_REF}" >> "$GITHUB_OUTPUT"
+
+      - name: Check out chunkdb server
         uses: actions/checkout@v5
         with:
           repository: chunkdb/chunkdb
-          ref: main
+          ref: ${{ steps.chunkdb-ref.outputs.ref }}
           path: chunkdb
 
       - name: Set up Node.js

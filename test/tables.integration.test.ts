@@ -31,8 +31,14 @@ test("tables: create, describe, alter, list, drop", async () => {
     assert.deepEqual(await client.listTables(), ["land"]);
 
     const schema = await client.describe("land");
+    assert.match(schema.epoch!, /^[0-9a-f]{32}$/);
+    assert.equal(typeof schema.revision, "bigint");
     assert.deepEqual(schema, {
       table: "land",
+      epoch: schema.epoch,
+      revision: schema.revision,
+      dims: 2,
+      chunkColumns: [],
       version: 1,
       columns: [
         { name: "id", type: { kind: "u", bits: 10 }, typeName: "u10", nullable: false, required: true, default: null },
@@ -103,8 +109,10 @@ test("the schema cache follows changes another client makes", async () => {
     await client.setBlock(0, 0, { id: 1, h: 0.5, note: "a", data: Buffer.from("x") });
     assert.equal((await client.describe()).columns.length, 4);
 
-    // A frame of the wrong size: refreshed and retried once.
+    // Scalar frames carry no schema version: INVALID_ARGUMENT is fatal until explicit cache refresh.
     await admin.alterTable("t", { kind: "alterColumnType", column: "h", type: "f64" });
+    await assert.rejects(client.setBlock(0, 0, { h: 0.1 }), serverError("INVALID_ARGUMENT"));
+    client.clearSchemaCache("t");
     await client.setBlock(0, 0, { h: 0.1 });
     assert.deepEqual(await client.getBlock(0, 0, { columns: ["h"] }), { h: 0.1 });
 
@@ -113,10 +121,11 @@ test("the schema cache follows changes another client makes", async () => {
     await client.setBlock(0, 0, { tag: "new" });
     assert.deepEqual(await client.getBlock(0, 0, { columns: ["tag"] }), { tag: "new" });
 
-    // A renamed and a dropped column: a read of every cached column is
-    // refused, refreshed and retried.
+    // A read naming removed columns also needs an explicit schema refresh.
     await admin.alterTable("t", { kind: "renameColumn", column: "note", to: "label" });
     await admin.alterTable("t", { kind: "dropColumn", column: "id" });
+    await assert.rejects(client.getBlock(0, 0), serverError("INVALID_ARGUMENT"));
+    client.clearSchemaCache("t");
     assert.deepEqual(await client.getBlock(0, 0), { h: 0.1, label: "a", data: Buffer.from("x"), tag: "new" });
 
     // After DROP and ADD the text and bytes columns have ids that are not
@@ -134,17 +143,21 @@ test("the schema cache follows changes another client makes", async () => {
     await client.setChunk(0, 0, chunk, { ifVersion: chunk.version });
     assert.deepEqual(await client.getBlock(0, 0, { columns: ["label", "tag"] }), { label: "b0", tag: "new" });
 
-    // A write naming a column dropped since: the server refuses it and
-    // closes the connection; the next call reconnects with a fresh schema.
+    // A write naming a dropped column is refused after its frames drain.
+    // A subsequent read refreshes the cached layout without relying on disconnects.
     await client.describe();
     await admin.alterTable("t", { kind: "dropColumn", column: "tag" });
-    await assert.rejects(client.setBlock(0, 0, { tag: "x" }), serverError("INVALID_ARGUMENT", /no column tag/));
+    await assert.rejects(client.setBlock(0, 0, { tag: "x" }), serverError("INVALID_ARGUMENT"));
+    client.clearSchemaCache("t");
     assert.deepEqual(await client.getBlock(0, 0, { columns: ["label"] }), { label: "b0" });
     await assert.rejects(client.setBlock(0, 0, { tag: "x" }), /no column tag/);
 
     // A table dropped and created again with other columns.
     await admin.dropTable("t");
     await admin.createTable("t", { columns: [{ name: "flag", type: "bool" }], chunk: { width: 2, height: 2 } });
+    await assert.rejects(client.getBlock(0, 0), (error: unknown) =>
+      error instanceof ChunkServerError && error.serverCode === "INVALID_ARGUMENT" && error.retryClass === "fatal");
+    client.clearSchemaCache("t");
     assert.equal(await client.getBlock(0, 0), null);
     await client.setBlock(0, 0, { flag: true });
     assert.deepEqual(await client.getBlock(0, 0), { flag: true });

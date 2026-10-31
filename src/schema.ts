@@ -1,6 +1,6 @@
 import { ChunkProtocolError } from "./errors";
 import type { ChunkReply } from "./protocol";
-import type { ChunkColumn, ChunkServerInfo, ChunkSize, ChunkTableSchema } from "./types";
+import type { ChunkColumn, ChunkServerInfo, ChunkSize, ChunkTableSchema, ChunkValue, ChunkSchemaVersion, ChunkFeatureStatus, ChunkStatus } from "./types";
 import { formatColumnType, parseColumnType, valueFromReply } from "./values";
 
 /** A table schema and what the chunk form needs beyond `DESCRIBE`'s public fields. */
@@ -68,7 +68,7 @@ function booleanOf(reply: ChunkReply, what: string, command: string): boolean {
 }
 
 function sizeOf(reply: ChunkReply, what: string, command: string): ChunkSize {
-  if (reply.type !== "array" || reply.items.length !== 2) {
+  if (reply.type !== "array" || reply.items.length < 2) {
     throw malformed(`${what} is not [width, height]`, command);
   }
   return {
@@ -91,6 +91,12 @@ export function parseServerInfo(reply: ChunkReply): ChunkServerInfo {
     maxResponseBytes: integer("max_response_bytes"),
     maxScanLimit: integer("max_scan_limit"),
     serverSignature: signature.type === "null" ? null : textOf(signature, "server_signature", command),
+    ...(entries.has("connection_id") ? { connectionId: uint64Of(field(entries, "connection_id", command), "connection_id", command, false) } : {}),
+    ...(entries.has("features") ? { features: stringArray(field(entries, "features", command), command) } : {}),
+    ...(entries.has("options") ? { options: Object.fromEntries([...mapOf(field(entries, "options", command), command)].filter(([key]) => ["client_name", "statement_timeout_ms", "default_tag"].includes(key)).map(([key, value]) => [key, optionValue(value, command, key)])) } : {}),
+    ...(entries.has("not_applied") ? { notApplied: Object.fromEntries([...mapOf(field(entries, "not_applied", command), command)].map(([key, value]) => [key, { reason: textOf(field(mapOf(value, command), "reason", command), "reason", command) }])) } : {}),
+    ...(entries.has("idle_timeout_ms") ? { idleTimeoutMs: integer("idle_timeout_ms") } : {}),
+    ...(entries.has("limits") ? { limits: Object.fromEntries([...mapOf(field(entries, "limits", command), command)].filter(([key]) => ["max_area_chunks", "max_area_response_bytes", "txn_max_written_chunks", "txn_max_read_chunks", "max_watches", "max_returning_rows", "max_expression_nodes"].includes(key)).map(([key, value]) => [key, integerOf(value, key, command)])) } : {}),
   };
 }
 
@@ -102,11 +108,8 @@ function parseColumn(reply: ChunkReply, command: string): { column: ChunkColumn;
   try {
     type = parseColumnType(typeName);
   } catch (error) {
-    throw new ChunkProtocolError(`malformed ${command} reply: column ${name} has type ${typeName}`, {
-      phase: "protocol",
-      command,
-      cause: error,
-    });
+    if (!(error instanceof RangeError)) throw error;
+    type = { kind: "unknown" as const, name: typeName };
   }
   const column: ChunkColumn = {
     name,
@@ -121,8 +124,8 @@ function parseColumn(reply: ChunkReply, command: string): { column: ChunkColumn;
 }
 
 /** Column descriptions shared by DESCRIBE and WATCH schema events. */
-export function parseColumns(reply: ChunkReply, command: string): ChunkColumn[] {
-  if (reply.type !== "array" || reply.items.length === 0) {
+export function parseColumns(reply: ChunkReply, command: string, allowEmpty = false): ChunkColumn[] {
+  if (reply.type !== "array" || (reply.items.length === 0 && !allowEmpty)) {
     throw malformed("columns is not a nonempty array", command);
   }
   const names = new Set<string>();
@@ -148,10 +151,14 @@ export function parseDescribe(reply: ChunkReply): TableLayout {
   const parsed = columnsReply.items.map((item) => parseColumn(item, command));
   const options = mapOf(field(entries, "options", command), command);
   const option = (key: string) => field(options, key, command);
-  const version = integerOf(field(entries, "version", command), "version", command);
+  const version = schemaVersionOf(field(entries, "version", command), command);
   return {
     schema: {
       table: textOf(field(entries, "table", command), "table", command),
+      ...(entries.has("epoch") ? { epoch: epochOf(field(entries, "epoch", command), command) } : {}),
+      ...(entries.has("revision") ? { revision: field(entries, "revision", command).type === "null" ? null : uint64Of(field(entries, "revision", command), "revision", command) } : {}),
+      ...(entries.has("dims") ? { dims: integerOf(field(entries, "dims", command), "dims", command) } : {}),
+      ...(entries.has("chunk_columns") ? { chunkColumns: parseColumns(field(entries, "chunk_columns", command), command, true) } : {}),
       version,
       columns: parsed.map(({ column }) => column),
       chunk: sizeOf(field(entries, "chunk", command), "chunk", command),
@@ -169,4 +176,54 @@ export function parseDescribe(reply: ChunkReply): TableLayout {
     },
     ids: parsed.map(({ id }) => id),
   };
+}
+
+export function uint64Of(reply: ChunkReply, what: string, command: string, zero = true): bigint {
+  if (reply.type !== "integer" || reply.value < (zero ? 0n : 1n) || reply.value > (1n << 64n) - 1n) {
+    throw malformed(`${what} is not uint64`, command);
+  }
+  return reply.value;
+}
+
+export function epochOf(reply: ChunkReply, command: string): string {
+  const epoch = textOf(reply, "epoch", command);
+  if (!/^[0-9a-f]{32}$/i.test(epoch)) throw malformed("invalid epoch", command);
+  return epoch.toLowerCase();
+}
+
+function stringArray(reply: ChunkReply, command: string): string[] {
+  if (reply.type !== "array") throw malformed("expected a string array", command);
+  return reply.items.map((item) => textOf(item, "feature", command));
+}
+
+function optionValue(reply: ChunkReply, command: string, key: string): ChunkValue {
+  if (reply.type === "bulk") return key === "client_name" ? reply.value.toString("utf8") : Buffer.from(reply.value);
+  if (reply.type === "null") return null;
+  if (["integer", "double", "boolean", "simple"].includes(reply.type) && "value" in reply) {
+    if (typeof reply.value === "bigint" && reply.value >= BigInt(Number.MIN_SAFE_INTEGER) && reply.value <= BigInt(Number.MAX_SAFE_INTEGER)) return Number(reply.value);
+    return reply.value as ChunkValue;
+  }
+  throw malformed("invalid session option value", command);
+}
+
+export function schemaVersionOf(reply: ChunkReply, command: string): ChunkSchemaVersion {
+  const version = uint64Of(reply, "schema version", command);
+  return version <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(version) : version;
+}
+
+export function parseStatus(reply: ChunkReply): ChunkStatus {
+  const command = "SHOW STATUS";
+  const entries = mapOf(reply, command);
+  const feature = (reply: ChunkReply): ChunkFeatureStatus => {
+    const values = mapOf(reply, command);
+    return { enabled: stringArray(field(values, "enabled", command), command),
+      compat: uint64Of(field(values, "compat", command), "compat", command),
+      roCompat: uint64Of(field(values, "ro_compat", command), "ro_compat", command),
+      incompat: uint64Of(field(values, "incompat", command), "incompat", command) };
+  };
+  const tables = field(entries, "tables", command);
+  if (tables.type !== "array") throw malformed("tables is not an array", command);
+  return { directory: feature(field(entries, "directory", command)), tables: tables.items.map((item) => ({
+    name: textOf(field(mapOf(item, command), "name", command), "name", command), ...feature(item),
+  })), activationPending: booleanOf(field(entries, "activation_pending", command), "activation_pending", command) };
 }
