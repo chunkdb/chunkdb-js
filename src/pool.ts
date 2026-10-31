@@ -7,6 +7,15 @@ import { ChunkClient, tableOfStatement } from "./client";
 import type { ChunkWatch } from "./watch";
 import type { ChunkParameter, ChunkReply } from "./protocol";
 import type {
+  ChunkAxis,
+  ChunkArea3D,
+  ChunkAreaEntry3D,
+  ChunkAreaRawEntry3D,
+  ChunkCoord3D,
+  ChunkScanDataOptions,
+  ChunkScanOptions3D,
+  ChunkScanDataPage,
+  ChunkScanPage3D,
   ChunkBlockMetadata,
   ChunkAreaMetadata,
   ChunkStatus,
@@ -292,6 +301,70 @@ export class ChunkPool {
     return this.withClient(async (client) => await client.setChunk(cx, cy, state, options));
   }
 
+  getBlock3D(x: ChunkAxis, y: ChunkAxis, z: ChunkAxis, options: ChunkReadOptions = {}): Promise<ChunkRow | null> {
+    return this.withClient(async (client) => client.getBlock3D(x, y, z, options));
+  }
+
+  getBlock3DWithMetadata(x: ChunkAxis, y: ChunkAxis, z: ChunkAxis, options: ChunkReadOptions = {}): Promise<ChunkBlockMetadata> {
+    return this.withClient(async (client) => client.getBlock3DWithMetadata(x, y, z, options));
+  }
+
+  setBlock3D(x: ChunkAxis, y: ChunkAxis, z: ChunkAxis, values: Readonly<Record<string, ChunkValue>>, options: ChunkWriteOptions = {}): Promise<bigint> {
+    return this.withClient(async (client) => client.setBlock3D(x, y, z, values, options));
+  }
+
+  deleteBlock3D(x: ChunkAxis, y: ChunkAxis, z: ChunkAxis, options: ChunkWriteOptions = {}): Promise<bigint> {
+    return this.withClient(async (client) => client.deleteBlock3D(x, y, z, options));
+  }
+
+  getChunk3D(x: ChunkAxis, y: ChunkAxis, z: ChunkAxis, options: ChunkReadOptions = {}): Promise<ChunkState | null> {
+    return this.withClient(async (client) => client.getChunk3D(x, y, z, options));
+  }
+
+  getChunkRaw3D(x: ChunkAxis, y: ChunkAxis, z: ChunkAxis, options: ChunkReadOptions = {}): Promise<Buffer | null> {
+    return this.withClient(async (client) => client.getChunkRaw3D(x, y, z, options));
+  }
+
+  setChunk3D(x: ChunkAxis, y: ChunkAxis, z: ChunkAxis, state: ChunkStateInput, options: ChunkWriteOptions = {}): Promise<bigint> {
+    return this.withClient(async (client) => client.setChunk3D(x, y, z, state, options));
+  }
+
+  setChunkRaw3D(x: ChunkAxis, y: ChunkAxis, z: ChunkAxis, form: Uint8Array, options: ChunkWriteOptions = {}): Promise<bigint> {
+    return this.withClient(async (client) => client.setChunkRaw3D(x, y, z, form, options));
+  }
+
+  setChunkColumns(x: number, y: number, columns: readonly string[], state: ChunkStateInput, options: ChunkWriteOptions = {}): Promise<bigint> {
+    return this.withClient(async (client) => client.setChunkColumns(x, y, columns, state, options));
+  }
+
+  setChunkColumns3D(x: ChunkAxis, y: ChunkAxis, z: ChunkAxis, columns: readonly string[], state: ChunkStateInput, options: ChunkWriteOptions = {}): Promise<bigint> {
+    return this.withClient(async (client) => client.setChunkColumns3D(x, y, z, columns, state, options));
+  }
+
+  setChunkMetadata(x: number, y: number, values: Readonly<ChunkRow>, options: ChunkWriteOptions = {}): Promise<bigint> {
+    return this.withClient(async (client) => client.setChunkMetadata(x, y, values, options));
+  }
+
+  setChunkMetadata3D(x: ChunkAxis, y: ChunkAxis, z: ChunkAxis, values: Readonly<ChunkRow>, options: ChunkWriteOptions = {}): Promise<bigint> {
+    return this.withClient(async (client) => client.setChunkMetadata3D(x, y, z, values, options));
+  }
+
+  getArea3D(area: ChunkArea3D, options: ChunkReadOptions = {}): Promise<ChunkAreaEntry3D[]> {
+    return this.withClient(async (client) => client.getArea3D(area, options));
+  }
+
+  getAreaRaw3D(area: ChunkArea3D, options: ChunkReadOptions = {}): Promise<ChunkAreaRawEntry3D[]> {
+    return this.withClient(async (client) => client.getAreaRaw3D(area, options));
+  }
+
+  getArea3DWithSchema(area: ChunkArea3D, options: ChunkReadOptions = {}): Promise<ChunkAreaMetadata<ChunkAreaEntry3D>> {
+    return this.withClient(async (client) => client.getArea3DWithSchema(area, options));
+  }
+
+  getAreaRaw3DWithSchema(area: ChunkArea3D, options: ChunkReadOptions = {}): Promise<ChunkAreaMetadata<ChunkAreaRawEntry3D>> {
+    return this.withClient(async (client) => client.getAreaRaw3DWithSchema(area, options));
+  }
+
   setChunkRaw(cx: number, cy: number, form: Uint8Array, options: ChunkWriteOptions = {}): Promise<bigint> {
     return this.withClient(async (client) => await client.setChunkRaw(cx, cy, form, options));
   }
@@ -314,6 +387,25 @@ export class ChunkPool {
 
   scanChunks(options: ChunkScanOptions = {}): Promise<ChunkScanPage> {
     return this.withClient(async (client) => await client.scanChunks(options));
+  }
+
+  scanChunksWithOptions(options: ChunkScanDataOptions = {}): Promise<ChunkScanDataPage> {
+    return this.withClient(async (client) => client.scanChunksWithOptions(options));
+  }
+
+  scanChunks3D(options: ChunkScanOptions3D = {}): Promise<ChunkScanPage3D> {
+    return this.withClient(async (client) => client.scanChunks3D(options));
+  }
+
+  async *scanAllChunks3D(options: Omit<ChunkScanOptions3D, "after" | "since" | "withData" | "columns"> = {}): AsyncGenerator<ChunkCoord3D, void, undefined> {
+    let after: ChunkCoord3D | undefined;
+    let epoch = options.epoch;
+    while (true) {
+      const page = await this.scanChunks3D({ table: options.table, limit: options.limit, epoch, after });
+      epoch ??= page.epoch;
+      for (const { cx, cy, cz } of page.chunks) { after = { cx, cy, cz }; yield after; }
+      if (!page.more) return;
+    }
   }
 
   /** Every chunk that has a present block, one pooled call per page. */

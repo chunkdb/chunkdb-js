@@ -18,6 +18,29 @@ export function sectionedBlockCount(layout: TableLayout): number {
   return count;
 }
 
+/** A complete mutation's checked frame bound, including both column domains. */
+export function sectionedChunkFormLimit(layout: TableLayout): number {
+  const { schema } = layout;
+  const blocks = sectionedBlockCount(layout), presence = Math.ceil(blocks / 8);
+  let fixed = 0, descriptors = 0, metadata = 0;
+  for (const column of schema.columns) {
+    const width = fixedWidth(column.type);
+    if (width !== 0) {
+      fixed += Math.ceil(blocks * width / 8) + (column.nullable ? presence : 0);
+      descriptors += 1;
+    }
+  }
+  if (fixed > 64 * 1024 * 1024) throw requestError("fixed payload exceeds its hard byte limit", "SET CHUNK");
+  for (const column of schema.chunkColumns ?? []) {
+    const width = fixedWidth(column.type);
+    if (width !== 0) metadata += Math.ceil(width / 8);
+  }
+  if ((schema.chunkColumns?.length ?? 0) !== 0) metadata += 4 + 16 * schema.chunkColumns!.length;
+  const variable = schema.options.varMaxChunkBytes === 0 ? MAX_VARIABLE_BYTES : schema.options.varMaxChunkBytes;
+  if (!Number.isSafeInteger(variable) || variable < 0 || variable > MAX_VARIABLE_BYTES) throw requestError("invalid variable byte limit", "SET CHUNK");
+  return 36 + 6 * 12 + presence + fixed + 4 + 24 * descriptors + metadata + variable;
+}
+
 function bit(data: Uint8Array, offset: number): boolean { return ((data[offset >> 3] >> (offset & 7)) & 1) !== 0; }
 
 function packed(data: Buffer, offset: number, width: number): Buffer {
