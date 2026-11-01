@@ -40,9 +40,10 @@ A schema version identifies the table's column layout.
 The revision is null on read-only OPEN when the completed frontier is unavailable; read-write tables report a numeric frontier.
 
 `getChunk` and `getChunkRaw` return `null` for a never-written chunk.
-Deleting every block retains an empty form and version as a tombstone.
+A written chunk with no blocks and baseline metadata retains its empty form and version as a tombstone.
+Nonbaseline metadata keeps a chunk populated even when it has no blocks.
 
-A chunk state contains `version`, `schemaVersion`, `width`, `height`, `depth`, `present`, per-block `columns` and a `chunkColumns` metadata row.
+A chunk state contains `version`, `schemaVersion`, `width`, `height`, `depth`, `present`, per-block `columns` and a `metadata` row.
 The x axis varies fastest, followed by y and z.
 `setChunk` replaces both column domains; it ignores block values at absent blocks.
 Omitted chunk metadata uses its default, then nullable NULL or the type's zero value.
@@ -70,10 +71,12 @@ Do not compare versions with time or assume they are consecutive.
 `ifAbsent: true` writes only when the chunk is unpopulated, including a tombstone, and cannot be combined with `ifVersion`.
 Block-level writes do not accept `ifAbsent`.
 
-`setChunkColumns(cx, cy, state, columns, options?)` replaces selected block columns while preserving chunk metadata.
+`setChunkColumns(cx, cy, columns, state, options?)` replaces selected block columns while preserving chunk metadata.
 `setChunkMetadata(cx, cy, values, options?)` changes only the named chunk columns and accepts explicit `null` for nullable columns.
 The pool and transaction expose both methods.
-GET projections always include the complete `chunkColumns` row.
+GET projections always include the complete `metadata` row.
+Typed chunk reads admit at most 4194304 block-column cells before allocating dense value arrays.
+Select fewer columns or read the raw form when a chunk exceeds that limit.
 
 `getChunkRaw`, `setChunkRaw` and `getAreaRaw` transfer binary forms.
 A stale raw form raises `ChunkSchemaMismatchError`.
@@ -113,7 +116,7 @@ Pass the last returned coordinate as `after` for the next page.
 `scanChunks3D` provides the same options with three-axis coordinates; `scanAllChunks3D` iterates populated coordinates.
 These pages include `epoch`, nullable `position` and `retainedDeletionFloor`.
 `since` selects revisions strictly greater than its value and includes retained tombstones; their decoded `chunk` is null and `deleted` is true.
-Without data, `deleted` is null because the row carries only coordinates and a version.
+Without data, `deleted` is omitted because the row carries only coordinates and a version.
 Pass the saved `epoch` to refuse a drop-and-recreate lifetime change.
 A revision below the retained deletion floor fails with `reason=tombstone_history_lost`; rebuild the snapshot before resuming.
 The client caches schemas and refreshes them after its own schema changes.

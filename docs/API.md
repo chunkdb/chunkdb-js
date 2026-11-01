@@ -15,7 +15,7 @@ A chunk version identifies committed state and orders writes within the same tab
 | `deleteBlock(x, y, { table?, ifVersion? }?)` | written chunk version |
 | `getChunk(cx, cy, readOptions?)` | `ChunkState` or `null` |
 | `setChunk(cx, cy, state, writeOptions?)` | written chunk version |
-| `setChunkColumns(cx, cy, state, columns, writeOptions?)` | replace selected block columns, preserve metadata |
+| `setChunkColumns(cx, cy, columns, state, writeOptions?)` | replace selected block columns, preserve metadata |
 | `setChunkMetadata(cx, cy, values, writeOptions?)` | update named chunk metadata |
 | `getChunkRaw(cx, cy, readOptions?)` | `Buffer` or `null` |
 | `setChunkRaw(cx, cy, form, writeOptions?)` | written chunk version |

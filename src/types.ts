@@ -288,7 +288,7 @@ export interface ChunkTableOptions {
   checkpointWalBytes?: number;
   walGroupCommitUpdates?: number;
   checkpointCompression?: ChunkCheckpointCompression;
-  /** The most bytes of `text` and `bytes` values in one chunk. */
+  /** Combined encoded variable-value budget for block and chunk columns. */
   varMaxChunkBytes?: number;
   /** In-memory change-feed byte budget for this table. */
   feedBufferBytes?: number;
@@ -371,7 +371,7 @@ export type ChunkTableChange =
   | ChunkSetOption;
 
 /**
- * A chunk's blocks, block `i` at local `(i % width, floor(i / width))`.
+ * A chunk's blocks, with x varying fastest, followed by y and z.
  * `present[i]` tells whether block `i` exists; `columns[name][i]` is its
  * value (null for an absent block).
  */

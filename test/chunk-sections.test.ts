@@ -301,3 +301,17 @@ test("block-only mutations preserve required metadata even when selecting every 
   assert.deepEqual(parseFormBlockSpans(form, 1)[0].values, Buffer.from([9]));
   assert.throws(() => decodeSectionedChunk(layout, bytes, [0]), /metadata differs from schema/);
 });
+
+test("dense decoded cells are admitted before arrays and respect projections", () => {
+  const { layout } = typedFixture();
+  layout.schema.chunk = { width: 4096, height: 2 };
+  layout.schema.chunkColumns = [];
+  layout.schema.columns = Array.from({ length: 513 }, (_, i) => column(`v${i}`, "text(8)", true));
+  layout.ids = layout.schema.columns.map((_, i) => i + 1);
+  const input = fixture([[1, Buffer.alloc(1024)], [6, Buffer.alloc(4)]]);
+  assert.throws(() => decodeSectionedChunk(layout, input, layout.ids.map((_, i) => i)), /column values/);
+  input.writeUInt16LE(1, 6);
+  const projected = decodeSectionedChunk(layout, input, [0]);
+  assert.deepEqual(Object.keys(projected.columns), ["v0"]);
+  assert.equal(projected.columns.v0.length, 8192);
+});

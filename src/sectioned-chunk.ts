@@ -6,6 +6,7 @@ import { FormFlag, FormSection, parseFormBlockSpans, parseFormChunkColumns, pars
 import type { SectionedForm } from "./chunk-sections";
 
 const MAX_VARIABLE_BYTES = 64 * 1024 * 1024;
+const MAX_DECODED_CELLS = 4 * 1024 * 1024;
 
 export function sectionedBlockCount(layout: TableLayout): number {
   const { schema } = layout;
@@ -101,6 +102,9 @@ export function decodeSectionedChunk(layout: TableLayout, input: Uint8Array, ind
     }
   }
   if (consumed !== spans.length) bad("unexpected fixed descriptors");
+  if (indexes.length !== 0 && blocks > Math.floor(MAX_DECODED_CELLS / indexes.length)) {
+    bad("decoded chunk exceeds 4194304 column values; select fewer columns or read the raw form");
+  }
   const presence = form.sections.get(FormSection.presence)!;
   const present = Array.from({ length: blocks }, (_, i) => bit(presence, i));
   const columns: Record<string, ChunkValue[]> = {};
