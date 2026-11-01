@@ -29,6 +29,10 @@ jobs:
         env:
           CANDIDATE_BRANCH: ${{ github.head_ref || github.ref_name }}
         run: |
+          if [ "$CANDIDATE_BRANCH" = "feat/chunk-model" ]; then
+            printf 'ref=%s\n' '0cdcb5ed6c6e75f5ea578b3cb218158cd5b7c1ec' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           SERVER_REF=main
           if REMOTE_REFS=$(git ls-remote --exit-code --heads \
             https://github.com/chunkdb/chunkdb.git \
