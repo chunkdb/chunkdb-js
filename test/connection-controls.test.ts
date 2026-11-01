@@ -16,6 +16,8 @@ test("connection controls preserve exact IDs and pool HELLO options",async()=>{
   if(line==="SHOW CONNECTIONS") return `*1\r\n${row()}`;
   if(line==="CANCEL 18446744073709551615") return map({cancelled:"#f\r\n"});
   if(line==="KILL CONNECTION 18446744073709551615") return map({killed:"#t\r\n"});
+  if(line==="CANCEL 1") return map({cancelled:"#t\r\n"});
+  if(line==="KILL CONNECTION 1") return map({killed:"#f\r\n"});
   throw new Error(`unexpected ${line}`);
  });
  const options={port:server.port,helloOptions:{statement_timeout_ms:0}};
@@ -29,6 +31,8 @@ test("connection controls preserve exact IDs and pool HELLO options",async()=>{
    assert.equal(await c.killConnection(rows[0].id),true);
   }
   for(const id of [0n,-1n,1n<<64n,42 as unknown as bigint]) await assert.rejects(client.cancel(id),TypeError);
+  assert.equal(await client.cancel(1n),true);
+  assert.equal(await client.killConnection(1n),false);
  } finally {await client.close();await pool.close();await server.close();}
 });
 
