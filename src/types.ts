@@ -58,6 +58,15 @@ export interface ChunkPoolOptions extends ChunkClientOptions {
   acquireTimeoutMs?: number;
 }
 
+/** One live connection visible to the requesting user. */
+export interface ChunkConnectionInfo {
+  id: bigint;
+  user: string | null;
+  peer: string;
+  state: string;
+  statement: string | null;
+}
+
 /** The server's `HELLO 3` reply. */
 export interface ChunkServerInfo {
   protocol: number;
