@@ -1103,7 +1103,7 @@ export class ChunkClient {
     while (true) {
       const page = await this.scanChunks3D({ table: options.table, limit: options.limit, epoch, after });
       epoch ??= page.epoch;
-      for (const { cx, cy, cz } of page.chunks) { after = { cx, cy, cz }; yield after; }
+      for (const { cx, cy, cz } of page.chunks) { after = { cx, cy, cz }; yield { cx, cy, cz }; }
       if (!page.more) return;
     }
   }
