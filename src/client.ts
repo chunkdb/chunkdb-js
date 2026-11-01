@@ -1338,7 +1338,8 @@ export class ChunkClient {
     const statement =
       `SET CHUNK ${pointClause(point)} IN ${table} $1` + writeClause(options, "SET CHUNK", true);
     return await this.withLayout(table, true, async (layout) => {
-      const form = point.length === 3 ? encodeSectionedChunk(layout, state) : encodeChunkForm(layout, state);
+      const writeLayout = { ...layout, schema: { ...layout.schema, options: { ...layout.schema.options, varMaxChunkBytes: 64 * 1024 * 1024 } } };
+      const form = point.length === 3 ? encodeSectionedChunk(writeLayout, state) : encodeChunkForm(writeLayout, state);
       return await this.run(statement, [form], "SET CHUNK");
     }, true);
   }
@@ -1370,7 +1371,8 @@ export class ChunkClient {
     return this.withLayout(table, true, async (layout) => {
       const indexes = columnIndexes(layout, columns);
       const names = indexes.map((index) => layout.schema.columns[index].name);
-      const form = encodeSectionedChunk(layout, state, indexes, {}, "preserve");
+      const writeLayout = { ...layout, schema: { ...layout.schema, options: { ...layout.schema.options, varMaxChunkBytes: 64 * 1024 * 1024 } } };
+      const form = encodeSectionedChunk(writeLayout, state, indexes, {}, "preserve");
       return this.run(`SET CHUNK ${at} IN ${table}${columnsClause(names)} $1${condition}`, [form], "SET CHUNK");
     }, true);
   }

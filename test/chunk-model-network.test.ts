@@ -203,3 +203,27 @@ test("3D WATCH and slot filters retain all six bounds and reject ambiguous arity
     assert.equal(server.requests.length, before);
   } finally { await client.close(); await server.close(); }
 });
+
+test("typed chunk requests defer growth-aware lowered quotas to the server", async () => {
+  const server = await startFakeServer(({ line }) => {
+    if (line === "HELLO 3") return FAKE_HELLO;
+    if (line.startsWith("DESCRIBE")) {
+      return map({ table: bulk("space"), version: integer(7), epoch: bulk(epoch), dims: integer(3),
+        chunk: array(integer(1), integer(1), integer(1)), large: array(integer(1), integer(1), integer(1)),
+        columns: array(map({ id: integer(1), name: bulk("n"), type: bulk("text(1024)"), null: bool(false), required: bool(false), default: bulk("") })),
+        chunk_columns: array(map({ id: integer(1), name: bulk("title"), type: bulk("text(1024)"), null: bool(true), required: bool(false), default: nil })),
+        options: map({ durability_mode: bulk("relaxed"), checkpoint_updates: integer(256), checkpoint_wal_bytes: integer(1048576), wal_group_commit_updates: integer(8),
+          checkpoint_compression: bulk("none"), var_max_chunk_bytes: integer(1), feed_buffer_bytes: integer(67108864), slot_max_bytes: integer(1073741824) }) });
+    }
+    return integer(8);
+  });
+  const client = await connect({ port: server.port });
+  const state = { present: [true], columns: { n: ["x".repeat(512)] }, metadata: { title: "y".repeat(512) } };
+  try {
+    await client.setChunk3D(0, 0, 0, state, { table: "space" });
+    assert.ok(server.requests.at(-1)!.frames[0]!.length > 1024);
+    await client.setChunkColumns3D(0, 0, 0, ["n"], state, { table: "space" });
+    assert.ok(server.requests.at(-1)!.frames[0]!.length > 512);
+    assert.equal((await client.describe("space")).options.varMaxChunkBytes, 1);
+  } finally { await client.close(); await server.close(); }
+});

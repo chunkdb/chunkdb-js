@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { parseFormBlockSpans, parseFormChunkColumns, parseSectionedForm, serializeSectionedForm } from "../src/chunk-sections";
-import { decodeSectionedChunk, encodeSectionedChunk, sectionedBlockCount } from "../src/sectioned-chunk";
+import { decodeSectionedChunk, encodeSectionedChunk, sectionedBlockCount, sectionedChunkFormLimit } from "../src/sectioned-chunk";
 import { parseColumnType } from "../src/values";
 import { parseDescribe } from "../src/schema";
 import type { TableLayout } from "../src/schema";
@@ -136,6 +136,20 @@ function typedFixture(): { layout: TableLayout; sections: Array<[number, Buffer]
     columns: [column("left", "u3"), { ...column("future", "u8", true), type: { kind: "unknown", name: "future" }, typeName: "future" }, column("right", "u8")] }, ids: [20, 17, 4] };
   return { layout, sections: [[1, Buffer.from([7])], [2, Buffer.from([0xe9, 1, 0xff, 1, 6, 0, 11, 22, 33])], [3, Buffer.from([5])], [6, spans], [99, Buffer.from([0xad])]] };
 }
+
+test("raw replacement bound permits stored data above a lowered quota", () => {
+  const { layout } = typedFixture();
+  layout.schema.dims = 3;
+  layout.schema.chunk = { width: 1, height: 1, depth: 1 };
+  layout.schema.columns = [column("n", "u8")];
+  layout.ids = [1];
+  layout.schema.chunkColumns = [column("title", "text(1024)", true)];
+  layout.chunkColumnIds = [1];
+  const form = encodeSectionedChunk(layout, { present: [false], columns: { n: [null] }, metadata: { title: "x".repeat(512) } });
+  layout.schema.options.varMaxChunkBytes = 1;
+  assert.ok(sectionedChunkFormLimit(layout) >= form.length);
+  assert.equal(decodeSectionedChunk(layout, form, [0]).metadata?.title, "x".repeat(512));
+});
 
 test("opaque fixed column preserves typed neighbours and independent descriptor widths", () => {
   const { layout, sections } = typedFixture();

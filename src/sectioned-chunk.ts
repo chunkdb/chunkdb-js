@@ -39,7 +39,8 @@ export function sectionedChunkFormLimit(layout: TableLayout): number {
   if ((schema.chunkColumns?.length ?? 0) !== 0) metadata += 4 + 16 * schema.chunkColumns!.length;
   const variable = schema.options.varMaxChunkBytes === 0 ? MAX_VARIABLE_BYTES : schema.options.varMaxChunkBytes;
   if (!Number.isSafeInteger(variable) || variable < 0 || variable > MAX_VARIABLE_BYTES) throw requestError("invalid variable byte limit", "SET CHUNK");
-  return 36 + 6 * 12 + presence + fixed + 4 + 24 * descriptors + metadata + variable;
+  // Only the server knows whether data above a lowered quota is shrinking.
+  return 36 + 6 * 12 + presence + fixed + 4 + 24 * descriptors + metadata + MAX_VARIABLE_BYTES;
 }
 
 function bit(data: Uint8Array, offset: number): boolean { return ((data[offset >> 3] >> (offset & 7)) & 1) !== 0; }
