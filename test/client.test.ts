@@ -13,6 +13,10 @@ import {
   connect,
   connectPool,
 } from "../src/index";
+import { encodeSectionedChunk } from "../src/sectioned-chunk";
+import { emptyChunk } from "../src/chunk-form";
+import { parseDescribe } from "../src/schema";
+import { parseReply } from "../src/protocol";
 import { FAKE_HELLO, describeReply, scramResponder, startFakeServer, type FakeRequest } from "./fake-server";
 
 function hello(request: FakeRequest): string | null {
@@ -376,6 +380,27 @@ test("table statements are written from their definitions", async () => {
   }
 });
 
+test("three dimensional tables and chunk columns retain their separate CQL domain", async () => {
+  const server = await startFakeServer((request) => hello(request) ?? "+OK\r\n");
+  const client = await connect({ port: server.port });
+  try {
+    await client.createTable("space", { columns: [{ name: "n", type: "u8" }], chunk: { width: 2, height: 3, depth: 4 },
+      large: { width: 1_000_000, height: 8, depth: 9 }, chunkColumns: [{ name: "title", type: "text(8)", nullable: true }] });
+    await client.alterTable("space", { kind: "addChunkColumn", column: { name: "n", type: "u10", default: 3 }, ifNotExists: true });
+    await client.alterTable("space", { kind: "renameChunkColumn", column: "n", to: "status" });
+    await client.alterTable("space", { kind: "dropChunkColumn", column: "title", ifExists: true });
+    assert.deepEqual(server.requests.slice(1).map(({ line }) => line), [
+      "CREATE TABLE space (n u8) CHUNK 2 x 3 x 4 LARGE 1000000 x 8 x 9 CHUNK COLUMNS (title text(8) NULL)",
+      "ALTER TABLE space ADD CHUNK COLUMN IF NOT EXISTS n u10 DEFAULT 3",
+      "ALTER TABLE space RENAME CHUNK COLUMN n TO status",
+      "ALTER TABLE space DROP CHUNK COLUMN IF EXISTS title",
+    ]);
+    const count = server.requests.length;
+    await assert.rejects(client.createTable("bad", { columns: [{ name: "n", type: "u8" }], chunk: { width: 2, height: 2, depth: 2 }, large: { width: 2, height: 2 } }), /3 dimensions/);
+    assert.equal(server.requests.length, count);
+  } finally { await client.close(); await server.close(); }
+});
+
 test("a statement without a reply times out and the client reconnects", async () => {
   let pings = 0;
   const server = await startFakeServer((request) => {
@@ -401,9 +426,8 @@ test("a statement without a reply times out and the client reconnects", async ()
 test("never-written chunks are null; versioned empty forms remain decoded", async (t) => {
   for (const mode of ["client", "pool", "transaction"] as const) {
     await t.test(mode, async () => {
-      const form = Buffer.alloc(16 + 2 + 20 + 64);
-      form.writeBigUInt64LE(7n, 0);
-      form.writeBigUInt64LE(1n, 8);
+      const layout = parseDescribe(parseReply(Buffer.from(describeReply("f32")))!.reply);
+      const form = encodeSectionedChunk(layout, emptyChunk(layout.schema), undefined, { version: 7n });
       const server = await startFakeServer((request) => {
         if (request.line.startsWith("HELLO")) return FAKE_HELLO;
         if (request.line.startsWith("DESCRIBE")) return describeReply("f32");

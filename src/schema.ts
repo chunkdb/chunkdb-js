@@ -11,6 +11,7 @@ export interface TableLayout {
    * entries name their column by it. Ids are never reused within a table.
    */
   ids: number[];
+  chunkColumnIds?: number[];
 }
 
 function malformed(what: string, command: string): ChunkProtocolError {
@@ -67,14 +68,17 @@ function booleanOf(reply: ChunkReply, what: string, command: string): boolean {
   return reply.value;
 }
 
-function sizeOf(reply: ChunkReply, what: string, command: string): ChunkSize {
-  if (reply.type !== "array" || reply.items.length < 2) {
-    throw malformed(`${what} is not [width, height]`, command);
+function sizeOf(reply: ChunkReply, what: string, command: string, dims: number, maximum: number): ChunkSize {
+  if (reply.type !== "array" || reply.items.length < dims) {
+    throw malformed(`${what} does not contain ${dims} dimensions`, command);
   }
-  return {
+  const size = {
     width: integerOf(reply.items[0], what, command),
     height: integerOf(reply.items[1], what, command),
+    ...(dims === 3 ? { depth: integerOf(reply.items[2], what, command) } : {}),
   };
+  if (Object.values(size).some((side) => side <= 0 || side > maximum)) throw malformed(`${what} has invalid dimensions`, command);
+  return size;
 }
 
 export function parseServerInfo(reply: ChunkReply): ChunkServerInfo {
@@ -132,7 +136,7 @@ export function parseColumns(reply: ChunkReply, command: string, allowEmpty = fa
   const ids = new Set<number>();
   return reply.items.map((item) => {
     const { column, id } = parseColumn(item, command);
-    if (id < 0 || id > 0xffff_ffff || names.has(column.name) || ids.has(id)) {
+    if (id <= 0 || id > 0xffff_ffff || names.has(column.name) || ids.has(id)) {
       throw malformed("invalid or duplicate column name/id", command);
     }
     names.add(column.name);
@@ -149,6 +153,15 @@ export function parseDescribe(reply: ChunkReply): TableLayout {
     throw malformed("columns is not an array", command);
   }
   const parsed = columnsReply.items.map((item) => parseColumn(item, command));
+  parseColumns(columnsReply, command);
+  const chunkColumnsReply = entries.get("chunk_columns");
+  const chunkParsed = chunkColumnsReply?.type === "array" ? chunkColumnsReply.items.map((item) => parseColumn(item, command)) : [];
+  if (chunkColumnsReply !== undefined) parseColumns(chunkColumnsReply, command, true);
+  const dims = entries.has("dims") ? integerOf(field(entries, "dims", command), "dims", command) : 2;
+  if (dims !== 2 && dims !== 3) throw malformed("dims is neither two nor three", command);
+  const chunk = sizeOf(field(entries, "chunk", command), "chunk", command, dims, 4096);
+  const large = sizeOf(field(entries, "large", command), "large", command, dims, 1_000_000);
+  if (chunk.width * chunk.height * (chunk.depth ?? 1) > 1_048_576) throw malformed("chunk has too many blocks", command);
   const options = mapOf(field(entries, "options", command), command);
   const option = (key: string) => field(options, key, command);
   const version = schemaVersionOf(field(entries, "version", command), command);
@@ -157,12 +170,12 @@ export function parseDescribe(reply: ChunkReply): TableLayout {
       table: textOf(field(entries, "table", command), "table", command),
       ...(entries.has("epoch") ? { epoch: epochOf(field(entries, "epoch", command), command) } : {}),
       ...(entries.has("revision") ? { revision: field(entries, "revision", command).type === "null" ? null : uint64Of(field(entries, "revision", command), "revision", command) } : {}),
-      ...(entries.has("dims") ? { dims: integerOf(field(entries, "dims", command), "dims", command) } : {}),
-      ...(entries.has("chunk_columns") ? { chunkColumns: parseColumns(field(entries, "chunk_columns", command), command, true) } : {}),
+      ...(entries.has("dims") ? { dims } : {}),
+      ...(chunkColumnsReply !== undefined ? { chunkColumns: chunkParsed.map(({ column }) => column) } : {}),
       version,
       columns: parsed.map(({ column }) => column),
-      chunk: sizeOf(field(entries, "chunk", command), "chunk", command),
-      large: sizeOf(field(entries, "large", command), "large", command),
+      chunk,
+      large,
       options: {
         durabilityMode: textOf(option("durability_mode"), "durability_mode", command),
         checkpointUpdates: integerOf(option("checkpoint_updates"), "checkpoint_updates", command),
@@ -175,6 +188,7 @@ export function parseDescribe(reply: ChunkReply): TableLayout {
       },
     },
     ids: parsed.map(({ id }) => id),
+    ...(chunkColumnsReply !== undefined ? { chunkColumnIds: chunkParsed.map(({ id }) => id) } : {}),
   };
 }
 
