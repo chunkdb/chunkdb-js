@@ -413,11 +413,8 @@ export class ChunkPool {
     let after: ChunkCoord | undefined;
     while (true) {
       const page = await this.scanChunks({ ...options, after });
-      yield* page.chunks;
-      if (!page.more || page.chunks.length === 0) {
-        return;
-      }
-      after = page.chunks[page.chunks.length - 1];
+      for (const { cx, cy } of page.chunks) { after = { cx, cy }; yield { cx, cy }; }
+      if (!page.more || page.chunks.length === 0) return;
     }
   }
 

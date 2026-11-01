@@ -10,6 +10,7 @@ import { noTableAfterProgress, schemaAfterProgress } from "./watch-consumers";
 import { parseSlots } from "../src/slots";
 import { parseDescribe, parseServerInfo, parseStatus } from "../src/schema";
 import { valueFromReply } from "../src/values";
+import { encodeSectionedChunk } from "../src/sectioned-chunk";
 import { chunkFormLimit, decodeChunkForm } from "../src/chunk-form";
 import { describeReply, FAKE_HELLO, startFakeServer } from "./fake-server";
 
@@ -98,7 +99,7 @@ test("foundation: optional HELLO metadata and unknown maps leave known fields in
   assert.equal(info.limits?.max_watches, 64);
 });
 
-test("foundation: unknown column is raw independently of known neighbors; legacy packed form rejects its width", () => {
+test("foundation: unknown column is raw independently of known neighbors; legacy packed form is refused", () => {
   const layout = parseDescribe(addFields(parsed(describeReply("future(17)")), {
     epoch: bulk("0123456789abcdef0123456789abcdef"), revision: integer((1n << 64n) - 1n),
     dims: integer(2n), chunk_columns: array(), future: map({ ignored: bulk("yes") }),
@@ -108,7 +109,7 @@ test("foundation: unknown column is raw independently of known neighbors; legacy
   assert.equal(valueFromReply(layout.schema.columns[0], integer(7n)), 7);
   assert.deepEqual(valueFromReply(layout.schema.columns[1], bulk("raw")), Buffer.from("raw"));
   const form = Buffer.alloc(38); form.writeBigUInt64LE(1n, 8);
-  assert.throws(() => decodeChunkForm(layout, form, [0, 1]), ChunkUnknownColumnTypeError);
+  assert.throws(() => decodeChunkForm(layout, form, [0, 1]), ChunkProtocolError);
 });
 
 test("foundation: an unknown push cannot consume any ordinary pipeline reply", { timeout: 5000 }, async () => {
@@ -676,8 +677,7 @@ const producerCases: ProducerReplyCase[] = [
   { wire: "#t\r\n" }, { wire: "*0\r\n" }, { wire: "_\r\n" }, { wire: ":1.5\r\n", malformedFrame: true },
 ];
 const producerSchema = parseDescribe(parsed(describeReply("u8"))).schema;
-const producerForm = Buffer.alloc(16 + 2 + 20 + 16);
-producerForm.writeBigUInt64LE(1n, 8);
+const producerForm = encodeSectionedChunk(parseDescribe(parsed(describeReply("u8"))), emptyChunk(producerSchema));
 const producerOperations = [
   { name: "SET BLOCK", send: (client: ChunkClient) => client.setBlock(0, 0, { h: 8 }) },
   { name: "DELETE BLOCK", send: (client: ChunkClient) => client.deleteBlock(0, 0) },
@@ -779,13 +779,15 @@ test("raw write review: known-width exact frame bound is sent, one extra byte is
   const options = description.entries.find(([key]) => key.type === "bulk" && key.value.toString() === "options")![1]; assert.equal(options.type, "map");
   addFields(options, { var_max_chunk_bytes: integer(18n) });
   const layout = parseDescribe(description);
-  // Header16 + presence2 + sixteen u10 values20 + one variable entry12 and bytes6 = 56.
-  assert.equal(chunkFormLimit(layout), 56);
-  const form = Buffer.alloc(56); form.writeBigUInt64LE(1n, 8); form[16] = 1; form[18] = 7;
-  form.writeUInt32LE(2, 38); form.writeUInt32LE(0, 42); form.writeUInt32LE(6, 46);
-  Buffer.from([0, 255, 13, 10, 128, 36]).copy(form, 50);
+  const bound = chunkFormLimit(layout);
+  assert.equal(bound, 64 * 1024 * 1024 + 158);
+  const state = emptyChunk(layout.schema);
+  state.present[0] = true; state.columns.id[0] = 7;
+  const value = Buffer.from([0, 255, 13, 10, 128, 36]);
+  state.columns.h[0] = value;
+  const form = encodeSectionedChunk(layout, state);
   const decoded = decodeChunkForm(layout, form, [0, 1]);
-  assert.equal(decoded.columns.id[0], 7); assert.deepEqual(decoded.columns.h[0], form.subarray(50));
+  assert.equal(decoded.columns.id[0], 7); assert.deepEqual(decoded.columns.h[0], value);
   const server = await startFakeServer(({ line, frames }) => {
     if (line === "HELLO 3") return FAKE_HELLO;
     if (line === "DESCRIBE t") return encode(description);
@@ -796,8 +798,8 @@ test("raw write review: known-width exact frame bound is sent, one extra byte is
   const client = new ChunkClient({ port: server.port, table: "t" });
   try {
     assert.equal(await client.setChunkRaw(0, 0, form), maximumVersion);
-    await assert.rejects(client.setChunkRaw(0, 0, Buffer.concat([form, Buffer.from([0])])), (error: unknown) =>
-      error instanceof ChunkProtocolError && error.phase === "request" && error.command === "SET CHUNK" && /at most 56 bytes, got 57/.test(error.message));
+    await assert.rejects(client.setChunkRaw(0, 0, Buffer.alloc(bound + 1)), (error: unknown) =>
+      error instanceof ChunkProtocolError && error.phase === "request" && error.command === "SET CHUNK" && new RegExp(`at most ${bound} bytes, got ${bound + 1}`).test(error.message));
     assert.equal(await client.ping(), "PONG");
     assert.equal(server.requests.filter(({ line }) => line.startsWith("SET CHUNK ")).length, 1);
     assert.equal(await client.setChunkRaw(0, 0, form), maximumVersion);

@@ -21,7 +21,11 @@ test("TLS: login, typed blocks and a chunk round trip", async () => {
     const raw = await client.getChunkRaw(0, 0);
     assert.ok(raw);
     await client.setChunkRaw(1, 0, raw);
-    assert.deepEqual((await client.getChunkRaw(1, 0))?.subarray(8), raw.subarray(8));
+    const copied = await client.getChunkRaw(1, 0);
+    assert.ok(copied);
+    assert.deepEqual(copied.subarray(0, 8), raw.subarray(0, 8));
+    assert.deepEqual(copied.subarray(16, 24), raw.subarray(16, 24));
+    assert.deepEqual(copied.subarray(32), raw.subarray(32));
     await client.close();
 
     // Without tlsInsecure the self-signed certificate is refused.

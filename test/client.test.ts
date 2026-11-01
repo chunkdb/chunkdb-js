@@ -13,6 +13,10 @@ import {
   connect,
   connectPool,
 } from "../src/index";
+import { encodeSectionedChunk } from "../src/sectioned-chunk";
+import { emptyChunk } from "../src/chunk-form";
+import { parseDescribe } from "../src/schema";
+import { parseReply } from "../src/protocol";
 import { FAKE_HELLO, describeReply, scramResponder, startFakeServer, type FakeRequest } from "./fake-server";
 
 function hello(request: FakeRequest): string | null {
@@ -422,9 +426,8 @@ test("a statement without a reply times out and the client reconnects", async ()
 test("never-written chunks are null; versioned empty forms remain decoded", async (t) => {
   for (const mode of ["client", "pool", "transaction"] as const) {
     await t.test(mode, async () => {
-      const form = Buffer.alloc(16 + 2 + 20 + 64);
-      form.writeBigUInt64LE(7n, 0);
-      form.writeBigUInt64LE(1n, 8);
+      const layout = parseDescribe(parseReply(Buffer.from(describeReply("f32")))!.reply);
+      const form = encodeSectionedChunk(layout, emptyChunk(layout.schema), undefined, { version: 7n });
       const server = await startFakeServer((request) => {
         if (request.line.startsWith("HELLO")) return FAKE_HELLO;
         if (request.line.startsWith("DESCRIBE")) return describeReply("f32");

@@ -1,4 +1,4 @@
-import { ChunkProtocolError } from "./errors";
+import { ChunkProtocolError, ChunkUnknownColumnTypeError } from "./errors";
 import type { TableLayout } from "./schema";
 import type { ChunkColumn, ChunkState, ChunkStateInput, ChunkValue } from "./types";
 import { ChunkBits, decodeFixedValue, encodeFixedValue, encodeVarValue, fixedWidth, requestError, StaleSchemaError } from "./values";
@@ -25,6 +25,8 @@ export function sectionedChunkFormLimit(layout: TableLayout): number {
   const blocks = sectionedBlockCount(layout), presence = Math.ceil(blocks / 8);
   let fixed = 0, descriptors = 0, metadata = 0;
   for (const column of schema.columns) {
+    if (column.type.kind === "unknown") throw new ChunkUnknownColumnTypeError(
+      `cannot size a raw SET CHUNK form: column ${column.name} has unknown type ${column.typeName}; writing requires known column widths`, { phase: "request", command: "SET CHUNK" });
     const width = fixedWidth(column.type);
     if (width !== 0) {
       fixed += Math.ceil(blocks * width / 8) + (column.nullable ? presence : 0);

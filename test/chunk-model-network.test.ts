@@ -195,6 +195,29 @@ for (const pooled of [false, true]) test(`3D ${pooled ? "pooled" : "client"} ite
   } finally { await client.close(); await server.close(); }
 });
 
+for (const pooled of [false, true]) test(`2D ${pooled ? "pooled" : "client"} iterator owns its pagination cursor`, async () => {
+  let page = 0;
+  const server = await startFakeServer(({ line }) => {
+    if (line === "HELLO 3") return FAKE_HELLO;
+    if (line.startsWith("DESCRIBE")) return description(2);
+    const next = page++;
+    return map({ chunks: array(array(integer(next), integer(0))),
+      more: bool(next === 0), epoch: bulk(epoch), position: integer(2), retained_deletion_floor: integer(0) });
+  });
+  const client = pooled ? await connectPool({ port: server.port, maxConnections: 1 }) : await connect({ port: server.port });
+  try {
+    const iterator = client.scanAllChunks({ table: "space", limit: 1 });
+    const first = await iterator.next();
+    assert.equal(first.done, false);
+    assert.ok(first.value);
+    first.value.cx = 99; first.value.cy = -99;
+    const second = await iterator.next();
+    assert.equal(server.requests.at(-1)?.line, "SCAN CHUNKS FROM space AFTER 0 0 LIMIT 1");
+    assert.deepEqual(second, { done: false, value: { cx: 1, cy: 0 } });
+    assert.equal((await iterator.next()).done, true);
+  } finally { await client.close(); await server.close(); }
+});
+
 test("scan decoder refuses stalled cursors, changed lifetimes and broken entry contracts", () => {
   const { layout } = fixture();
   const base = (rows: Buffer, more = false, lifetime = epoch, floor = 2n, position = integer(5)) => parseReply(map({ chunks: rows, more: bool(more), epoch: bulk(lifetime), retained_deletion_floor: integer(floor), position }))!.reply;

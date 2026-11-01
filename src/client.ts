@@ -30,7 +30,7 @@ import {
   type ChunkError,
 } from "./errors";
 import { chunkFormLimit, decodeChunkForm, encodeChunkForm } from "./chunk-form";
-import { decodeSectionedChunk, encodeSectionedChunk, sectionedChunkFormLimit } from "./sectioned-chunk";
+import { decodeSectionedChunk, encodeSectionedChunk } from "./sectioned-chunk";
 import { parseSectionedForm } from "./chunk-sections";
 import { decodeChunkScanPage } from "./chunk-scan";
 import { encodeStatement, ReplyReader, type ChunkParameter, type ChunkReply, type ErrorReply, type PushReply } from "./protocol";
@@ -1135,11 +1135,8 @@ export class ChunkClient {
     let after: ChunkCoord | undefined;
     while (true) {
       const page = await this.scanChunks({ ...options, after });
-      yield* page.chunks;
-      if (!page.more || page.chunks.length === 0) {
-        return;
-      }
-      after = page.chunks[page.chunks.length - 1];
+      for (const { cx, cy } of page.chunks) { after = { cx, cy }; yield { cx, cy }; }
+      if (!page.more || page.chunks.length === 0) return;
     }
   }
 
@@ -1321,7 +1318,7 @@ export class ChunkClient {
       const indexes = columnIndexes(layout, options.columns);
       const names = indexes.map((index) => layout.schema.columns[index].name);
       const reply = await this.run(`GET CHUNK ${at} FROM ${table}${columnsClause(names)}`, [], "GET CHUNK");
-      return reply.type === "null" ? null : point.length === 3 ? decodeSectionedChunk(layout, bulkOf(reply, "GET CHUNK"), indexes) : decodeChunkForm(layout, bulkOf(reply, "GET CHUNK"), indexes);
+      return reply.type === "null" ? null : decodeChunkForm(layout, bulkOf(reply, "GET CHUNK"), indexes);
     });
   }
 
@@ -1339,7 +1336,7 @@ export class ChunkClient {
       `SET CHUNK ${pointClause(point)} IN ${table} $1` + writeClause(options, "SET CHUNK", true);
     return await this.withLayout(table, true, async (layout) => {
       const writeLayout = { ...layout, schema: { ...layout.schema, options: { ...layout.schema.options, varMaxChunkBytes: 64 * 1024 * 1024 } } };
-      const form = point.length === 3 ? encodeSectionedChunk(writeLayout, state) : encodeChunkForm(writeLayout, state);
+      const form = encodeChunkForm(writeLayout, state);
       return await this.run(statement, [form], "SET CHUNK");
     }, true);
   }
@@ -1353,14 +1350,14 @@ export class ChunkClient {
     }
     // A longer frame than the table takes closes the connection.
     return await this.withLayout(table, true, async (layout) => {
-      const limit = point.length === 3 ? sectionedChunkFormLimit(layout) : chunkFormLimit(layout);
+      const limit = chunkFormLimit(layout);
       if (form.length > limit) {
         throw new StaleSchemaError(`a chunk form of ${table} takes at most ${limit} bytes, got ${form.length}`, {
           phase: "request",
           command: "SET CHUNK",
         });
       }
-      if (point.length === 3) parseSectionedForm(form, limit, true);
+      parseSectionedForm(form, limit, true);
       return await this.run(statement, [form], "SET CHUNK");
     });
   }

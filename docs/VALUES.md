@@ -79,6 +79,7 @@ Typed chunk reads admit at most 4194304 block-column cells before allocating den
 Select fewer columns or read the raw form when a chunk exceeds that limit.
 
 `getChunkRaw`, `setChunkRaw` and `getAreaRaw` transfer binary forms.
+Typed chunk decoding and raw writes require the checked CKCF form for both table dimensions.
 A stale raw form raises `ChunkSchemaMismatchError`.
 Raw mutations reject unknown sections or flags before sending.
 Read decoding uses the structural hard limit, so lowering the table's variable-value quota does not make retained data unreadable.
