@@ -107,6 +107,16 @@ export function checkCoordinate(value: number, what: string): number {
   return value;
 }
 
+/** Validate an exact coordinate without rounding an int64 bigint. */
+export function checkInt64Coordinate(value: number | bigint, what: string): bigint {
+  if (typeof value === "number") {
+    if (!Number.isSafeInteger(value)) throw requestError(`${what} must be an exact int64 coordinate`);
+    value = BigInt(value);
+  }
+  if (typeof value !== "bigint" || value < -(1n << 63n) || value > (1n << 63n) - 1n) throw requestError(`${what} must be an exact int64 coordinate`);
+  return value;
+}
+
 const MAX_U64 = (1n << 64n) - 1n;
 
 export function checkVersion(version: bigint): bigint {
