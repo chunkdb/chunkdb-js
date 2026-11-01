@@ -108,6 +108,7 @@ Pass a returned cursor back with the same selector and projection; each call ret
 The cursor advances over requested empty cells too, so an unfinished page can have no populated chunks.
 A completed page always has a null cursor, including when its final page contains populated chunks.
 The server can shorten a page at its response byte limit.
+The original `commandTimeoutMs` deadline also covers typed area validation and decoding; expiry closes that response's connection and ends an active transaction.
 All GET AREA replies, including unpaged and raw reads, enforce the negotiated response-byte limit while parsing, before allocating declared bulk bodies.
 Malformed or oversized replies close the connection; later independent calls may reconnect.
 Successful area replies also admit at most 1048576 aggregate reply slots before constructing their arrays and maps.

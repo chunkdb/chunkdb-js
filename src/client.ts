@@ -186,7 +186,7 @@ interface PendingRequest {
   replyLimits?: ReplyLimits;
 }
 
-interface AreaResponse { reply: ChunkReply; socket: TransportSocket }
+interface AreaResponse { reply: ChunkReply; socket: TransportSocket; expiresAt: number }
 
 const PROTOCOL_VERSION = 3;
 const DEFAULT_HOST = "127.0.0.1";
@@ -1427,16 +1427,21 @@ export class ChunkClient {
 
   private async runArea(statement: string, shape: ReplyLimits["shape"], limit?: number): Promise<AreaResponse> {
     let socket: TransportSocket | undefined;
-    const reply = await this.send(statement, [], "GET AREA", true, shape, limit, (connection) => { socket = connection; });
+    let expiresAt = 0;
+    const reply = await this.send(statement, [], "GET AREA", true, shape, limit, (connection, deadline) => { socket = connection; expiresAt = deadline; });
     if (reply.type === "error") throw this.serverError(reply, "GET AREA");
     if (socket === undefined) throw new ChunkProtocolError("GET AREA response has no connection", { phase: "protocol", command: "GET AREA" });
-    return { reply, socket };
+    return { reply, socket, expiresAt };
   }
 
-  private decodeAreaResponse<T>(response: AreaResponse, decode: (reply: ChunkReply) => T): T {
-    try { return decode(response.reply); }
+  private decodeAreaResponse<T>(response: AreaResponse, decode: (reply: ChunkReply, checkpoint: () => void) => T): T {
+    const checkpoint = (): void => {
+      if (performance.now() >= response.expiresAt) throw new ChunkTimeoutError(`GET AREA command timeout after ${this.options.commandTimeoutMs}ms`, { phase: "timeout", command: "GET AREA" });
+    };
+    try { checkpoint(); const value = decode(response.reply, checkpoint); checkpoint(); return value; }
     catch (error) {
-      if (error instanceof ChunkProtocolError && error.phase === "protocol" && !(error instanceof StaleSchemaError) && !(error instanceof AreaDecodeLimitError)) {
+      try { checkpoint(); } catch (expired) { error = expired; }
+      if (error instanceof ChunkTimeoutError || error instanceof ChunkProtocolError && error.phase === "protocol" && !(error instanceof StaleSchemaError) && !(error instanceof AreaDecodeLimitError)) {
         const tx = this.sendTurns.getStore()?.tx;
         if (tx?.socket === response.socket) { tx.failure ??= error; tx.began = false; }
         if (this.socket === response.socket) this.clearConnectionState(error);
@@ -1460,14 +1465,15 @@ export class ChunkClient {
       const limit = request.limit ?? areaLimits.maxAreaChunks;
       const statement = `GET AREA ${request.clause} FROM ${table}${columnsClause(names)} LIMIT ${limit}${request.after === undefined ? "" : ` AFTER ${request.after.join(" ")}`} WITH SCHEMA`;
       const response = await this.runArea(statement, "schemaPage", limit);
-      return this.decodeAreaResponse(response, (value) => {
+      return this.decodeAreaResponse(response, (value, checkpoint) => {
         const reply = itemsOf(value, "GET AREA");
         if (reply.length < 2) throw new ChunkProtocolError("GET AREA metadata is missing fields", { phase: "protocol", command: "GET AREA" });
         const schemaVersion = uint64Of(reply[0], "schema version", "GET AREA");
         this.checkReadSchema(layout, schemaVersion);
-        const page = decodeAreaPage(reply[1], request, areaLimits.maxAreaChunks);
+        const page = decodeAreaPage(reply[1], request, areaLimits.maxAreaChunks, checkpoint);
         if (!raw) checkAreaDecodedCells(layout, indexes, page.rows.length);
         const chunks = page.rows.map((row) => {
+          checkpoint();
           const fields = itemsOf(row, "GET AREA"), form = bulkOf(fields[request.dims], "GET AREA");
           return { cx: axisReply(fields[0], "cx", "GET AREA"), cy: axisReply(fields[1], "cy", "GET AREA"),
             ...(request.dims === 3 ? { cz: axisReply(fields[2], "cz", "GET AREA") } : {}), chunk: raw ? form : decodeSectionedChunk(layout, form, indexes) };
@@ -1488,7 +1494,7 @@ export class ChunkClient {
       if (layout.schema.dims !== 3) throw requestError(`table ${table} is not three-dimensional`, "GET AREA");
       const indexes = columnIndexes(layout, options.columns), names = indexes.map((index) => layout.schema.columns[index].name);
       const response = await this.runArea(`GET AREA ${clause} FROM ${table}${columnsClause(names)}${withSchema ? " WITH SCHEMA" : ""}`, withSchema ? "schemaRows" : "rows");
-      return this.decodeAreaResponse(response, (value) => {
+      return this.decodeAreaResponse(response, (value, checkpoint) => {
         let reply = value;
         let schemaVersion: bigint | undefined;
         if (withSchema) {
@@ -1501,6 +1507,7 @@ export class ChunkClient {
         const rows = itemsOf(reply, "GET AREA");
         if (!raw) checkAreaDecodedCells(layout, indexes, rows.length);
         const entries = rows.map((item) => {
+          checkpoint();
           const fields = itemsOf(item, "GET AREA");
           if (fields.length < 4) throw new ChunkProtocolError("GET AREA entry needs three coordinates and a form", { phase: "protocol", command: "GET AREA" });
           const point = { cx: axisReply(fields[0], "cx", "GET AREA"), cy: axisReply(fields[1], "cy", "GET AREA"), cz: axisReply(fields[2], "cz", "GET AREA") };
@@ -1519,15 +1526,13 @@ export class ChunkClient {
       const indexes = columnIndexes(layout, options.columns);
       const names = indexes.map((index) => layout.schema.columns[index].name);
       const response = await this.runArea(`GET AREA ${clause} FROM ${table}${columnsClause(names)}`, "rows");
-      return this.decodeAreaResponse(response, (reply) => {
-        const entries = this.areaEntries(reply, layout.schema.dims);
+      return this.decodeAreaResponse(response, (reply, checkpoint) => {
+        const entries = this.areaEntries(reply, layout.schema.dims, checkpoint);
         checkAreaDecodedCells(layout, indexes, entries.length);
-        return entries.map(({ cx, cy, cz, chunk }) => ({
-          cx,
-          cy,
-          ...(cz === undefined ? {} : { cz }),
-          chunk: decodeChunkForm(layout, chunk, indexes),
-        }));
+        return entries.map(({ cx, cy, cz, chunk }) => {
+          checkpoint();
+          return { cx, cy, ...(cz === undefined ? {} : { cz }), chunk: decodeChunkForm(layout, chunk, indexes) };
+        });
       });
     });
   }
@@ -1540,14 +1545,14 @@ export class ChunkClient {
       const indexes = columnIndexes(layout, options.columns);
       const names = indexes.map((index) => layout.schema.columns[index].name);
       const response = await this.runArea(`GET AREA ${areaClause(area)} FROM ${table}${columnsClause(names)} WITH SCHEMA`, "schemaRows");
-      return this.decodeAreaResponse(response, (reply) => {
+      return this.decodeAreaResponse(response, (reply, checkpoint) => {
         const items = itemsOf(reply, "GET AREA");
         if (items.length < 2) throw new ChunkProtocolError("GET AREA metadata is missing fields", { phase: "protocol", command: "GET AREA" });
         const schemaVersion = uint64Of(items[0], "schema version", "GET AREA");
         this.checkReadSchema(layout, schemaVersion);
-        const entries = this.areaEntries(items[1], layout.schema.dims);
+        const entries = this.areaEntries(items[1], layout.schema.dims, checkpoint);
         if (!raw) checkAreaDecodedCells(layout, indexes, entries.length);
-        return { schemaVersion, entries: raw ? entries : entries.map(({ cx, cy, cz, chunk }) => ({ cx, cy, ...(cz === undefined ? {} : { cz }), chunk: decodeChunkForm(layout, chunk, indexes) })) };
+        return { schemaVersion, entries: raw ? entries : entries.map(({ cx, cy, cz, chunk }) => { checkpoint(); return { cx, cy, ...(cz === undefined ? {} : { cz }), chunk: decodeChunkForm(layout, chunk, indexes) }; }) };
       });
     });
   }
@@ -1557,7 +1562,7 @@ export class ChunkClient {
     return this.withLayout(table, false, async (layout) => {
       const names = (options.columns ?? []).map((name) => checkName(name, "a column name"));
       const response = await this.runArea(`GET AREA ${areaClause(area)} FROM ${table}${columnsClause(names)}`, "rows");
-      return this.decodeAreaResponse(response, (reply) => this.areaEntries(reply, layout.schema.dims));
+      return this.decodeAreaResponse(response, (reply, checkpoint) => this.areaEntries(reply, layout.schema.dims, checkpoint));
     });
   }
 
@@ -1753,10 +1758,11 @@ export class ChunkClient {
     this.schemaFetches.delete(table);
   }
 
-  private areaEntries(reply: ChunkReply, dims = 2): ChunkAreaRawEntry[] {
+  private areaEntries(reply: ChunkReply, dims = 2, checkpoint: () => void = () => {}): ChunkAreaRawEntry[] {
     const command = "GET AREA";
     if (dims !== 2 && dims !== 3) throw new ChunkProtocolError("unsupported GET AREA dimensions", { phase: "protocol", command });
     return itemsOf(reply, command).map((item) => {
+      checkpoint();
       if (item.type !== "array" || item.items.length < dims + 1) {
         throw new ChunkProtocolError("malformed GET AREA entry", { phase: "protocol", command });
       }
@@ -2069,7 +2075,7 @@ export class ChunkClient {
     main = true,
     areaShape?: ReplyLimits["shape"],
     areaLimit?: number,
-    onConnection?: (socket: TransportSocket) => void,
+    onConnection?: (socket: TransportSocket, expiresAt: number) => void,
   ): Promise<ChunkReply> {
     // Checked before connecting: nothing is sent for a statement that
     // cannot be framed.
@@ -2120,7 +2126,8 @@ export class ChunkClient {
       if (areaShape === undefined) { const raw = rawAreaReplyOptions(statement); areaShape = raw.shape; areaLimit = raw.limit; }
       replyLimits = this.areaReplyLimits(areaShape, areaLimit);
     }
-    onConnection?.(socket);
+    const expiresAt = performance.now() + this.options.commandTimeoutMs;
+    onConnection?.(socket, expiresAt);
     const replyPromise = new Promise<ChunkReply>((resolve, reject) => {
       const timer = setTimeout(() => {
         const index = this.pendingQueue.findIndex((pending) => pending.timer === timer);

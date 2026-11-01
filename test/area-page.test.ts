@@ -2,7 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { connect, ChunkClient } from "../src/client";
 import { connectPool } from "../src/pool";
-import { captureAreaPage, decodeAreaPage, rawAreaReplyOptions } from "../src/area-page";
+import { captureAreaPage, decodeAreaPage, rawAreaReplyOptions, validAreaProgress } from "../src/area-page";
+import { ChunkTimeoutError } from "../src/errors";
 import { parseReply } from "../src/protocol";
 import { parseDescribe } from "../src/schema";
 import { encodeSectionedChunk } from "../src/sectioned-chunk";
@@ -25,6 +26,97 @@ function description(dims = 2, columns = 1, blocks = 1): Buffer {
 
 const page = (rows: Buffer[], more: boolean, after: bigint[] | null) => map({ chunks: array(...rows), more: bool(more), after: after === null ? nil : array(...after.map(integer)) });
 const parsed = (wire: Buffer) => parseReply(wire)!.reply;
+
+test("area progress agrees with independent small prefixes and skips whole ball rows", () => {
+  for (const dims of [2, 3] as const) for (const around of [false, true]) {
+    const area = dims === 2 ? around ? { cx: 0, cy: 0, radius: 2 } : { cx0: -1, cy0: -1, cx1: 1, cy1: 1 }
+      : around ? { cx: 0, cy: 0, cz: 0, radius: 2 } : { cx0: -1, cy0: -1, cz0: -1, cx1: 1, cy1: 1, cz1: 1 };
+    const request = captureAreaPage(area, {}, dims), points: bigint[][] = [];
+    for (let x = -2; x <= 2; x += 1) for (let y = -2; y <= 2; y += 1) for (let z = -2; z <= 2; z += 1) {
+      if (dims === 2 && z !== 0) continue;
+      const inside = around ? x * x + y * y + z * z <= 4 : Math.abs(x) <= 1 && Math.abs(y) <= 1 && (dims === 2 || Math.abs(z) <= 1);
+      if (inside) points.push([BigInt(x), BigInt(y), ...(dims === 3 ? [BigInt(z)] : [])]);
+    }
+    for (let start = 0; start <= points.length; start += 1) {
+      request.after = start === 0 ? undefined : points[start - 1];
+      for (let limit = 1; limit <= points.length + 1; limit += 1) for (let end = start; end <= points.length; end += 1) {
+        const cursor = end === points.length ? null : points[end];
+        const count = end - start + (cursor === null ? 0 : 1);
+        assert.equal(validAreaProgress(request, cursor, limit), count <= limit && (cursor === null || end !== points.length - 1), `${dims}/${around}/${start}/${end}/${limit}`);
+      }
+    }
+    if (around) {
+      request.after = undefined;
+      let calls = 0;
+      assert.equal(validAreaProgress(request, null, points.length, () => { calls += 1; }), true);
+      assert.equal(calls, (dims === 2 ? 5 : 13) + 2);
+      calls = 0;
+      const expired = new ChunkTimeoutError("expired", { phase: "timeout", command: "GET AREA" });
+      assert.throws(() => validAreaProgress(request, null, points.length, () => { calls += 1; if (calls === 3) throw expired; }), (error) => error === expired);
+      assert.equal(calls, 3);
+    }
+  }
+});
+
+test("rectangle progress uses bounded ranks for int64-wide and enormous selectors", () => {
+  const min = -(1n << 63n), max = (1n << 63n) - 1n;
+  const request = captureAreaPage({ cx0: min, cy0: min, cz0: min, cx1: max, cy1: max, cz1: max }, {}, 3);
+  const check = (cursor: bigint[] | null, limit: number, want: boolean) => {
+    let calls = 0;
+    assert.equal(validAreaProgress(request, cursor, limit, () => { calls += 1; assert.ok(calls <= 2, "rectangle validation enumerated cells"); }), want);
+    assert.equal(calls, 2);
+  };
+  check(null, Number.MAX_SAFE_INTEGER, false);
+  request.after = [max, max, max - 1n]; check(null, 1, true);
+  request.after = [max, max, max - 2n]; check([max, max, max - 1n], 1, true);
+  const huge = captureAreaPage({ cx0: 0, cy0: 0, cx1: (1n << 40n) - 1n, cy1: 0 }, {}, 2);
+  let calls = 0;
+  assert.equal(validAreaProgress(huge, null, 2 ** 40, () => { calls += 1; assert.ok(calls <= 2); }), true);
+  assert.equal(calls, 2);
+});
+
+test("ball progress observes expiry between complete rows", () => {
+  const request = captureAreaPage({ cx: 0, cy: 0, cz: 0, radius: 2 }, {}, 3);
+  const expired = new ChunkTimeoutError("expired", { phase: "timeout", command: "GET AREA" });
+  let calls = 0;
+  assert.throws(() => validAreaProgress(request, null, 33, () => { calls += 1; if (calls === 3) throw expired; }), (error) => error === expired);
+  assert.equal(calls, 3);
+});
+
+for (const mode of ["client", "pool", "transaction"] as const) for (const expiry of ["reply", "decode"] as const) test(`original area deadline expires during ${expiry} and closes ${mode} ownership`, async (t) => {
+  let clock = 0, decoding = false, checks = 0;
+  t.mock.method(performance, "now", () => {
+    if (expiry === "decode" && decoding && ++checks >= 8) return clock + 20000;
+    return clock;
+  });
+  let peerClosed!: () => void;
+  const closed = new Promise<void>((resolve) => { peerClosed = resolve; });
+  const server = await startFakeServer(({ line }, socket) => {
+    if (line === "HELLO 3") return hello();
+    if (line.startsWith("DESCRIBE")) return description();
+    if (line.startsWith("GET AREA")) {
+      socket.once("close", peerClosed);
+      if (expiry === "reply") clock += 20000;
+      decoding = true; checks = 0;
+      return array(integer(1), page([], false, null));
+    }
+    if (line === "PING") return "+PONG\r\n";
+    return "+OK\r\n";
+  });
+  const options = { port: server.port, table: "t", commandTimeoutMs: 10000 };
+  const owner = mode === "pool" ? await connectPool({ ...options, maxConnections: 1 }) : await connect(options);
+  try {
+    const read = (client: Pick<ChunkClient, "getAreaPage">) => client.getAreaPage({ cx0: 0, cy0: 0, cx1: 0, cy1: 0 });
+    if (mode === "transaction") {
+      await assert.rejects(owner.transaction(async (tx) => { await assert.rejects(read(tx), ChunkTimeoutError); }), ChunkTimeoutError);
+      assert.equal(server.requests.some(({ line }) => line === "COMMIT"), false);
+    } else await assert.rejects(read(owner), ChunkTimeoutError);
+    const prior = server.connections;
+    await owner.ping();
+    assert.equal(server.connections, prior + 1);
+    await closed;
+  } finally { await owner.close(); await server.close(); }
+});
 
 test("area page validation retains exact axes, empty-cell progress and terminal cursors", () => {
   const min = -(1n << 63n);
