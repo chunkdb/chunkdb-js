@@ -90,6 +90,7 @@ export class ChunkServerError extends ChunkError {
   /** Free text after structured keys, independent of retry classification. */
   readonly detail: string;
   readonly current?: bigint;
+  readonly floor?: bigint;
   readonly expected?: bigint;
   readonly actual?: bigint;
   readonly revision?: bigint;
@@ -114,6 +115,8 @@ export class ChunkServerError extends ChunkError {
     this.detail = parsed.message;
     const integer = (name: string) => /^-?[0-9]+$/.test(parsed.keys[name] ?? "") ? BigInt(parsed.keys[name]) : undefined;
     this.current = integer("current");
+    const floor = integer("floor");
+    this.floor = floor !== undefined && floor >= 0n && floor <= (1n << 64n) - 1n ? floor : undefined;
     this.expected = integer("expected");
     this.actual = integer("actual");
     this.revision = integer("revision");

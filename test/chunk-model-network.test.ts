@@ -143,7 +143,8 @@ test("3D scan retains independent tombstone versions and a nullable completed fr
     if (line.startsWith("DESCRIBE")) return description();
     if (mode === 0) return page(array(array(integer(-(1n << 63n)), integer(0), integer(0), integer(41), nil), array(integer(-1), integer(2), integer(0), integer(42), bulk(form))), integer(43));
     if (mode === 1) return page(array(array(integer(1), integer(2), integer(0), integer((1n << 64n) - 1n))), nil, 0n);
-    return "-ERR INVALID_ARGUMENT reason=tombstone_history_lost requested history has been compacted\r\n";
+    const floor = mode === 3 ? "-1" : mode === 4 ? "18446744073709551616" : "18446744073709551614";
+    return `-ERR RESYNC_REQUIRED reason=history_lost floor=${floor} current=18446744073709551615 requested history has been compacted\r\n`;
   });
   const client = await connect({ port: server.port });
   try {
@@ -163,7 +164,11 @@ test("3D scan retains independent tombstone versions and a nullable completed fr
     assert.equal(readonly.chunks[0].version, (1n << 64n) - 1n);
     assert.equal(Object.hasOwn(readonly.chunks[0], "deleted"), false);
     mode = 2;
-    await assert.rejects(client.scanChunks3D(options), (error) => error instanceof ChunkServerError && error.reason === "tombstone_history_lost");
+    await assert.rejects(client.scanChunks3D(options), (error) => error instanceof ChunkServerError && error.serverCode === "RESYNC_REQUIRED" && error.reason === "history_lost" && error.floor === (1n << 64n) - 2n && error.current === (1n << 64n) - 1n && error.retryClass === "fatal");
+    for (const [invalidMode, floor] of [[3, "-1"], [4, "18446744073709551616"]] as const) {
+      mode = invalidMode;
+      await assert.rejects(client.scanChunks3D(options), (error) => error instanceof ChunkServerError && error.floor === undefined && error.keys.floor === floor);
+    }
   } finally { await client.close(); await server.close(); }
 });
 

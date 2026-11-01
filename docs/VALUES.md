@@ -119,7 +119,7 @@ These pages include `epoch`, nullable `position` and `retainedDeletionFloor`.
 `since` selects revisions strictly greater than its value and includes retained tombstones; their decoded `chunk` is null and `deleted` is true.
 Without data, `deleted` is omitted because the row carries only coordinates and a version.
 Pass the saved `epoch` to refuse a drop-and-recreate lifetime change.
-A revision below the retained deletion floor fails with `reason=tombstone_history_lost`; rebuild the snapshot before resuming.
+A revision below the retained deletion floor fails with `RESYNC_REQUIRED`, `reason=history_lost` and `error.floor`; rebuild the snapshot before resuming.
 The client caches schemas and refreshes them after its own schema changes.
 A stale-schema typed operation refreshes and retries once.
 
