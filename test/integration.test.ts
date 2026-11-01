@@ -45,7 +45,7 @@ test("HELLO 3, empty catalog, ping and an explicitly created default table", asy
     assert.ok(info !== null);
     assert.equal(info.protocol, 3);
     assert.equal(info.maxParameters, 65535);
-    assert.equal(info.maxAreaChunks, 256);
+    assert.equal(info.maxAreaChunks, 4096);
     assert.equal(info.maxScanLimit, 1024);
     assert.ok(info.maxLineBytes > 0 && info.maxResponseBytes > 0 && info.serverVersion !== "");
     assert.equal(await client.ping(), "PONG");

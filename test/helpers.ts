@@ -178,7 +178,7 @@ function tlsFixtures(): { cert: string; key: string } {
  * Starts a server with an administrator (`admin`, whose password `uri`
  * carries), or with `--auth none`.
  */
-export async function startServer(options: { tls?: boolean; auth?: "users" | "none"; slotMaxBytes?: number; feedLingerMs?: number; backupDir?: string } = {}): Promise<StartedServer> {
+export async function startServer(options: { tls?: boolean; auth?: "users" | "none"; slotMaxBytes?: number; feedLingerMs?: number; backupDir?: string; maxAreaChunks?: number; maxAreaResponseBytes?: number; txnMaxWrittenChunks?: number; txnMaxReadChunks?: number } = {}): Promise<StartedServer> {
   const host = "127.0.0.1";
   const port = await pickFreePort();
   const auth = options.auth ?? "users";
@@ -208,6 +208,9 @@ export async function startServer(options: { tls?: boolean; auth?: "users" | "no
   if (options.slotMaxBytes !== undefined) args.push("--slot-max-bytes", String(options.slotMaxBytes));
   if (options.feedLingerMs !== undefined) args.push("--feed-linger-ms", String(options.feedLingerMs));
   if (options.backupDir !== undefined) args.push("--backup-dir", options.backupDir);
+  for (const [flag, value] of [["--max-area-chunks", options.maxAreaChunks], ["--max-area-response-bytes", options.maxAreaResponseBytes], ["--txn-max-written-chunks", options.txnMaxWrittenChunks], ["--txn-max-read-chunks", options.txnMaxReadChunks]] as const) {
+    if (value !== undefined) args.push(flag, String(value));
+  }
 
   if (auth === "users") {
     // Outside the data directory, which must start empty.
