@@ -21,7 +21,8 @@ for (const tls of [false, true]) {
       const info = client.serverInfo()!;
       assert.ok(info.connectionId! > 0n); assert.ok(info.features!.includes("read_metadata"));
       assert.equal(info.options!.client_name, "foundation-client");
-      assert.equal(info.notApplied!.statement_timeout_ms.reason, "implementation_pending");
+      if (info.features!.includes("statement_timeout")) assert.equal(info.options!.statement_timeout_ms, 500);
+      else assert.equal(info.notApplied!.statement_timeout_ms.reason, "implementation_pending");
       assert.equal(info.notApplied!.default_tag.reason, "implementation_pending");
       assert.equal(info.limits!.txn_max_written_chunks, 64);
       await client.createTable("foundation", { columns: [{ name: "n", type: "u64" }], chunk: { width: 4, height: 4 } });
