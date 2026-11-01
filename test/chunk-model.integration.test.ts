@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { ChunkConditionFailedError, ChunkProtocolError, connectPool, connectUri, emptyChunk } from "../src/index";
+import { ChunkVersionMismatchError, ChunkProtocolError, connectPool, connectUri, emptyChunk } from "../src/index";
 import { startServer } from "./helpers";
 
 for (const tls of [false, true]) {
@@ -63,7 +63,11 @@ for (const tls of [false, true]) {
       assert.equal(area.entries[0].chunk.metadata?.owner, 2);
       const ball = await client.getAreaRaw3DWithSchema({ cx: 0, cy: 0, cz: 0, radius: 1 });
       assert.deepEqual(ball.entries.map(({ cx, cy, cz }) => [cx, cy, cz]), [[0n, 0n, 0n]]);
-      await assert.rejects(client.setChunkMetadata3D(0, 0, 0, { owner: 3 }, { ifAbsent: true }), ChunkConditionFailedError);
+      await assert.rejects(client.setChunkMetadata3D(0, 0, 0, { owner: 3 }, { ifAbsent: true }),
+        error => error instanceof ChunkVersionMismatchError && error.currentVersion === changed.version && error.currentVersion > 0n);
+      assert.deepEqual(await client.getChunkRaw3D(0, 0, 0), raw);
+      const quiet = await client.scanChunks3D({ since: page.position! });
+      assert.equal(quiet.chunks.length, 0); assert.equal(quiet.position, page.position);
       await client.setChunkMetadata3D(1, 0, 0, { owner: 6 }, { ifAbsent: true });
       const pool = await connectPool({ uri: `${server.uri}space`, tlsInsecure: tls, maxConnections: 1 });
       try { assert.deepEqual(await pool.getBlock3D(0, 0, 0), { n: 10 }); }

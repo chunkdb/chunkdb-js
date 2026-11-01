@@ -69,6 +69,7 @@ A missing chunk has no version, so its first write here is unconditional.
 A mismatch raises `ChunkVersionMismatchError` without changing data.
 Do not compare versions with time or assume they are consecutive.
 `ifAbsent: true` writes only when the chunk is unpopulated, including a tombstone, and cannot be combined with `ifVersion`.
+An occupied chunk raises `ChunkVersionMismatchError` with its current version and leaves the chunk unchanged.
 Block-level writes do not accept `ifAbsent`.
 
 `setChunkColumns(cx, cy, columns, state, options?)` replaces selected block columns while preserving chunk metadata.

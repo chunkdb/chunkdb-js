@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { connectUri } from "../src/index";
+import { connectUri, emptyChunk } from "../src/index";
 import { startServer } from "./helpers";
 
 for (const tls of [false, true]) test(`checked 2D: ${tls ? "TLS" : "plain"} metadata, partial writes, raw copies and transactions`, async () => {
@@ -34,5 +34,21 @@ for (const tls of [false, true]) test(`checked 2D: ${tls ? "TLS" : "plain"} meta
     await client.setChunkRaw(1, 0, raw);
     const area = await client.getAreaWithSchema({ cx0: 0, cy0: 0, cx1: 1, cy1: 0 }, { columns: ["n"] });
     assert.equal(area.entries.length, 2); assert.equal(area.entries[1].chunk.metadata?.owner, 3);
+    await client.createTable("quota", { columns: [{ name: "n", type: "u8" }, { name: "text", type: "text(1024)" }],
+      chunkColumns: [{ name: "label", type: "text(1024)", nullable: true }], chunk: { width: 1, height: 1 } });
+    const large = emptyChunk(await client.describe("quota"));
+    large.present[0] = true; large.columns.n[0] = 0; large.columns.text[0] = "x".repeat(512); large.metadata = { label: "y".repeat(512) };
+    await client.setChunk(0, 0, large, { table: "quota" });
+    await client.alterTable("quota", { kind: "setOption", option: "varMaxChunkBytes", value: 13 });
+    const retained = await client.getChunk(0, 0, { table: "quota" });
+    assert.ok(retained); assert.equal(retained.metadata?.label, "y".repeat(512));
+    await client.setChunk(0, 0, retained, { table: "quota" });
+    retained.columns.text[0] = "x".repeat(400);
+    await client.setChunkColumns(0, 0, ["text"], retained, { table: "quota" });
+    const shrunk = await client.getChunk(0, 0, { table: "quota" });
+    assert.equal(shrunk?.columns.text[0], "x".repeat(400)); assert.equal(shrunk?.metadata?.label, "y".repeat(512));
+    const retainedRaw = await client.getChunkRaw(0, 0, { table: "quota" });
+    assert.ok(retainedRaw);
+    await client.setChunkRaw(0, 0, retainedRaw, { table: "quota" });
   } finally { await client.close(); await server.stop(); }
 });

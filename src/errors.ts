@@ -155,8 +155,8 @@ export class ChunkAuthError extends ChunkServerError {}
 export class ChunkPermissionError extends ChunkServerError {}
 
 /**
- * `VERSION_MISMATCH`: an `ifVersion` write found the chunk at another
- * version and changed nothing.
+ * `VERSION_MISMATCH`: an `ifVersion` write found another version, or an
+ * `ifAbsent` write found a populated chunk; nothing changed.
  */
 export class ChunkVersionMismatchError extends ChunkServerError {
   /** The chunk's version now. */
