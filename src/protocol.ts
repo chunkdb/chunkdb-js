@@ -131,6 +131,22 @@ interface Incomplete {
   need: number;
 }
 
+/** Limits for one successful GET AREA reply; errors and pushes keep their own framing. */
+export interface ReplyLimits {
+  maxBytes: number;
+  maxAreaChunks: number;
+  shape?: "rows" | "page" | "schemaRows" | "schemaPage";
+}
+
+type ReplyShape = ReplyLimits["shape"];
+interface ScanBudget { limits: ReplyLimits; slots: number }
+
+function replyLimit(): never { throw protocolError("GET AREA reply exceeds its negotiated limit"); }
+
+function checkReplyEnd(end: number, budget?: ScanBudget): void {
+  if (budget !== undefined && end > budget.limits.maxBytes) replyLimit();
+}
+
 function protocolError(message: string): ChunkProtocolError {
   return new ChunkProtocolError(message, { phase: "protocol" });
 }
@@ -161,13 +177,15 @@ function lengthOf(text: string, what: string): number {
 
 // Finds where the reply starting at `start` ends without building it, so a
 // large reply is built once, after its last byte arrived.
-function scanReply(buffer: Buffer, start: number, depth = 0): number | Incomplete {
+function scanReply(buffer: Buffer, start: number, depth = 0, budget?: ScanBudget, shape?: ReplyShape): number | Incomplete {
   if (depth > 128) throw protocolError("reply nesting exceeds 128 levels");
   if (start >= buffer.length) {
+    checkReplyEnd(start + 1, budget);
     return { need: start + 1 };
   }
   const end = lineEnd(buffer, start);
   if (end === -1) {
+    checkReplyEnd(buffer.length + 1, budget);
     return { need: buffer.length + 1 };
   }
   const prefix = buffer[start];
@@ -176,6 +194,7 @@ function scanReply(buffer: Buffer, start: number, depth = 0): number | Incomplet
   }
   const text = buffer.toString("latin1", start + 1, end);
   const next = end + 2;
+  checkReplyEnd(next, budget);
   switch (prefix) {
     case 0x2b: // +
     case 0x2d: // -
@@ -192,6 +211,7 @@ function scanReply(buffer: Buffer, start: number, depth = 0): number | Incomplet
       }
       const length = lengthOf(text, "bulk");
       const after = next + length + 2;
+      checkReplyEnd(after, budget);
       return buffer.length < after ? { need: after } : after;
     }
     case 0x2a: // *
@@ -202,11 +222,30 @@ function scanReply(buffer: Buffer, start: number, depth = 0): number | Incomplet
         return next;
       }
       const count = lengthOf(text, prefix === 0x25 ? "map" : prefix === 0x3e ? "push" : "array") * (prefix === 0x25 ? 2 : 1);
+      if (!Number.isSafeInteger(count)) throw protocolError("aggregate length exceeds the safe integer range");
+      if (budget !== undefined) {
+        if (shape === "rows" && count > budget.limits.maxAreaChunks) replyLimit();
+        // Every child needs at least a three-byte frame and a retained reply slot.
+        checkReplyEnd(next + count * 3, budget);
+        if (count > 1_048_576 - budget.slots) replyLimit();
+        budget.slots += count;
+      }
       let at = next;
+      let key: string | undefined;
       for (let i = 0; i < count; i += 1) {
-        const scanned = scanReply(buffer, at, depth + 1);
+        const childShape = (shape === "schemaRows" || shape === "schemaPage") && i === 1
+          ? shape === "schemaRows" ? "rows" : "page"
+          : shape === "page" && i % 2 === 1 && key === "chunks" ? "rows" : undefined;
+        const scanned = scanReply(buffer, at, depth + 1, budget, childShape);
         if (typeof scanned !== "number") {
           return scanned;
+        }
+        if (shape === "page" && i % 2 === 0) {
+          const keyEnd = lineEnd(buffer, at);
+          const keyStart = buffer[at] === 0x2b ? at + 1 : keyEnd + 2;
+          const keyLength = buffer[at] === 0x2b ? keyEnd - keyStart
+            : buffer[at] === 0x24 && buffer.toString("latin1", at + 1, keyEnd) === "6" ? 6 : 0;
+          key = keyLength === 6 && buffer.toString("latin1", keyStart, keyStart + 6) === "chunks" ? "chunks" : undefined;
         }
         at = scanned;
       }
@@ -362,12 +401,16 @@ export class ReplyReader {
   }
 
   /** The next complete reply, or null. */
-  next(): ChunkReply | null {
+  next(limits?: ReplyLimits): ChunkReply | null {
+    if (limits !== undefined && (!Number.isSafeInteger(limits.maxBytes) || limits.maxBytes <= 0 || !Number.isSafeInteger(limits.maxAreaChunks) || limits.maxAreaChunks <= 0)) {
+      throw protocolError("invalid GET AREA reply limits");
+    }
     if (this.end - this.start < this.need) {
       return null;
     }
     const view = this.data.subarray(this.start, this.end);
-    const scanned = scanReply(view, 0);
+    const bounded = limits !== undefined && view[0] !== 0x2d && view[0] !== 0x3e;
+    const scanned = scanReply(view, 0, 0, bounded ? { limits, slots: 0 } : undefined, bounded ? limits.shape : undefined);
     if (typeof scanned !== "number") {
       this.need = scanned.need;
       return null;

@@ -30,10 +30,11 @@ import {
   type ChunkError,
 } from "./errors";
 import { chunkFormLimit, decodeChunkForm, encodeChunkForm } from "./chunk-form";
-import { decodeSectionedChunk, encodeSectionedChunk } from "./sectioned-chunk";
+import { AreaDecodeLimitError, checkAreaDecodedCells, decodeSectionedChunk, encodeSectionedChunk } from "./sectioned-chunk";
+import { captureAreaPage, decodeAreaPage, rawAreaReplyOptions, type AreaPageRequest } from "./area-page";
 import { parseSectionedForm } from "./chunk-sections";
 import { decodeChunkScanPage } from "./chunk-scan";
-import { encodeStatement, ReplyReader, type ChunkParameter, type ChunkReply, type ErrorReply, type PushReply } from "./protocol";
+import { encodeStatement, ReplyReader, type ChunkParameter, type ChunkReply, type ErrorReply, type PushReply, type ReplyLimits } from "./protocol";
 import { filterClause, ChunkWatch, kWatchAck, kWatchPause, kWatchStream } from "./watch";
 import { parseSlots, slotName } from "./slots";
 import {
@@ -50,6 +51,13 @@ import { formatChunkUri, parseChunkUri, tableFromUriPath } from "./uri";
 import type {
   ChunkAxis,
   ChunkArea3D,
+  ChunkArea2D,
+  ChunkAreaPageOptions,
+  ChunkAreaPageOptions3D,
+  ChunkAreaPage,
+  ChunkAreaRawPage,
+  ChunkAreaPage3D,
+  ChunkAreaRawPage3D,
   ChunkAreaEntry3D,
   ChunkAreaRawEntry3D,
   ChunkCoord3D,
@@ -175,7 +183,10 @@ interface PendingRequest {
   timer: NodeJS.Timeout;
   resolve: (reply: ChunkReply) => void;
   reject: (error: Error) => void;
+  replyLimits?: ReplyLimits;
 }
+
+interface AreaResponse { reply: ChunkReply; socket: TransportSocket }
 
 const PROTOCOL_VERSION = 3;
 const DEFAULT_HOST = "127.0.0.1";
@@ -959,6 +970,23 @@ export class ChunkClient {
     return this.enqueue(async () => (await this.getArea3DOp(area, options, false, false)).entries);
   }
 
+  /** One bounded page; pass its non-null cursor to the next call. */
+  getAreaPage(area: ChunkArea2D, options: ChunkAreaPageOptions = {}): Promise<ChunkAreaPage> {
+    return this.areaPageCall(area, options, 2, false, (operation) => this.enqueue(operation));
+  }
+
+  getAreaRawPage(area: ChunkArea2D, options: ChunkAreaPageOptions = {}): Promise<ChunkAreaRawPage> {
+    return this.areaPageCall(area, options, 2, true, (operation) => this.enqueue(operation));
+  }
+
+  getAreaPage3D(area: ChunkArea3D, options: ChunkAreaPageOptions3D = {}): Promise<ChunkAreaPage3D> {
+    return this.areaPageCall(area, options, 3, false, (operation) => this.enqueue(operation));
+  }
+
+  getAreaRawPage3D(area: ChunkArea3D, options: ChunkAreaPageOptions3D = {}): Promise<ChunkAreaRawPage3D> {
+    return this.areaPageCall(area, options, 3, true, (operation) => this.enqueue(operation));
+  }
+
   getAreaRaw3D(area: ChunkArea3D, options: ChunkReadOptions = {}): Promise<ChunkAreaRawEntry3D[]> {
     return this.enqueue(async () => (await this.getArea3DOp(area, options, true, false)).entries);
   }
@@ -1390,6 +1418,66 @@ export class ChunkClient {
     }, true);
   }
 
+  private areaPageCall<T>(area: ChunkArea2D | ChunkArea3D, options: ChunkAreaPageOptions | ChunkAreaPageOptions3D, dims: 2 | 3, raw: boolean, schedule: (operation: () => Promise<T>) => Promise<T>): Promise<T> {
+    try {
+      const request = captureAreaPage(area, options, dims);
+      return schedule(() => this.areaPageOp(request, raw) as Promise<T>);
+    } catch (error) { return Promise.reject(error); }
+  }
+
+  private async runArea(statement: string, shape: ReplyLimits["shape"], limit?: number): Promise<AreaResponse> {
+    let socket: TransportSocket | undefined;
+    const reply = await this.send(statement, [], "GET AREA", true, shape, limit, (connection) => { socket = connection; });
+    if (reply.type === "error") throw this.serverError(reply, "GET AREA");
+    if (socket === undefined) throw new ChunkProtocolError("GET AREA response has no connection", { phase: "protocol", command: "GET AREA" });
+    return { reply, socket };
+  }
+
+  private decodeAreaResponse<T>(response: AreaResponse, decode: (reply: ChunkReply) => T): T {
+    try { return decode(response.reply); }
+    catch (error) {
+      if (error instanceof ChunkProtocolError && error.phase === "protocol" && !(error instanceof StaleSchemaError) && !(error instanceof AreaDecodeLimitError)) {
+        const tx = this.sendTurns.getStore()?.tx;
+        if (tx?.socket === response.socket) { tx.failure ??= error; tx.began = false; }
+        if (this.socket === response.socket) this.clearConnectionState(error);
+        response.socket.destroy();
+      }
+      throw error;
+    }
+  }
+
+  private async areaPageOp(request: AreaPageRequest, raw: boolean): Promise<ChunkAreaPage | ChunkAreaRawPage | ChunkAreaPage3D | ChunkAreaRawPage3D> {
+    const tx = this.sendTurns.getStore()?.tx;
+    if (tx?.socket != null && tx.socket !== this.socket) throw transactionLost("GET AREA");
+    await this.ensureConnected();
+    if (!this.info?.features?.includes("area_paging")) throw requestError("the server does not support area_paging", "GET AREA");
+    const areaLimits = this.areaReplyLimits();
+    if (request.limit !== undefined && request.limit > areaLimits.maxAreaChunks) throw requestError("GET AREA limit exceeds maxAreaChunks", "GET AREA");
+    const table = this.tableOf(request.options);
+    return this.withLayout(table, false, async (layout) => {
+      if (layout.schema.dims !== request.dims) throw requestError("GET AREA selector has the wrong table dimensionality", "GET AREA");
+      const indexes = columnIndexes(layout, request.options.columns), names = indexes.map((index) => layout.schema.columns[index].name);
+      const limit = request.limit ?? areaLimits.maxAreaChunks;
+      const statement = `GET AREA ${request.clause} FROM ${table}${columnsClause(names)} LIMIT ${limit}${request.after === undefined ? "" : ` AFTER ${request.after.join(" ")}`} WITH SCHEMA`;
+      const response = await this.runArea(statement, "schemaPage", limit);
+      return this.decodeAreaResponse(response, (value) => {
+        const reply = itemsOf(value, "GET AREA");
+        if (reply.length < 2) throw new ChunkProtocolError("GET AREA metadata is missing fields", { phase: "protocol", command: "GET AREA" });
+        const schemaVersion = uint64Of(reply[0], "schema version", "GET AREA");
+        this.checkReadSchema(layout, schemaVersion);
+        const page = decodeAreaPage(reply[1], request, areaLimits.maxAreaChunks);
+        if (!raw) checkAreaDecodedCells(layout, indexes, page.rows.length);
+        const chunks = page.rows.map((row) => {
+          const fields = itemsOf(row, "GET AREA"), form = bulkOf(fields[request.dims], "GET AREA");
+          return { cx: axisReply(fields[0], "cx", "GET AREA"), cy: axisReply(fields[1], "cy", "GET AREA"),
+            ...(request.dims === 3 ? { cz: axisReply(fields[2], "cz", "GET AREA") } : {}), chunk: raw ? form : decodeSectionedChunk(layout, form, indexes) };
+        });
+        const after = page.after === null ? null : { cx: page.after[0], cy: page.after[1], ...(request.dims === 3 ? { cz: page.after[2] } : {}) };
+        return { chunks, more: page.more, after, schemaVersion } as ChunkAreaPage | ChunkAreaRawPage | ChunkAreaPage3D | ChunkAreaRawPage3D;
+      });
+    });
+  }
+
   private getArea3DOp(area: ChunkArea3D, options: ChunkReadOptions, raw: false, withSchema: false): Promise<{ entries: ChunkAreaEntry3D[] }>;
   private getArea3DOp(area: ChunkArea3D, options: ChunkReadOptions, raw: true, withSchema: false): Promise<{ entries: ChunkAreaRawEntry3D[] }>;
   private getArea3DOp(area: ChunkArea3D, options: ChunkReadOptions, raw: false, withSchema: true): Promise<ChunkAreaMetadata<ChunkAreaEntry3D>>;
@@ -1399,23 +1487,28 @@ export class ChunkClient {
     return this.withLayout(table, false, async (layout) => {
       if (layout.schema.dims !== 3) throw requestError(`table ${table} is not three-dimensional`, "GET AREA");
       const indexes = columnIndexes(layout, options.columns), names = indexes.map((index) => layout.schema.columns[index].name);
-      let reply = await this.run(`GET AREA ${clause} FROM ${table}${columnsClause(names)}${withSchema ? " WITH SCHEMA" : ""}`, [], "GET AREA");
-      let schemaVersion: bigint | undefined;
-      if (withSchema) {
-        const fields = itemsOf(reply, "GET AREA");
-        if (fields.length < 2) throw new ChunkProtocolError("GET AREA metadata is missing fields", { phase: "protocol", command: "GET AREA" });
-        schemaVersion = uint64Of(fields[0], "schema version", "GET AREA");
-        this.checkReadSchema(layout, schemaVersion);
-        reply = fields[1];
-      }
-      const entries = itemsOf(reply, "GET AREA").map((item) => {
-        const fields = itemsOf(item, "GET AREA");
-        if (fields.length < 4) throw new ChunkProtocolError("GET AREA entry needs three coordinates and a form", { phase: "protocol", command: "GET AREA" });
-        const point = { cx: axisReply(fields[0], "cx", "GET AREA"), cy: axisReply(fields[1], "cy", "GET AREA"), cz: axisReply(fields[2], "cz", "GET AREA") };
-        const form = bulkOf(fields[3], "GET AREA");
-        return raw ? { ...point, chunk: form } : { ...point, chunk: decodeSectionedChunk(layout, form, indexes) };
+      const response = await this.runArea(`GET AREA ${clause} FROM ${table}${columnsClause(names)}${withSchema ? " WITH SCHEMA" : ""}`, withSchema ? "schemaRows" : "rows");
+      return this.decodeAreaResponse(response, (value) => {
+        let reply = value;
+        let schemaVersion: bigint | undefined;
+        if (withSchema) {
+          const fields = itemsOf(reply, "GET AREA");
+          if (fields.length < 2) throw new ChunkProtocolError("GET AREA metadata is missing fields", { phase: "protocol", command: "GET AREA" });
+          schemaVersion = uint64Of(fields[0], "schema version", "GET AREA");
+          this.checkReadSchema(layout, schemaVersion);
+          reply = fields[1];
+        }
+        const rows = itemsOf(reply, "GET AREA");
+        if (!raw) checkAreaDecodedCells(layout, indexes, rows.length);
+        const entries = rows.map((item) => {
+          const fields = itemsOf(item, "GET AREA");
+          if (fields.length < 4) throw new ChunkProtocolError("GET AREA entry needs three coordinates and a form", { phase: "protocol", command: "GET AREA" });
+          const point = { cx: axisReply(fields[0], "cx", "GET AREA"), cy: axisReply(fields[1], "cy", "GET AREA"), cz: axisReply(fields[2], "cz", "GET AREA") };
+          const form = bulkOf(fields[3], "GET AREA");
+          return raw ? { ...point, chunk: form } : { ...point, chunk: decodeSectionedChunk(layout, form, indexes) };
+        });
+        return { entries, ...(schemaVersion === undefined ? {} : { schemaVersion }) };
       });
-      return { entries, ...(schemaVersion === undefined ? {} : { schemaVersion }) };
     });
   }
 
@@ -1425,13 +1518,17 @@ export class ChunkClient {
     return await this.withLayout(table, false, async (layout) => {
       const indexes = columnIndexes(layout, options.columns);
       const names = indexes.map((index) => layout.schema.columns[index].name);
-      const reply = await this.run(`GET AREA ${clause} FROM ${table}${columnsClause(names)}`, [], "GET AREA");
-      return this.areaEntries(reply, layout.schema.dims).map(({ cx, cy, cz, chunk }) => ({
-        cx,
-        cy,
-        ...(cz === undefined ? {} : { cz }),
-        chunk: decodeChunkForm(layout, chunk, indexes),
-      }));
+      const response = await this.runArea(`GET AREA ${clause} FROM ${table}${columnsClause(names)}`, "rows");
+      return this.decodeAreaResponse(response, (reply) => {
+        const entries = this.areaEntries(reply, layout.schema.dims);
+        checkAreaDecodedCells(layout, indexes, entries.length);
+        return entries.map(({ cx, cy, cz, chunk }) => ({
+          cx,
+          cy,
+          ...(cz === undefined ? {} : { cz }),
+          chunk: decodeChunkForm(layout, chunk, indexes),
+        }));
+      });
     });
   }
 
@@ -1442,13 +1539,16 @@ export class ChunkClient {
     return this.withLayout(table, false, async (layout) => {
       const indexes = columnIndexes(layout, options.columns);
       const names = indexes.map((index) => layout.schema.columns[index].name);
-      const reply = await this.run(`GET AREA ${areaClause(area)} FROM ${table}${columnsClause(names)} WITH SCHEMA`, [], "GET AREA");
-      const items = itemsOf(reply, "GET AREA");
-      if (items.length < 2) throw new ChunkProtocolError("GET AREA metadata is missing fields", { phase: "protocol", command: "GET AREA" });
-      const schemaVersion = uint64Of(items[0], "schema version", "GET AREA");
-      this.checkReadSchema(layout, schemaVersion);
-      const entries = this.areaEntries(items[1], layout.schema.dims);
-      return { schemaVersion, entries: raw ? entries : entries.map(({ cx, cy, cz, chunk }) => ({ cx, cy, ...(cz === undefined ? {} : { cz }), chunk: decodeChunkForm(layout, chunk, indexes) })) };
+      const response = await this.runArea(`GET AREA ${areaClause(area)} FROM ${table}${columnsClause(names)} WITH SCHEMA`, "schemaRows");
+      return this.decodeAreaResponse(response, (reply) => {
+        const items = itemsOf(reply, "GET AREA");
+        if (items.length < 2) throw new ChunkProtocolError("GET AREA metadata is missing fields", { phase: "protocol", command: "GET AREA" });
+        const schemaVersion = uint64Of(items[0], "schema version", "GET AREA");
+        this.checkReadSchema(layout, schemaVersion);
+        const entries = this.areaEntries(items[1], layout.schema.dims);
+        if (!raw) checkAreaDecodedCells(layout, indexes, entries.length);
+        return { schemaVersion, entries: raw ? entries : entries.map(({ cx, cy, cz, chunk }) => ({ cx, cy, ...(cz === undefined ? {} : { cz }), chunk: decodeChunkForm(layout, chunk, indexes) })) };
+      });
     });
   }
 
@@ -1456,8 +1556,8 @@ export class ChunkClient {
     const table = this.tableOf(options);
     return this.withLayout(table, false, async (layout) => {
       const names = (options.columns ?? []).map((name) => checkName(name, "a column name"));
-      const reply = await this.run(`GET AREA ${areaClause(area)} FROM ${table}${columnsClause(names)}`, [], "GET AREA");
-      return this.areaEntries(reply, layout.schema.dims);
+      const response = await this.runArea(`GET AREA ${areaClause(area)} FROM ${table}${columnsClause(names)}`, "rows");
+      return this.decodeAreaResponse(response, (reply) => this.areaEntries(reply, layout.schema.dims));
     });
   }
 
@@ -1548,6 +1648,10 @@ export class ChunkClient {
       getChunkRaw: (cx, cy, options = {}) => call(() => this.getChunkRawOp([cx, cy], options)),
       setChunk: (cx, cy, state, options = {}) => write(options, "SET CHUNK", () => this.setChunkOp([cx, cy], state, options)),
       setChunkRaw: (cx, cy, form, options = {}) => write(options, "SET CHUNK", () => this.setChunkRawOp([cx, cy], form, options)),
+      getAreaPage: (area, options = {}) => this.areaPageCall(area, options, 2, false, call),
+      getAreaRawPage: (area, options = {}) => this.areaPageCall(area, options, 2, true, call),
+      getAreaPage3D: (area, options = {}) => this.areaPageCall(area, options, 3, false, call),
+      getAreaRawPage3D: (area, options = {}) => this.areaPageCall(area, options, 3, true, call),
       getArea: (area, options = {}) => call(() => this.getAreaOp(area, options)),
       getAreaRaw: (area, options = {}) => call(() => this.getAreaRawOp(area, options)),
       getAreaWithSchema: (area, options = {}) => call(() => this.getAreaWithSchemaOp(area, options, false)),
@@ -1947,11 +2051,25 @@ export class ChunkClient {
     return reply;
   }
 
+  private areaReplyLimits(shape?: ReplyLimits["shape"], limit?: number): ReplyLimits {
+    const info = this.info;
+    if (info === null || !Number.isSafeInteger(info.maxResponseBytes) || info.maxResponseBytes <= 0 || !Number.isSafeInteger(info.maxAreaChunks) || info.maxAreaChunks <= 0) {
+      throw requestError("the server did not advertise positive GET AREA reply limits", "GET AREA");
+    }
+    for (const [key, value] of [["max_area_chunks", info.maxAreaChunks], ["max_area_response_bytes", info.maxResponseBytes]] as const) {
+      if (info.limits?.[key] !== undefined && info.limits[key] !== value) throw requestError("the server advertised inconsistent GET AREA reply limits", "GET AREA");
+    }
+    return { maxBytes: info.maxResponseBytes, maxAreaChunks: Math.min(limit ?? info.maxAreaChunks, info.maxAreaChunks), shape };
+  }
+
   private async send(
     statement: string,
     parameters: readonly ChunkParameter[],
     command = "HELLO",
     main = true,
+    areaShape?: ReplyLimits["shape"],
+    areaLimit?: number,
+    onConnection?: (socket: TransportSocket) => void,
   ): Promise<ChunkReply> {
     // Checked before connecting: nothing is sent for a statement that
     // cannot be framed.
@@ -1997,6 +2115,12 @@ export class ChunkClient {
       }
     }
 
+    let replyLimits: ReplyLimits | undefined;
+    if (/^\s*GET\s+AREA\b/i.test(statement)) {
+      if (areaShape === undefined) { const raw = rawAreaReplyOptions(statement); areaShape = raw.shape; areaLimit = raw.limit; }
+      replyLimits = this.areaReplyLimits(areaShape, areaLimit);
+    }
+    onConnection?.(socket);
     const replyPromise = new Promise<ChunkReply>((resolve, reject) => {
       const timer = setTimeout(() => {
         const index = this.pendingQueue.findIndex((pending) => pending.timer === timer);
@@ -2017,7 +2141,7 @@ export class ChunkClient {
           }),
         );
       }, this.options.commandTimeoutMs);
-      this.pendingQueue.push({ timer, resolve, reject });
+      this.pendingQueue.push({ timer, resolve, reject, replyLimits });
     });
 
     socket.write(wire, (error) => {
@@ -2047,7 +2171,7 @@ export class ChunkClient {
     while (this.pendingQueue.length > 0 || !this.watchPaused) {
       let reply: ChunkReply | null;
       try {
-        reply = this.reader.next();
+        reply = this.reader.next(this.pendingQueue[0]?.replyLimits);
       } catch (error) {
         // The stream cannot be read further.
         const socket = this.socket;

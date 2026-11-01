@@ -418,6 +418,21 @@ export type ChunkArea3D =
 export interface ChunkAreaEntry3D extends ChunkCoord3D { chunk: ChunkState }
 export interface ChunkAreaRawEntry3D extends ChunkCoord3D { chunk: Buffer }
 
+/** An exact two-dimensional coordinate returned by GET AREA paging. */
+export interface ChunkCoordExact { cx: bigint; cy: bigint }
+export type ChunkArea2D =
+  | { cx0: ChunkAxis; cy0: ChunkAxis; cx1: ChunkAxis; cy1: ChunkAxis }
+  | { cx: ChunkAxis; cy: ChunkAxis; radius: ChunkAxis };
+export interface ChunkAreaPageOptions extends ChunkReadOptions { limit?: number; after?: { cx: ChunkAxis; cy: ChunkAxis } }
+export interface ChunkAreaPageOptions3D extends ChunkReadOptions { limit?: number; after?: ChunkPoint3D }
+export interface ChunkAreaPageEntry extends ChunkCoordExact { chunk: ChunkState }
+export interface ChunkAreaRawPageEntry extends ChunkCoordExact { chunk: Buffer }
+export interface ChunkPage<T, C> { chunks: T[]; more: boolean; after: C | null; schemaVersion: bigint }
+export type ChunkAreaPage = ChunkPage<ChunkAreaPageEntry, ChunkCoordExact>;
+export type ChunkAreaRawPage = ChunkPage<ChunkAreaRawPageEntry, ChunkCoordExact>;
+export type ChunkAreaPage3D = ChunkPage<ChunkAreaEntry3D, ChunkCoord3D>;
+export type ChunkAreaRawPage3D = ChunkPage<ChunkAreaRawEntry3D, ChunkCoord3D>;
+
 /** A rectangle of chunks, corners included, or the chunks within `radius` of a chunk. */
 export type ChunkArea =
   | { cx0: number; cy0: number; cx1: number; cy1: number }
@@ -513,6 +528,10 @@ export interface ChunkTransactionOptions {
  * chunk the transaction read or wrote.
  */
 export interface ChunkTransaction {
+  getAreaPage(area: ChunkArea2D, options?: ChunkAreaPageOptions): Promise<ChunkAreaPage>;
+  getAreaRawPage(area: ChunkArea2D, options?: ChunkAreaPageOptions): Promise<ChunkAreaRawPage>;
+  getAreaPage3D(area: ChunkArea3D, options?: ChunkAreaPageOptions3D): Promise<ChunkAreaPage3D>;
+  getAreaRawPage3D(area: ChunkArea3D, options?: ChunkAreaPageOptions3D): Promise<ChunkAreaRawPage3D>;
   getBlock(x: number, y: number, options?: ChunkReadOptions): Promise<ChunkRow | null>;
   getBlockWithMetadata(x: number, y: number, options?: ChunkReadOptions): Promise<ChunkBlockMetadata>;
   setBlock(x: number, y: number, values: Readonly<Record<string, ChunkValue>>, options?: ChunkTableOption): Promise<void>;

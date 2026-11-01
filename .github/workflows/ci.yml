@@ -29,6 +29,10 @@ jobs:
         env:
           CANDIDATE_BRANCH: ${{ github.head_ref || github.ref_name }}
         run: |
+          if [ "$CANDIDATE_BRANCH" = "feat/commit-core" ]; then
+            printf 'ref=%s\n' '2689a028899d5c4949a073dd9c1bb1a8b566853f' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [ "$CANDIDATE_BRANCH" = "feat/chunk-model" ]; then
             printf 'ref=%s\n' '4842a36e3809c88331fa4a6e42c46775e53770e1' >> "$GITHUB_OUTPUT"
             exit 0

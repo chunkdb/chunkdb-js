@@ -4,11 +4,19 @@ import {
   ChunkTlsError,
 } from "./errors";
 import { ChunkClient, tableOfStatement } from "./client";
+import { copyAreaPageArguments } from "./area-page";
 import type { ChunkWatch } from "./watch";
 import type { ChunkParameter, ChunkReply } from "./protocol";
 import type {
   ChunkAxis,
   ChunkArea3D,
+  ChunkArea2D,
+  ChunkAreaPageOptions,
+  ChunkAreaPageOptions3D,
+  ChunkAreaPage,
+  ChunkAreaRawPage,
+  ChunkAreaPage3D,
+  ChunkAreaRawPage3D,
   ChunkAreaEntry3D,
   ChunkAreaRawEntry3D,
   ChunkCoord3D,
@@ -351,6 +359,26 @@ export class ChunkPool {
 
   getArea3D(area: ChunkArea3D, options: ChunkReadOptions = {}): Promise<ChunkAreaEntry3D[]> {
     return this.withClient(async (client) => client.getArea3D(area, options));
+  }
+
+  async getAreaPage(area: ChunkArea2D, options: ChunkAreaPageOptions = {}): Promise<ChunkAreaPage> {
+    const input = copyAreaPageArguments(area, options);
+    return this.withClient((client) => client.getAreaPage(input.area, input.options));
+  }
+
+  async getAreaRawPage(area: ChunkArea2D, options: ChunkAreaPageOptions = {}): Promise<ChunkAreaRawPage> {
+    const input = copyAreaPageArguments(area, options);
+    return this.withClient((client) => client.getAreaRawPage(input.area, input.options));
+  }
+
+  async getAreaPage3D(area: ChunkArea3D, options: ChunkAreaPageOptions3D = {}): Promise<ChunkAreaPage3D> {
+    const input = copyAreaPageArguments(area, options);
+    return this.withClient((client) => client.getAreaPage3D(input.area, input.options));
+  }
+
+  async getAreaRawPage3D(area: ChunkArea3D, options: ChunkAreaPageOptions3D = {}): Promise<ChunkAreaRawPage3D> {
+    const input = copyAreaPageArguments(area, options);
+    return this.withClient((client) => client.getAreaRawPage3D(input.area, input.options));
   }
 
   getAreaRaw3D(area: ChunkArea3D, options: ChunkReadOptions = {}): Promise<ChunkAreaRawEntry3D[]> {

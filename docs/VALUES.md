@@ -78,6 +78,8 @@ The pool and transaction expose both methods.
 GET projections always include the complete `metadata` row.
 Typed chunk reads admit at most 4194304 block-column cells before allocating dense value arrays.
 Select fewer columns or read the raw form when a chunk exceeds that limit.
+Typed area reads apply the same aggregate limit across all returned chunks and their chunk metadata before allocating any dense chunk values.
+Use a smaller page or a narrower projection when the complete area exceeds this limit.
 
 `getChunkRaw`, `setChunkRaw` and `getAreaRaw` transfer binary forms.
 Typed chunk decoding and raw writes require the checked CKCF form for both table dimensions.
@@ -99,6 +101,18 @@ The radius selects a three-dimensional ball.
 
 Area boxes use inclusive chunk coordinates and return populated chunks only.
 `serverInfo()` reports the server's area and response limits.
+`getAreaPage` and `getAreaRawPage` accept the same box or radius selector, exact int64 axes, and `{ limit?, after?, columns?, table? }`.
+Use `getAreaPage3D` or `getAreaRawPage3D` for three-axis selectors and cursors.
+These methods require the advertised `area_paging` feature and return `{ schemaVersion, chunks, more, after }` with bigint cursor axes.
+Pass a returned cursor back with the same selector and projection; each call retains only that page.
+The cursor advances over requested empty cells too, so an unfinished page can have no populated chunks.
+A completed page always has a null cursor, including when its final page contains populated chunks.
+The server can shorten a page at its response byte limit.
+All GET AREA replies, including unpaged and raw reads, enforce the negotiated response-byte limit while parsing, before allocating declared bulk bodies.
+Malformed or oversized replies close the connection; later independent calls may reconnect.
+Successful area replies also admit at most 1048576 aggregate reply slots before constructing their arrays and maps.
+Server errors and unsolicited pushes keep their separate framing rules.
+Pages and schema metadata do not provide a snapshot across separate calls.
 
 ```ts docs-check
 const area = await client.getArea({ cx0: 0, cy0: 0, cx1: 1, cy1: 1 });

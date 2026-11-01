@@ -7,6 +7,7 @@ This client uses CQL protocol 3 with chunkdb 2.x; see the server's [compatibilit
 ## Unreleased
 
 ### Added
+- Add explicit bounded area pages with exact coordinate cursors and enforce negotiated area reply budgets before decoding. ([chunkdb#136](https://github.com/chunkdb/chunkdb/issues/136)).
 - Add three-axis data methods, chunk metadata and selected-column writes, checked sectioned forms, and revision-aware scans with retained tombstones. ([chunkdb#133](https://github.com/chunkdb/chunkdb/issues/133)).
 - Add extensible RESP3 decoding, structured errors, read metadata, feed progress and CHUNKS acknowledgments, HELLO options, slot filters and explicit feature helpers. (#69).
 - Rewrite user guides with checked examples and concise runtime reference. (#5).
