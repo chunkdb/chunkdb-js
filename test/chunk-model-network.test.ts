@@ -213,7 +213,7 @@ test("typed chunk requests defer growth-aware lowered quotas to the server", asy
         columns: array(map({ id: integer(1), name: bulk("n"), type: bulk("text(1024)"), null: bool(false), required: bool(false), default: bulk("") })),
         chunk_columns: array(map({ id: integer(1), name: bulk("title"), type: bulk("text(1024)"), null: bool(true), required: bool(false), default: nil })),
         options: map({ durability_mode: bulk("relaxed"), checkpoint_updates: integer(256), checkpoint_wal_bytes: integer(1048576), wal_group_commit_updates: integer(8),
-          checkpoint_compression: bulk("none"), var_max_chunk_bytes: integer(1), feed_buffer_bytes: integer(67108864), slot_max_bytes: integer(1073741824) }) });
+          checkpoint_compression: bulk("none"), var_max_chunk_bytes: integer(13), feed_buffer_bytes: integer(67108864), slot_max_bytes: integer(1073741824) }) });
     }
     return integer(8);
   });
@@ -224,6 +224,6 @@ test("typed chunk requests defer growth-aware lowered quotas to the server", asy
     assert.ok(server.requests.at(-1)!.frames[0]!.length > 1024);
     await client.setChunkColumns3D(0, 0, 0, ["n"], state, { table: "space" });
     assert.ok(server.requests.at(-1)!.frames[0]!.length > 512);
-    assert.equal((await client.describe("space")).options.varMaxChunkBytes, 1);
+    assert.equal((await client.describe("space")).options.varMaxChunkBytes, 13);
   } finally { await client.close(); await server.close(); }
 });

@@ -146,7 +146,7 @@ test("raw replacement bound permits stored data above a lowered quota", () => {
   layout.schema.chunkColumns = [column("title", "text(1024)", true)];
   layout.chunkColumnIds = [1];
   const form = encodeSectionedChunk(layout, { present: [false], columns: { n: [null] }, metadata: { title: "x".repeat(512) } });
-  layout.schema.options.varMaxChunkBytes = 1;
+  layout.schema.options.varMaxChunkBytes = 13;
   assert.ok(sectionedChunkFormLimit(layout) >= form.length);
   assert.equal(decodeSectionedChunk(layout, form, [0]).metadata?.title, "x".repeat(512));
 });
