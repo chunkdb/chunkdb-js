@@ -30,7 +30,7 @@ jobs:
           CANDIDATE_BRANCH: ${{ github.head_ref || github.ref_name }}
         run: |
           if [ "$CANDIDATE_BRANCH" = "feat/chunk-model" ]; then
-            printf 'ref=%s\n' '0cdcb5ed6c6e75f5ea578b3cb218158cd5b7c1ec' >> "$GITHUB_OUTPUT"
+            printf 'ref=%s\n' '1e5853d993c954ccbcdae01b29a78bda2d8ec738' >> "$GITHUB_OUTPUT"
             exit 0
           fi
           SERVER_REF=main
