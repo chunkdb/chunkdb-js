@@ -67,7 +67,9 @@ test("a verifier is SCRAM-SHA-256$<iterations>:<salt>$<StoredKey>:<ServerKey>", 
   assert.match(scramVerifier("pencil", { iterations: 10000 }), /^SCRAM-SHA-256\$10000:/);
   assert.throws(() => scramVerifier("pencil", { iterations: 4095 }), /at least 4096/);
   assert.throws(() => scramVerifier("pencil", { iterations: 4096.5 }), /at least 4096/);
-  assert.throws(() => scramVerifier("pencil", { salt: Buffer.alloc(15) }), /at least 16 bytes/);
+  assert.throws(() => scramVerifier("pencil", { salt: Buffer.alloc(15) }), /16 through 256 bytes/);
+  assert.throws(() => scramVerifier("pencil", { salt: Buffer.alloc(257) }), /16 through 256 bytes/);
+  assert.match(scramVerifier("pencil", { salt: Buffer.alloc(256) }), /^SCRAM-SHA-256\$4096:/);
 });
 
 test("a verifier logs in: the proof checks against its StoredKey", async () => {

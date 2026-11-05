@@ -118,7 +118,7 @@ export interface ChunkCreateUserOptions {
 export interface ChunkVerifierOptions {
   /** PBKDF2 iterations, at least 4096 (the default). */
   iterations?: number;
-  /** The salt, at least 16 bytes; 16 random bytes by default. */
+  /** The salt, 16 through 256 bytes; 16 random bytes by default. */
   salt?: Uint8Array;
 }
 

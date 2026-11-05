@@ -10,6 +10,7 @@ const pbkdf2Async = promisify(pbkdf2);
 /** The fewest PBKDF2 iterations a chunkdb server takes in a verifier. */
 export const MIN_SCRAM_ITERATIONS = 4096;
 const SALT_BYTES = 16;
+const MAX_SALT_BYTES = 256;
 const NONCE_BYTES = 18;
 // base64("n,,"): no channel binding.
 const CHANNEL_BINDING = "c=biws";
@@ -57,8 +58,8 @@ function verifierText(salted: Buffer, salt: Uint8Array, iterations: number): str
 function verifierInputs(options: ChunkVerifierOptions): { iterations: number; salt: Uint8Array } {
   const iterations = checkIterations(options.iterations ?? MIN_SCRAM_ITERATIONS);
   const salt = options.salt ?? randomBytes(SALT_BYTES);
-  if (!(salt instanceof Uint8Array) || salt.length < SALT_BYTES) {
-    throw new RangeError(`a SCRAM salt is at least ${SALT_BYTES} bytes`);
+  if (!(salt instanceof Uint8Array) || salt.length < SALT_BYTES || salt.length > MAX_SALT_BYTES) {
+    throw new RangeError(`a SCRAM salt is ${SALT_BYTES} through ${MAX_SALT_BYTES} bytes`);
   }
   return { iterations, salt };
 }
