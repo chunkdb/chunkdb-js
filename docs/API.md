@@ -43,7 +43,7 @@ A chunk version identifies committed state and orders writes within the same tab
 `readOptions` is `{ table?, columns? }`.
 `writeOptions` is `{ table?, ifVersion?: bigint }`.
 `watchOptions` accepts `slot`, `area`, `after`, `columns`, `noBefore`, `chunks`, `ackTimeoutMs` and `takeover`.
-`slotOptions` accepts `area`, `columns`, `noBefore`, `chunks` and `ifNotExists`.
+`slotOptions` accepts `area`, `columns`, `noBefore`, `chunks`, `ifNotExists` and `owner`.
 
 See [slots](SLOTS.md) for persisted filter identity.
 

@@ -32,7 +32,7 @@ import {
 import { chunkFormLimit, decodeChunkForm, encodeChunkForm } from "./chunk-form";
 import { encodeStatement, ReplyReader, type ChunkParameter, type ChunkReply, type ErrorReply, type PushReply } from "./protocol";
 import { filterClause, ChunkWatch, kWatchAck, kWatchPause, kWatchStream } from "./watch";
-import { parseSlots, slotName } from "./slots";
+import { parseSlots, slotName, slotOwner } from "./slots";
 import {
   MIN_SCRAM_ITERATIONS,
   finishScramLogin,
@@ -694,7 +694,7 @@ export class ChunkClient {
   /** Creates a durable slot; requires ADMIN on the table. */
   createSlot(table: string, name: string, options: ChunkSlotOptions = {}): Promise<void> {
     return this.enqueue(async () => {
-      const statement = `CREATE SLOT ${options.ifNotExists ? "IF NOT EXISTS " : ""}${slotName(name)} ON ${checkName(table, "a table name")}${filterClause(options)}`;
+      const statement = `CREATE SLOT ${options.ifNotExists ? "IF NOT EXISTS " : ""}${slotName(name)} ON ${checkName(table, "a table name")}${filterClause(options)}${slotOwner(options.owner)}`;
       expectOk(await this.run(statement, [], "CREATE SLOT"), "CREATE SLOT");
     });
   }
