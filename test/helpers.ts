@@ -7,6 +7,7 @@ import path from "node:path";
 import { once } from "node:events";
 
 import { startScramLogin } from "../src/scram";
+import { testTlsFiles } from "./tls-cert";
 
 export interface StartedServer {
   process: ChildProcessWithoutNullStreams;
@@ -137,10 +138,6 @@ function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function tlsFixtureDir(): string {
-  return path.join(repoRoot(), "test/fixtures/tls");
-}
-
 async function waitForServer(host: string, port: number): Promise<void> {
   const deadline = Date.now() + 5000;
   while (Date.now() < deadline) {
@@ -164,14 +161,6 @@ async function waitForServer(host: string, port: number): Promise<void> {
 function removeServerFiles(dataDir: string): void {
   fs.rmSync(dataDir, { recursive: true, force: true });
   fs.rmSync(`${dataDir}.admin-password`, { force: true });
-}
-
-function tlsFixtures(): { cert: string; key: string } {
-  const cert = path.join(tlsFixtureDir(), "cert.pem");
-  const key = path.join(tlsFixtureDir(), "key.pem");
-  assert.ok(fs.existsSync(cert), `TLS cert fixture not found: ${cert}`);
-  assert.ok(fs.existsSync(key), `TLS key fixture not found: ${key}`);
-  return { cert, key };
 }
 
 /**
@@ -219,7 +208,7 @@ export async function startServer(options: { tls?: boolean; auth?: "users" | "no
   }
 
   if (tlsEnabled) {
-    const { cert, key } = tlsFixtures();
+    const { cert, key } = testTlsFiles();
     args.push("--tls-cert", cert, "--tls-key", key);
   }
 
