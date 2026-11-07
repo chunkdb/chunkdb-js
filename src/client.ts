@@ -196,6 +196,15 @@ export function tableOfStatement(statement: string): string | null {
   return TABLE_STATEMENT.exec(statement)?.[1] ?? null;
 }
 
+/** `text` without leading and trailing spaces and tabs; other whitespace stays. Linear in the length. */
+export function trimSpacesAndTabs(text: string): string {
+  let start = 0;
+  let end = text.length;
+  while (start < end && (text[start] === " " || text[start] === "\t")) start++;
+  while (end > start && (text[end - 1] === " " || text[end - 1] === "\t")) end--;
+  return text.slice(start, end);
+}
+
 // The verb of a statement, for errors: "SET BLOCK", "PING", ...
 function commandOf(statement: string): string {
   const words = statement.trim().split(/\s+/, 2).map((word) => word.toUpperCase());
@@ -578,7 +587,7 @@ export class ChunkClient {
         if (typeof migration.statement !== "string" || /[\r\n\0]/.test(migration.statement)) {
           throw requestError("a migration statement must be one line without CR, LF or NUL", "MIGRATE");
         }
-        const statement = migration.statement.replace(/^[ \t]+|[ \t]+$/g, "");
+        const statement = trimSpacesAndTabs(migration.statement);
         if (statement === "") throw requestError("a migration needs one statement", "MIGRATE");
         if (/\$[0-9]+/.test(statement.replace(/'(?:[^']|'')*'/g, ""))) {
           throw requestError("a migration statement cannot take parameters", "MIGRATE");
