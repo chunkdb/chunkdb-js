@@ -64,6 +64,22 @@ A watch ends and requires explicit resumption.
 The client does not replay operations after connection loss.
 A sent write can have an unknown outcome.
 
+Set `helloOptions.statement_timeout_ms` to an integer from 0 through 86400000 to bound server statement execution.
+Omission inherits the server default; explicit zero disables that deadline.
+This deadline is separate from `commandTimeoutMs`, which bounds the client transport.
+The server advertises `statement_timeout` and reports effective milliseconds in `serverInfo().options`.
+
+`showConnections()` returns visible IDs, nullable user and statement text, peer addresses and state.
+`cancel(id)` returns false for an idle target or a statement past its decision boundary.
+`killConnection(id)` closes the target safely; a self-kill is acknowledged before the connection closes.
+IDs are exact uint64 bigint values and are not reused during a server run.
+The current user can control the same live user identity; ADMIN on `*` also permits other connections.
+Check `serverInfo().features` for `connection_controls` before using these methods against a server without the capability.
+The pool exposes the same methods; use `withClient` when actions must originate from one specific connection.
+Control an in-flight request from a separate client connection; pooled controls require an available lease and follow the leased client's request ordering.
+`CANCELLED` and `TIMEOUT` with `applied=false` report that the statement did not apply.
+`RATE_LIMITED` identifies `max_connections` or `statements_per_sec` in `reason` and can include `retryAfterMs`.
+
 Use `chunks://` or `tls: true` for TLS.
 `ca`, `cert` and `key` accept PEM strings or Buffers.
 `tlsServerName` overrides certificate hostname verification.

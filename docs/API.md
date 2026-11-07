@@ -37,6 +37,8 @@ A chunk version identifies committed state and orders writes within the same tab
 | `enableFeature(name)`, `showStatus()` | explicit feature activation / protected feature masks; requires ADMIN on `*` |
 | `execute(statement, parameters?)` | `ChunkReply` |
 | `ping()`, `flushWal()`, `metrics()` | `"PONG"` / durable prior WAL writes / Prometheus text |
+| `showConnections()` | `ChunkConnectionInfo[]` with exact bigint IDs |
+| `cancel(id)`, `killConnection(id)` | boolean cancellation / termination acknowledgment |
 | `connect()`, `close()` | establish / permanently close client |
 | `serverInfo()`, `defaultTable()`, `uri()` | synchronous connection information |
 

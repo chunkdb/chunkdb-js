@@ -7,6 +7,7 @@ import { ChunkClient, tableOfStatement } from "./client";
 import type { ChunkWatch } from "./watch";
 import type { ChunkParameter, ChunkReply } from "./protocol";
 import type {
+  ChunkConnectionInfo,
   ChunkBlockMetadata,
   ChunkAreaMetadata,
   ChunkStatus,
@@ -94,6 +95,7 @@ function toClientOptions(options: ChunkPoolOptions): ChunkClientOptions {
     cert: options.cert,
     key: options.key,
     table: options.table,
+    helloOptions: options.helloOptions,
   };
 }
 
@@ -331,6 +333,18 @@ export class ChunkPool {
 
   ping(): Promise<"PONG"> {
     return this.withClient(async (client) => await client.ping());
+  }
+
+  showConnections(): Promise<ChunkConnectionInfo[]> {
+    return this.withClient(async (client) => await client.showConnections());
+  }
+
+  cancel(id: bigint): Promise<boolean> {
+    return this.withClient(async (client) => await client.cancel(id));
+  }
+
+  killConnection(id: bigint): Promise<boolean> {
+    return this.withClient(async (client) => await client.killConnection(id));
   }
 
   flushWal(): Promise<void> {

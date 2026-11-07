@@ -197,6 +197,11 @@ function stringArray(reply: ChunkReply, command: string): string[] {
 }
 
 function optionValue(reply: ChunkReply, command: string, key: string): ChunkValue {
+  if (key === "statement_timeout_ms") {
+    const value = uint64Of(reply, key, command);
+    if (value > 86400000n) throw malformed("statement_timeout_ms exceeds 86400000", command);
+    return Number(value);
+  }
   if (reply.type === "bulk") return key === "client_name" ? reply.value.toString("utf8") : Buffer.from(reply.value);
   if (reply.type === "null") return null;
   if (["integer", "double", "boolean", "simple"].includes(reply.type) && "value" in reply) {
