@@ -178,6 +178,8 @@ export interface ChunkSlotOptions {
   noBefore?: boolean;
   chunks?: boolean;
   ifNotExists?: boolean;
+  /** `OWNER`: the user the slot belongs to; the server defaults it to the user running CREATE SLOT. */
+  owner?: string;
 }
 
 /** A durable slot's written acknowledgement, retained history and filter identity. */
@@ -190,6 +192,8 @@ export interface ChunkSlot {
   lost: boolean;
   filters?: { area: bigint[] | null; columns: Array<string | null> | null; columnIds: bigint[] | null; noBefore: boolean; chunks: boolean };
   lostReason?: string | null;
+  /** Shown to the owner and to users with MANAGES USERS; null otherwise or when no owner is recorded. */
+  owner?: string | null;
 }
 
 export interface ChunkChangeEvent {

@@ -35,10 +35,11 @@ false
 
 ## Acknowledgments
 
-`listSlots(table?)` returns `{ table, name, epoch, acked, retainedBytes, lost, filters, lostReason }`.
+`listSlots(table?)` returns `{ table, name, epoch, acked, retainedBytes, lost, filters, lostReason, owner }`.
 `filters` contains `area`, `columns`, aligned stable `columnIds`, `noBefore` and `chunks`.
 Area coordinates and column IDs are bigint; a dropped column keeps its ID with a null display name.
 `lostReason` is null for live slots; known loss reasons are `retention_limit` and `schema_filter`.
+`owner` is shown to that user and to users with MANAGES USERS, and is null otherwise.
 
 `acked` and `retainedBytes` are `bigint`.
 `ack` accepts a uint64 revision through the starting position or last application-delivered change, chunks or progress event.
@@ -61,6 +62,10 @@ After a crash, skip changes you already applied using your stored position.
 Pass `area`, `columns`, `noBefore` and `chunks` when creating a slot to persist its filters.
 A slot watch inherits omitted filters; explicit filters must match the persisted canonical identity.
 `ifNotExists` checks that identity instead of silently replacing filters.
+`owner` names the user the slot belongs to; it defaults to the user creating it, and the user need not exist yet.
+Under `--auth none`, a slot created without `owner` records none.
+`ifNotExists` with a different `owner` fails with `INVALID_ARGUMENT` and `reason=slot_filters`.
+Watching a slot you do not own also requires ADMIN on `*`.
 `takeover: true` closes the previous owner's connection.
 Taking over your own connection requires READ; taking over another user's connection also requires ADMIN on `*`.
 

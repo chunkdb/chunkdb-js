@@ -7,6 +7,7 @@ This client uses CQL protocol 3 with chunkdb 2.x; see the server's [compatibilit
 ## Unreleased
 
 ### Added
+- `createSlot` accepts `owner`, sent as `OWNER`; `listSlots` returns each slot's `owner`, null when it is not shown to you.
 - Add extensible RESP3 decoding, structured errors, read metadata, feed progress and CHUNKS acknowledgments, HELLO options, slot filters and explicit feature helpers. (#69).
 - Rewrite user guides with checked examples and concise runtime reference. (#5).
 - Pull requests run build, unit and plain/TLS integration tests on Linux and macOS
