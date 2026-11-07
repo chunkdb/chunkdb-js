@@ -3,11 +3,11 @@ import assert from "node:assert/strict";
 import type { Socket } from "node:net";
 import net from "node:net";
 import tls from "node:tls";
-import fs from "node:fs";
 
 import { ChunkClient, ChunkConnectionError, ChunkPool, ChunkProtocolError, ChunkServerError, ChunkTimeoutError, parseReply, type ChunkReply } from "../src/index";
 import { ReplyReader } from "../src/protocol";
 import { describeReply, FAKE_HELLO, startFakeServer } from "./fake-server";
+import { testTlsPem } from "./tls-cert";
 
 const EPOCH = "0123456789abcdef0123456789abcdef";
 const bulk = (text: string) => `$${Buffer.byteLength(text)}\r\n${text}\r\n`;
@@ -206,8 +206,7 @@ test("WATCH close aborts a schema connection stalled during TLS setup", { timeou
   const sockets = new Set<Socket>();
   let connections = 0;
   const secureContext = tls.createSecureContext({
-    cert: fs.readFileSync(new URL("./fixtures/tls/cert.pem", import.meta.url)),
-    key: fs.readFileSync(new URL("./fixtures/tls/key.pem", import.meta.url)),
+    ...testTlsPem(),
   });
   const server = net.createServer((socket) => {
     sockets.add(socket);
