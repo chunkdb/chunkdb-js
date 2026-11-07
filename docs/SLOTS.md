@@ -39,7 +39,7 @@ false
 `filters` contains `area`, `columns`, aligned stable `columnIds`, `noBefore` and `chunks`.
 Area coordinates and column IDs are bigint; a dropped column keeps its ID with a null display name.
 `lostReason` is null for live slots; known loss reasons are `retention_limit` and `schema_filter`.
-`owner` is shown to that user and to users with MANAGES USERS, and is null otherwise.
+`owner` is shown to that user, to users with MANAGES USERS and to everyone on a server started with `--auth none`, and is null otherwise.
 
 `acked` and `retainedBytes` are `bigint`.
 `ack` accepts a uint64 revision through the starting position or last application-delivered change, chunks or progress event.
