@@ -59,6 +59,7 @@ After a crash, skip changes you already applied using your stored position.
 ## Filters and deadlines
 
 Pass `area`, `columns`, `noBefore` and `chunks` when creating a slot to persist its filters.
+Use `area3D` for inclusive three-axis bounds; it cannot be combined with `area`.
 A slot watch inherits omitted filters; explicit filters must match the persisted canonical identity.
 `ifNotExists` checks that identity instead of silently replacing filters.
 `takeover: true` closes the previous owner's connection.
