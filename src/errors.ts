@@ -143,8 +143,10 @@ export class ChunkUnknownCommandError extends ChunkServerError {}
 export class ChunkUnknownColumnTypeError extends ChunkProtocolError {}
 
 /**
- * `AUTH_REQUIRED` (the server needs a user and password) or `AUTH_FAILED`
- * (a wrong password or an unknown user).
+ * `AUTH_REQUIRED` (the server needs a user and password, or a login bound
+ * to its TLS connection) or `AUTH_FAILED` (a wrong password, an unknown
+ * user, or with `reason` `channel_binding` a login bound to another TLS
+ * connection than the server's).
  */
 export class ChunkAuthError extends ChunkServerError {}
 

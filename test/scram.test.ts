@@ -87,3 +87,42 @@ test("a verifier logs in: the proof checks against its StoredKey", async () => {
     `v=${createHmac("sha256", Buffer.from(serverKey, "base64")).update(authMessage).digest("base64")}`,
   );
 });
+
+test("a bound login carries its binding in the header, in c= and under the proof and signature", async () => {
+  const data = Buffer.from(Array.from({ length: 32 }, (_, i) => i));
+  const salt = Buffer.from("W22ZaJ0SNY7soEsUEjb6gQ==", "base64");
+  const [, , storedKey, serverKey] = /^SCRAM-SHA-256\$([0-9]+):[^$]+\$([^:]+):(.+)$/.exec(scramVerifier("pencil", { salt }))!;
+  const finals = new Map<string, string>();
+  for (const type of ["tls-exporter", "tls-server-end-point"] as const) {
+    const login = startScramLogin("user", "rOprNGfwEbeRWgbNEkqO", { type, data });
+    assert.equal(login.first, `p=${type},,n=user,r=rOprNGfwEbeRWgbNEkqO`);
+    assert.equal(login.firstBare, "n=user,r=rOprNGfwEbeRWgbNEkqO");
+    const channel = Buffer.concat([Buffer.from(`p=${type},,`), data]).toString("base64");
+    assert.equal(login.channelBinding, `c=${channel}`);
+    const final = await finishScramLogin(login, "pencil", RFC_SERVER_FIRST);
+    const withoutProof = `c=${channel},r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0`;
+    assert.ok(final.message.startsWith(`${withoutProof},p=`), final.message);
+    const authMessage = `${login.firstBare},${RFC_SERVER_FIRST},${withoutProof}`;
+    const proof = Buffer.from(final.message.slice(final.message.indexOf(",p=") + 3), "base64");
+    const signature = createHmac("sha256", Buffer.from(storedKey, "base64")).update(authMessage).digest();
+    const clientKey = Buffer.from(proof.map((byte, i) => byte ^ signature[i]));
+    assert.equal(createHash("sha256").update(clientKey).digest("base64"), storedKey);
+    assert.equal(
+      final.serverSignature,
+      `v=${createHmac("sha256", Buffer.from(serverKey, "base64")).update(authMessage).digest("base64")}`,
+    );
+    finals.set(type, final.message);
+  }
+  // Other data, or no binding, gives another proof.
+  const other = await finishScramLogin(
+    startScramLogin("user", "rOprNGfwEbeRWgbNEkqO", { type: "tls-exporter", data: Buffer.alloc(32) }), "pencil", RFC_SERVER_FIRST);
+  const unbound = await finishScramLogin(startScramLogin("user", "rOprNGfwEbeRWgbNEkqO"), "pencil", RFC_SERVER_FIRST);
+  const proofs = [...finals.values(), other.message, unbound.message].map((message) => message.slice(message.indexOf(",p=")));
+  assert.equal(new Set(proofs).size, 4);
+});
+
+test("an unbound login keeps n,, and c=biws", () => {
+  const login = startScramLogin("user", "rOprNGfwEbeRWgbNEkqO", undefined);
+  assert.equal(login.first, "n,,n=user,r=rOprNGfwEbeRWgbNEkqO");
+  assert.equal(login.channelBinding, "c=biws");
+});

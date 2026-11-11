@@ -3,12 +3,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-// A self-signed RSA 2048 certificate for 127.0.0.1 (common name and IP
-// subject alternative name), valid from a day ago to a day ahead and signed
-// with SHA-256. It is generated once per test process, so no key is kept in
-// the repository.
+// A self-signed certificate for 127.0.0.1 (common name and IP subject
+// alternative name), valid from a day ago to a day ahead: RSA 2048 signed
+// with SHA-256 by default, or another key and signature algorithm. Each kind
+// is generated once per test process, so no key is kept in the repository.
 
-function der(tag: number, ...parts: Buffer[]): Buffer {
+export function der(tag: number, ...parts: Buffer[]): Buffer {
   const body = Buffer.concat(parts);
   const length = body.length;
   let header: Buffer;
@@ -22,10 +22,10 @@ function der(tag: number, ...parts: Buffer[]): Buffer {
   return Buffer.concat([header, body]);
 }
 
-const sequence = (...parts: Buffer[]): Buffer => der(0x30, ...parts);
+export const sequence = (...parts: Buffer[]): Buffer => der(0x30, ...parts);
 const set = (...parts: Buffer[]): Buffer => der(0x31, ...parts);
 
-function oid(dotted: string): Buffer {
+export function oid(dotted: string): Buffer {
   const [first, second, ...rest] = dotted.split(".").map(Number);
   const bytes = [first * 40 + second];
   for (const value of rest) {
@@ -48,13 +48,56 @@ function pem(label: string, body: Buffer): string {
   return `-----BEGIN ${label}-----\n${lines.join("\n")}\n-----END ${label}-----\n`;
 }
 
-let generated: { cert: string; key: string } | undefined;
+/** The key and signature algorithm of a test certificate. */
+export type TestCertificateKind = "rsa-sha256" | "ecdsa-sha384" | "rsa-pss-sha384" | "ed25519";
+
+function keyAndSignature(kind: TestCertificateKind): {
+  keys: crypto.KeyPairKeyObjectResult;
+  algorithm: Buffer;
+  sign: (tbs: Buffer, key: crypto.KeyObject) => Buffer;
+} {
+  switch (kind) {
+    case "rsa-sha256":
+      return {
+        keys: crypto.generateKeyPairSync("rsa", { modulusLength: 2048 }),
+        algorithm: sequence(oid("1.2.840.113549.1.1.11"), der(0x05)),
+        sign: (tbs, key) => crypto.sign("sha256", tbs, key),
+      };
+    case "ecdsa-sha384":
+      return {
+        keys: crypto.generateKeyPairSync("ec", { namedCurve: "P-384" }),
+        algorithm: sequence(oid("1.2.840.10045.4.3.3")),
+        sign: (tbs, key) => crypto.sign("sha384", tbs, key),
+      };
+    case "rsa-pss-sha384": {
+      // RSASSA-PSS-params: SHA-384, MGF1 with SHA-384, a 48-byte salt.
+      const sha384 = sequence(oid("2.16.840.1.101.3.4.2.2"), der(0x05));
+      return {
+        keys: crypto.generateKeyPairSync("rsa", { modulusLength: 2048 }),
+        algorithm: sequence(oid("1.2.840.113549.1.1.10"), sequence(
+          der(0xa0, sha384),
+          der(0xa1, sequence(oid("1.2.840.113549.1.1.8"), sha384)),
+          der(0xa2, der(0x02, Buffer.from([48]))),
+        )),
+        sign: (tbs, key) => crypto.sign("sha384", tbs, { key, padding: crypto.constants.RSA_PKCS1_PSS_PADDING, saltLength: 48 }),
+      };
+    }
+    case "ed25519":
+      return {
+        keys: crypto.generateKeyPairSync("ed25519"),
+        algorithm: sequence(oid("1.3.101.112")),
+        sign: (tbs, key) => crypto.sign(null, tbs, key),
+      };
+  }
+}
+
+const generated = new Map<TestCertificateKind, { cert: string; key: string }>();
 
 /** The certificate and private key as PEM text. */
-export function testTlsPem(): { cert: string; key: string } {
-  if (generated) return generated;
-  const { publicKey, privateKey } = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
-  const sha256WithRsa = sequence(oid("1.2.840.113549.1.1.11"), der(0x05));
+export function testTlsPem(kind: TestCertificateKind = "rsa-sha256"): { cert: string; key: string } {
+  const cached = generated.get(kind);
+  if (cached) return cached;
+  const { keys: { publicKey, privateKey }, algorithm, sign } = keyAndSignature(kind);
   const name = sequence(set(sequence(oid("2.5.4.3"), der(0x0c, Buffer.from("127.0.0.1", "utf8")))));
   const day = 24 * 60 * 60 * 1000;
   const now = Date.now();
@@ -62,34 +105,36 @@ export function testTlsPem(): { cert: string; key: string } {
   const tbs = sequence(
     der(0xa0, der(0x02, Buffer.from([2]))),
     der(0x02, Buffer.from([1])),
-    sha256WithRsa,
+    algorithm,
     name,
     sequence(utcTime(new Date(now - day)), utcTime(new Date(now + day))),
     name,
     publicKey.export({ type: "spki", format: "der" }),
     der(0xa3, sequence(subjectAltName)),
   );
-  const signature = crypto.sign("sha256", tbs, privateKey);
-  const certificate = sequence(tbs, sha256WithRsa, der(0x03, Buffer.from([0]), signature));
-  generated = {
+  const certificate = sequence(tbs, algorithm, der(0x03, Buffer.from([0]), sign(tbs, privateKey)));
+  const result = {
     cert: pem("CERTIFICATE", certificate),
     key: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
   };
-  return generated;
+  generated.set(kind, result);
+  return result;
 }
 
-let files: { cert: string; key: string } | undefined;
+const files = new Map<TestCertificateKind, { cert: string; key: string }>();
 
 /** Paths of the certificate and key written once to a private temporary directory. */
-export function testTlsFiles(): { cert: string; key: string } {
-  if (files) return files;
-  const { cert, key } = testTlsPem();
+export function testTlsFiles(kind: TestCertificateKind = "rsa-sha256"): { cert: string; key: string } {
+  const cached = files.get(kind);
+  if (cached) return cached;
+  const { cert, key } = testTlsPem(kind);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "chunkdb-node-tls-"));
   const certPath = path.join(dir, "cert.pem");
   const keyPath = path.join(dir, "key.pem");
   fs.writeFileSync(certPath, cert);
   fs.writeFileSync(keyPath, key, { mode: 0o600 });
   process.once("exit", () => fs.rmSync(dir, { recursive: true, force: true }));
-  files = { cert: certPath, key: keyPath };
-  return files;
+  const result = { cert: certPath, key: keyPath };
+  files.set(kind, result);
+  return result;
 }
