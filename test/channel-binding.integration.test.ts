@@ -49,15 +49,16 @@ function options(server: StartedServer, overrides: ChunkClientOptions = {}): Chu
   return { host: server.host, port: server.port, tls: true, tlsInsecure: true, user: server.user, password: server.password, ...overrides };
 }
 
-// Logs in, checks the TLS version and the login, and closes.
-async function logIn(clientOptions: ChunkClientOptions, version: Version): Promise<void> {
+// Logs in, checks the TLS version and the login, and closes. `kind` is the
+// certificate the server presents, which the version probe verifies.
+async function logIn(clientOptions: ChunkClientOptions, version: Version, kind?: TestCertificateKind): Promise<void> {
   const client = await connect(clientOptions);
   try {
     assert.equal(await client.ping(), "PONG");
     assert.match(client.serverInfo()?.serverSignature ?? "", /^v=/);
     assert.ok(client.serverInfo()?.features?.includes("channel_binding"));
     // The client's socket is private; the version shows on a new connection under the same cap.
-    const probe = tls.connect({ host: clientOptions.host, port: clientOptions.port, rejectUnauthorized: false });
+    const probe = tls.connect({ host: clientOptions.host, port: clientOptions.port, ca: testTlsPem(kind).cert });
     await new Promise<void>((resolve, reject) => { probe.once("secureConnect", resolve); probe.once("error", reject); });
     assert.equal(probe.getProtocol(), version);
     probe.destroy();
@@ -158,10 +159,10 @@ test("tls-server-end-point follows the certificate's signature hash; Ed25519 bin
   for (const kind of kinds) {
     const server = await startServer({ tls: true, tlsCertificate: kind, authChannelBinding: "require" });
     try {
-      await withTlsUpTo("TLSv1.3", () => logIn(options(server), "TLSv1.3"));
+      await withTlsUpTo("TLSv1.3", () => logIn(options(server), "TLSv1.3", kind));
       await withTlsUpTo("TLSv1.2", async () => {
         if (kind !== "ed25519") {
-          await logIn(options(server), "TLSv1.2");
+          await logIn(options(server), "TLSv1.2", kind);
           return;
         }
         // No silent unbound login: the client fails before HELLO.
@@ -183,7 +184,7 @@ async function startRelay(server: StartedServer): Promise<{ port: number; ca: st
   const { cert, key } = testTlsPem("ecdsa-sha384");
   const sockets = new Set<tls.TLSSocket>();
   const relay = tls.createServer({ cert, key }, (inbound) => {
-    const outbound = tls.connect({ host: server.host, port: server.port, rejectUnauthorized: false });
+    const outbound = tls.connect({ host: server.host, port: server.port, ca: testTlsPem().cert });
     for (const socket of [inbound, outbound]) {
       sockets.add(socket);
       socket.on("error", () => {});
