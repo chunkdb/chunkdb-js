@@ -7,7 +7,7 @@ import path from "node:path";
 import { once } from "node:events";
 
 import { startScramLogin } from "../src/scram";
-import { testTlsFiles } from "./tls-cert";
+import { testTlsFiles, type TestCertificateKind } from "./tls-cert";
 
 export interface StartedServer {
   process: ChildProcessWithoutNullStreams;
@@ -167,7 +167,13 @@ function removeServerFiles(dataDir: string): void {
  * Starts a server with an administrator (`admin`, whose password `uri`
  * carries), or with `--auth none`.
  */
-export async function startServer(options: { tls?: boolean; auth?: "users" | "none"; slotMaxBytes?: number; feedLingerMs?: number; backupDir?: string } = {}): Promise<StartedServer> {
+export async function startServer(options: {
+  tls?: boolean; auth?: "users" | "none"; slotMaxBytes?: number; feedLingerMs?: number; backupDir?: string;
+  /** The key and signature algorithm of the TLS certificate; RSA with SHA-256 by default. */
+  tlsCertificate?: TestCertificateKind;
+  /** `--auth-channel-binding`. */
+  authChannelBinding?: "allow" | "require";
+} = {}): Promise<StartedServer> {
   const host = "127.0.0.1";
   const port = await pickFreePort();
   const auth = options.auth ?? "users";
@@ -197,6 +203,7 @@ export async function startServer(options: { tls?: boolean; auth?: "users" | "no
   if (options.slotMaxBytes !== undefined) args.push("--slot-max-bytes", String(options.slotMaxBytes));
   if (options.feedLingerMs !== undefined) args.push("--feed-linger-ms", String(options.feedLingerMs));
   if (options.backupDir !== undefined) args.push("--backup-dir", options.backupDir);
+  if (options.authChannelBinding !== undefined) args.push("--auth-channel-binding", options.authChannelBinding);
 
   if (auth === "users") {
     // Outside the data directory, which must start empty.
@@ -208,7 +215,7 @@ export async function startServer(options: { tls?: boolean; auth?: "users" | "no
   }
 
   if (tlsEnabled) {
-    const { cert, key } = testTlsFiles();
+    const { cert, key } = testTlsFiles(options.tlsCertificate);
     args.push("--tls-cert", cert, "--tls-key", key);
   }
 

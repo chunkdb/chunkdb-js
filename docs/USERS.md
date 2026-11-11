@@ -25,6 +25,9 @@ await client.dropUser("bot");
 ## Rights
 
 `createUser(name, password, { managesUsers: true })` allows that user to administer users and permissions.
+`createUser(name, password, { requiresChannelBinding: true })` lets that user log in only with a login bound to its TLS connection; `setRequiresChannelBinding(name, value)` changes it.
+An unbound login of such a user fails with `AUTH_FAILED`, like a wrong password; see [channel binding](CONNECTIONS.md#channel-binding).
+`listUsers()` reports `managesUsers`, `requiresChannelBinding` and `grants` for each user.
 `ADMIN` includes `WRITE`, which includes `READ`.
 Use `"*"` as the table to grant a right on every table.
 Revoking a right also removes the higher rights that imply it.

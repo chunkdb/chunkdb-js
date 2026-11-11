@@ -26,8 +26,8 @@ A chunk version identifies committed state and orders writes within the same tab
 | `alterTable(name, change)`, `dropTable(name)` | change schema/options or drop table |
 | `listTables()`, `describe(table?)` | visible names / `ChunkTableSchema` |
 | `clearSchemaCache(table?)` | synchronous cache invalidation |
-| `createUser(name, password, { managesUsers? }?)` | create user |
-| `setPassword(name, password)`, `setManagesUsers(name, value)` | change user |
+| `createUser(name, password, { managesUsers?, requiresChannelBinding? }?)` | create user |
+| `setPassword(name, password)`, `setManagesUsers(name, value)`, `setRequiresChannelBinding(name, value)` | change user |
 | `dropUser(name)`, `grant(right, table, user)`, `revoke(right, table, user)` | manage users/rights |
 | `listUsers()` | `ChunkUser[]` |
 | `transaction(fn, { retries? }?)` | commit version or null |

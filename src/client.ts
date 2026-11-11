@@ -29,6 +29,7 @@ import {
   ChunkVersionMismatchError,
   type ChunkError,
 } from "./errors";
+import { tlsChannelBinding, type ScramChannelBinding } from "./channel-binding";
 import { chunkFormLimit, decodeChunkForm, encodeChunkForm } from "./chunk-form";
 import { encodeStatement, ReplyReader, type ChunkParameter, type ChunkReply, type ErrorReply, type PushReply } from "./protocol";
 import { filterClause, ChunkWatch, kWatchAck, kWatchPause, kWatchStream } from "./watch";
@@ -51,6 +52,7 @@ import type {
   ChunkArea,
   ChunkAreaEntry,
   ChunkAreaRawEntry,
+  ChunkChannelBinding,
   ChunkClientOptions,
   ChunkColumnDefinition,
   ChunkColumnType,
@@ -110,6 +112,7 @@ interface ResolvedOptions {
   ca?: string | Buffer;
   cert?: string | Buffer;
   key?: string | Buffer;
+  channelBinding: ChunkChannelBinding;
   uri: ParsedChunkUri;
   pipelineDepth: number;
   table: string;
@@ -171,6 +174,7 @@ const DEFAULT_TRANSACTION_RETRIES = 5;
 
 const TABLE_STATEMENT = /^\s*(?:migrate\s+'[a-z_][a-z0-9_]{0,62}'\s+)?(?:create|alter|drop)\s+table\s+([a-z_][a-z0-9_]*)/i;
 const RIGHTS: readonly ChunkRight[] = ["READ", "WRITE", "ADMIN"];
+const CHANNEL_BINDINGS: readonly ChunkChannelBinding[] = ["auto", "off", "require"];
 // The statements of the login, sent while connecting.
 const HANDSHAKE = new Set(["HELLO", "AUTH"]);
 const PUSH_KINDS = new Set(["schema", "change", "progress", "resync", "chunks", "catalog"]);
@@ -237,6 +241,17 @@ function resolveOptions(options: ChunkClientOptions = {}): ResolvedOptions {
   if (!Number.isSafeInteger(verifierIterations) || verifierIterations < MIN_SCRAM_ITERATIONS) {
     throw new TypeError(`verifierIterations must be an integer of at least ${MIN_SCRAM_ITERATIONS}`);
   }
+  const channelBinding = options.channelBinding ?? "auto";
+  if (!CHANNEL_BINDINGS.includes(channelBinding)) {
+    throw new TypeError(`channelBinding must be "auto", "off" or "require", got ${JSON.stringify(channelBinding)}`);
+  }
+  // Refused before connecting: nothing that depends on the password is sent.
+  if (channelBinding === "require" && !secure) {
+    throw new ChunkConnectionError('channelBinding "require" needs TLS; use chunks:// or tls: true', { phase: "connect" });
+  }
+  if (channelBinding === "require" && user === "") {
+    throw new ChunkConnectionError('channelBinding "require" needs a user: only a login with a user can be bound', { phase: "connect" });
+  }
   const named =
     options.table !== undefined && options.table !== "" ? options.table : tableFromUriPath(parsed?.path ?? "/");
   return {
@@ -253,6 +268,7 @@ function resolveOptions(options: ChunkClientOptions = {}): ResolvedOptions {
     ca: options.ca,
     cert: options.cert,
     key: options.key,
+    channelBinding,
     pipelineDepth: Math.max(1, options.pipelineDepth ?? 1),
     table: named ?? DEFAULT_TABLE,
     helloOptions: options.helloOptions,
@@ -321,8 +337,10 @@ function userOf(reply: ChunkReply, command: string): ChunkUser {
   const entries = mapOf(reply, command);
   const name = entries.get("name");
   const managesUsers = entries.get("manages_users");
+  // A server without channel binding has no such key: none of its users requires it.
+  const requiresChannelBinding = entries.get("requires_channel_binding") ?? { type: "boolean", value: false };
   const grantsReply = entries.get("grants");
-  if (name === undefined || managesUsers?.type !== "boolean" || grantsReply === undefined) {
+  if (name === undefined || managesUsers?.type !== "boolean" || requiresChannelBinding.type !== "boolean" || grantsReply === undefined) {
     throw new ChunkProtocolError(`malformed ${command} reply`, { phase: "protocol", command });
   }
   // fromEntries defines every table as its own key, `__proto__` included.
@@ -336,7 +354,12 @@ function userOf(reply: ChunkReply, command: string): ChunkUser {
       return [table, known];
     }),
   );
-  return { name: textOf(name, "a user name", command), managesUsers: managesUsers.value, grants };
+  return {
+    name: textOf(name, "a user name", command),
+    managesUsers: managesUsers.value,
+    requiresChannelBinding: requiresChannelBinding.value,
+    grants,
+  };
 }
 
 function ifVersionClause(ifVersion: bigint | undefined): string {
@@ -1002,7 +1025,8 @@ export class ChunkClient {
       checkName(name, "a user name");
       const verifier = await this.verifier(password);
       const manages = options.managesUsers === true ? " MANAGES USERS" : "";
-      expectOk(await this.run(`CREATE USER ${name} VERIFIER $1${manages}`, [verifier], "CREATE USER"), "CREATE USER");
+      const binding = options.requiresChannelBinding === true ? " REQUIRE CHANNEL BINDING" : "";
+      expectOk(await this.run(`CREATE USER ${name} VERIFIER $1${manages}${binding}`, [verifier], "CREATE USER"), "CREATE USER");
     });
   }
 
@@ -1024,6 +1048,15 @@ export class ChunkClient {
     return this.enqueue(async () => {
       checkName(name, "a user name");
       const clause = managesUsers ? "MANAGES USERS" : "NO MANAGES USERS";
+      expectOk(await this.run(`ALTER USER ${name} ${clause}`, [], "ALTER USER"), "ALTER USER");
+    });
+  }
+
+  /** `ALTER USER ... [NO] REQUIRE CHANNEL BINDING`: whether the user logs in only with a login bound to its TLS connection. */
+  setRequiresChannelBinding(name: string, requiresChannelBinding: boolean): Promise<void> {
+    return this.enqueue(async () => {
+      checkName(name, "a user name");
+      const clause = requiresChannelBinding ? "REQUIRE CHANNEL BINDING" : "NO REQUIRE CHANNEL BINDING";
       expectOk(await this.run(`ALTER USER ${name} ${clause}`, [], "ALTER USER"), "ALTER USER");
     });
   }
@@ -1581,7 +1614,7 @@ export class ChunkClient {
     // A failed handshake (failed login, older server) must not leave the
     // socket open behind a client the caller never received.
     try {
-      await this.hello();
+      await this.hello(socket);
     } catch (error) {
       if (this.socket === socket) {
         this.clearConnectionState();
@@ -1595,7 +1628,7 @@ export class ChunkClient {
   // HELLO is the first statement on every connection; with a user it starts
   // the SCRAM-SHA-256 login, which AUTH finishes. Both are sent outside the
   // pipeline queue: operations waiting for the connection hold its slots.
-  private async hello(): Promise<void> {
+  private async hello(socket: TransportSocket): Promise<void> {
     const user = this.options.user;
     let login: ScramLogin | null = null;
     let reply: ChunkReply;
@@ -1604,7 +1637,7 @@ export class ChunkClient {
     if (user === "") {
       reply = await this.send(`HELLO ${PROTOCOL_VERSION}${withClause}`, [], "HELLO");
     } else {
-      login = startScramLogin(user);
+      login = startScramLogin(user, undefined, this.channelBindingOf(socket));
       reply = await this.send(`HELLO ${PROTOCOL_VERSION} USER ${user} $1${withClause}`, [Buffer.from(login.first, "utf8")], "HELLO");
     }
     if (reply.type === "error") {
@@ -1658,6 +1691,20 @@ export class ChunkClient {
       );
     }
     this.info = info;
+  }
+
+  // The data that binds the login to this connection, read after the TLS
+  // handshake and before HELLO; none on plain TCP or with channelBinding "off".
+  // A failed bound login is never retried unbound.
+  private channelBindingOf(socket: TransportSocket): ScramChannelBinding | undefined {
+    if (!(socket instanceof tls.TLSSocket) || this.options.channelBinding === "off") {
+      return undefined;
+    }
+    try {
+      return tlsChannelBinding(socket);
+    } catch (error) {
+      throw error instanceof ChunkTlsError ? error : this.wrapTransportError(error, "tls", "HELLO");
+    }
   }
 
   private serverError(reply: ErrorReply, command: string): ChunkError {

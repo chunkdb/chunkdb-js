@@ -3,6 +3,7 @@
 import { createHash, createHmac, pbkdf2, pbkdf2Sync, randomBytes, timingSafeEqual } from "node:crypto";
 import { promisify } from "node:util";
 
+import type { ScramChannelBinding } from "./channel-binding";
 import type { ChunkVerifierOptions } from "./types";
 
 const pbkdf2Async = promisify(pbkdf2);
@@ -12,20 +13,26 @@ export const MIN_SCRAM_ITERATIONS = 4096;
 const SALT_BYTES = 16;
 const MAX_SALT_BYTES = 256;
 const NONCE_BYTES = 18;
-// base64("n,,"): no channel binding.
-const CHANNEL_BINDING = "c=biws";
 const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
 /** The client side of one login, between `HELLO 3 USER` and `AUTH`. */
 export interface ScramLogin {
-  /** The client-first message: `n,,n=<user>,r=<nonce>`. */
+  /**
+   * The client-first message: `n,,n=<user>,r=<nonce>`, or with
+   * `p=<type>,,` in place of `n,,` for a login bound to its TLS connection.
+   */
   first: string;
   firstBare: string;
   nonce: string;
+  /**
+   * The client-final message's `c=` attribute: the base64 of the GS2 header
+   * and the channel binding data; `c=biws` (`n,,`) for an unbound login.
+   */
+  channelBinding: string;
 }
 
 export interface ScramFinal {
-  /** The client-final message: `c=biws,r=<nonce>,p=<proof>`. */
+  /** The client-final message: `c=<channel binding>,r=<nonce>,p=<proof>`. */
   message: string;
   /** The server-final message the server must answer: `v=<signature>`. */
   serverSignature: string;
@@ -86,9 +93,15 @@ export function scramNonce(): string {
   return randomBytes(NONCE_BYTES).toString("base64");
 }
 
-export function startScramLogin(user: string, nonce: string = scramNonce()): ScramLogin {
+/**
+ * Starts a login; with `binding` the login is bound to the TLS connection
+ * that data comes from, so it fails on any other.
+ */
+export function startScramLogin(user: string, nonce: string = scramNonce(), binding?: ScramChannelBinding): ScramLogin {
   const firstBare = `n=${user},r=${nonce}`;
-  return { first: `n,,${firstBare}`, firstBare, nonce };
+  const header = binding === undefined ? "n,," : `p=${binding.type},,`;
+  const data = Buffer.concat([Buffer.from(header, "utf8"), binding?.data ?? Buffer.alloc(0)]);
+  return { first: `${header}${firstBare}`, firstBare, nonce, channelBinding: `c=${data.toString("base64")}` };
 }
 
 /**
@@ -112,7 +125,7 @@ export async function finishScramLogin(login: ScramLogin, password: string, serv
   }
   const salted = await pbkdf2Async(password, Buffer.from(saltText, "base64"), iterations, 32, "sha256");
   const clientKey = hmac(salted, "Client Key");
-  const withoutProof = `${CHANNEL_BINDING},r=${nonce}`;
+  const withoutProof = `${login.channelBinding},r=${nonce}`;
   const authMessage = `${login.firstBare},${serverFirst},${withoutProof}`;
   const signature = hmac(sha256(clientKey), authMessage);
   const proof = Buffer.alloc(clientKey.length);
