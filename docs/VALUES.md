@@ -43,7 +43,8 @@ The revision is null on read-only OPEN when the completed frontier is unavailabl
 A written chunk with no blocks and baseline metadata retains its empty form and version as a tombstone.
 Nonbaseline metadata keeps a chunk populated even when it has no blocks.
 
-A chunk state contains `version`, `schemaVersion`, `width`, `height`, `depth`, `present`, per-block `columns` and a `metadata` row.
+A chunk state contains `version`, `schemaVersion`, `commitTimeMs`, `width`, `height`, `depth`, `present`, per-block `columns` and a `metadata` row.
+`commitTimeMs` is the server time of the commit that produced the chunk, in milliseconds; the server assigns the version and time on each write.
 The x axis varies fastest, followed by y and z.
 `setChunk` replaces both column domains; it ignores block values at absent blocks.
 Omitted chunk metadata uses its default, then nullable NULL or the type's zero value.

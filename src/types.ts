@@ -410,6 +410,7 @@ export interface ChunkState extends ChunkStateInput {
   width: number;
   height: number;
   depth?: number;
+  /** The producing commit's server time in milliseconds; zero for transaction-private state. */
   commitTimeMs?: bigint;
   projected?: boolean;
   private?: boolean;
