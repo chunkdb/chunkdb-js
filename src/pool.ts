@@ -102,6 +102,7 @@ function toClientOptions(options: ChunkPoolOptions): ChunkClientOptions {
     ca: options.ca,
     cert: options.cert,
     key: options.key,
+    channelBinding: options.channelBinding,
     table: options.table,
   };
 }
@@ -440,6 +441,10 @@ export class ChunkPool {
 
   setManagesUsers(name: string, managesUsers: boolean): Promise<void> {
     return this.withClient(async (client) => await client.setManagesUsers(name, managesUsers));
+  }
+
+  setRequiresChannelBinding(name: string, requiresChannelBinding: boolean): Promise<void> {
+    return this.withClient(async (client) => await client.setRequiresChannelBinding(name, requiresChannelBinding));
   }
 
   dropUser(name: string): Promise<void> {

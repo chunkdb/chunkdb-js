@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { ChunkClient, ChunkMigrationMismatchError, ChunkConnectionError, ChunkMigrationError, ChunkProtocolError, ChunkServerError } from "../src/index";
-import { tableOfStatement } from "../src/client";
+import { tableOfStatement, trimSpacesAndTabs } from "../src/client";
 import { FAKE_HELLO, startFakeServer } from "./fake-server";
 
 test("migrations send steps in order, preserve statement identity and accept applied/skipped", async () => {
@@ -115,5 +115,40 @@ test("a 63-byte name and parameter-like text inside a quoted literal remain vali
   const client = new ChunkClient({ port: server.port });
   try {
     assert.deepEqual(await client.migrate([{ name, statement }]), [{ name, status: "applied" }]);
+  } finally { await client.close(); await server.close(); }
+});
+
+test("migration statements lose only leading and trailing spaces and tabs", () => {
+  for (const [text, trimmed] of [
+    ["", ""], [" \t", ""], ["DROP TABLE t", "DROP TABLE t"], [" \t DROP TABLE t \t ", "DROP TABLE t"],
+    ["\t\tDROP  \t TABLE t", "DROP  \t TABLE t"], ["\vDROP TABLE t\f", "\vDROP TABLE t\f"],
+    [" DROP TABLE t 　", " DROP TABLE t 　"],
+  ] as const) {
+    assert.equal(trimSpacesAndTabs(text), trimmed);
+  }
+});
+
+test("a migration statement with a long run of tabs inside is trimmed in linear time", async () => {
+  const inner = "\t".repeat(100000);
+  const fits = "\t".repeat(60000);
+  const server = await startFakeServer(({ line }) => {
+    if (line === "HELLO 3") return FAKE_HELLO;
+    if (line === `MIGRATE 'long' DROP${fits}TABLE t`) return "+applied\r\n";
+    throw new Error(line.slice(0, 64));
+  });
+  const client = new ChunkClient({ port: server.port });
+  try {
+    for (const [text, trimmed] of [[`${inner}x`, "x"], [`x${inner}y`, `x${inner}y`], [`x ${" \t".repeat(50000)}y\t`, `x ${" \t".repeat(50000)}y`]]) {
+      const started = performance.now();
+      assert.equal(trimSpacesAndTabs(text), trimmed);
+      assert.ok(performance.now() - started < 1000);
+    }
+    let started = performance.now();
+    await assert.rejects(client.migrate([{ name: "too_long", statement: ` DROP${inner}TABLE t\t` }]), (error: unknown) =>
+      error instanceof ChunkMigrationError && error.cause instanceof ChunkProtocolError && /at most 65536/.test(error.cause.message));
+    assert.ok(performance.now() - started < 1000);
+    started = performance.now();
+    assert.deepEqual(await client.migrate([{ name: "long", statement: ` DROP${fits}TABLE t\t` }]), [{ name: "long", status: "applied" }]);
+    assert.ok(performance.now() - started < 1000);
   } finally { await client.close(); await server.close(); }
 });

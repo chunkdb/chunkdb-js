@@ -30,8 +30,8 @@ A chunk version identifies committed state and orders writes within the same tab
 | `alterTable(name, change)`, `dropTable(name)` | change schema/options or drop table |
 | `listTables()`, `describe(table?)` | visible names / `ChunkTableSchema` |
 | `clearSchemaCache(table?)` | synchronous cache invalidation |
-| `createUser(name, password, { managesUsers? }?)` | create user |
-| `setPassword(name, password)`, `setManagesUsers(name, value)` | change user |
+| `createUser(name, password, { managesUsers?, requiresChannelBinding? }?)` | create user |
+| `setPassword(name, password)`, `setManagesUsers(name, value)`, `setRequiresChannelBinding(name, value)` | change user |
 | `dropUser(name)`, `grant(right, table, user)`, `revoke(right, table, user)` | manage users/rights |
 | `listUsers()` | `ChunkUser[]` |
 | `transaction(fn, { retries? }?)` | commit version or null |
@@ -47,7 +47,7 @@ A chunk version identifies committed state and orders writes within the same tab
 `readOptions` is `{ table?, columns? }`.
 `writeOptions` is `{ table?, ifVersion?: bigint, ifAbsent?: boolean }`; the two conditions are mutually exclusive and `ifAbsent` applies only to chunk writes.
 `watchOptions` accepts `slot`, `area`, `area3D`, `after`, `columns`, `noBefore`, `chunks`, `ackTimeoutMs` and `takeover`.
-`slotOptions` accepts `area`, `area3D`, `columns`, `noBefore`, `chunks` and `ifNotExists`.
+`slotOptions` accepts `area`, `area3D`, `columns`, `noBefore`, `chunks`, `ifNotExists` and `owner`.
 
 See [slots](SLOTS.md) for persisted filter identity.
 

@@ -72,6 +72,7 @@ export type {
   ChunkArea,
   ChunkAreaEntry,
   ChunkAreaRawEntry,
+  ChunkChannelBinding,
   ChunkCheckpointCompression,
   ChunkClientOptions,
   ChunkColumn,
