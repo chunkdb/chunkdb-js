@@ -5,7 +5,7 @@
 
 Node.js and TypeScript client for [chunkdb](https://github.com/chunkdb/chunkdb), a database for grids of typed blocks.
 A block is one grid cell.
-A chunk groups a fixed rectangle of blocks.
+A chunk groups a fixed box of blocks.
 Requires Node.js 20 or newer.
 
 ## First write and read

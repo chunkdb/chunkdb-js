@@ -45,7 +45,7 @@ test("chunks: never-written NULL and written empty versions", async () => {
       assert.equal(empty.present.some(Boolean), false);
       const raw = await client.getChunkRaw(0, 0, { columns: ["id"] });
       assert.ok(raw);
-      assert.equal(raw.readBigUInt64LE(0), version);
+      assert.equal(raw.readBigUInt64LE(8), version);
       assert.deepEqual(await client.getArea({ cx0: 0, cy0: 0, cx1: 0, cy1: 0 }), []);
       assert.deepEqual((await client.scanChunks()).chunks, []);
     } finally {
@@ -120,7 +120,7 @@ test("chunks: typed reads and writes, IF VERSION, COLUMNS", async () => {
     assert.deepEqual(some.columns.id.slice(0, 3), [4, null, 7]);
 
     // The client checks the state before sending it.
-    await assert.rejects(client.setChunk(0, 0, { present: [true], columns: {} }), /16 blocks/);
+    await assert.rejects(client.setChunk(0, 0, { present: [true], columns: {} }), /presence differs from geometry/);
     await client.close();
   } finally {
     await server.stop();
@@ -138,9 +138,9 @@ test("raw chunk forms copy chunks between places and tables", async () => {
 
     const raw = await client.getChunkRaw(0, 0);
     assert.ok(raw);
-    assert.equal(raw.readBigUInt64LE(0), (await client.getChunk(0, 0))?.version);
+    assert.equal(raw.readBigUInt64LE(8), (await client.getChunk(0, 0))?.version);
     // The version in a written form is not read.
-    raw.writeBigUInt64LE(0x7fn, 0);
+    raw.writeBigUInt64LE(0x7fn, 8);
     await client.setChunkRaw(1, 1, raw);
     await client.setChunkRaw(-3, 5, raw, { table: "copy" });
     for (const [x, y, table] of [[4, 4, "world"], [-12, 20, "copy"]] as const) {
@@ -160,9 +160,9 @@ test("raw chunk forms copy chunks between places and tables", async () => {
     // A COLUMNS form holds the named sections only.
     const idOnly = await client.getChunkRaw(0, 0, { columns: ["id"] });
     assert.ok(idOnly);
-    assert.equal(idOnly.length, 16 + 2 + 20);
+    assert.equal(idOnly.length, 36 + 3 * 12 + 2 + 20 + 28);
     // A form longer than the table takes is refused before sending.
-    await assert.rejects(client.setChunkRaw(0, 0, Buffer.alloc(2 * 1024 * 1024)), /takes at most/);
+    await assert.rejects(client.setChunkRaw(0, 0, Buffer.alloc(65 * 1024 * 1024)), /takes at most/);
     assert.equal(await client.ping(), "PONG");
     await client.close();
   } finally {
@@ -225,7 +225,7 @@ test("a chunk form of another schema version: setChunk re-encodes, setChunkRaw r
     assert.equal(state.schemaVersion, 1);
     const raw = await client.getChunkRaw(0, 0);
     assert.ok(raw);
-    assert.equal(raw.readBigUInt64LE(8), 1n);
+    assert.equal(raw.readBigUInt64LE(16), 1n);
 
     // Another client widens a column: the cached schema is version 1, the
     // table's version 2. setChunk refreshes it and encodes the values again.
