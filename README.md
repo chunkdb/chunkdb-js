@@ -54,7 +54,7 @@ The URI path selects the default table; a method's `table` option overrides it.
 
 ## Guides and reference
 
-- [Connections and errors](https://github.com/chunkdb/chunkdb-js/blob/main/docs/CONNECTIONS.md): login, pools and TLS.
+- [Connections and errors](https://github.com/chunkdb/chunkdb-js/blob/main/docs/CONNECTIONS.md): login, pools, TLS and channel binding.
 - [Values, chunks and areas](https://github.com/chunkdb/chunkdb-js/blob/main/docs/VALUES.md): typed data and conditional writes.
 - [Tables](https://github.com/chunkdb/chunkdb-js/blob/main/docs/TABLES.md) and [migrations](https://github.com/chunkdb/chunkdb-js/blob/main/docs/MIGRATIONS.md): schema setup.
 - [Transactions](https://github.com/chunkdb/chunkdb-js/blob/main/docs/TRANSACTIONS.md) and [users](https://github.com/chunkdb/chunkdb-js/blob/main/docs/USERS.md).

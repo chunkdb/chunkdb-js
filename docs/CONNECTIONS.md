@@ -69,11 +69,21 @@ Use `chunks://` or `tls: true` for TLS.
 `tlsServerName` overrides certificate hostname verification.
 `tlsInsecure: true` disables certificate verification; use it only for local tests.
 
+## Channel binding
+
+`channelBinding` binds a login to its TLS connection, so the login fails when something between the client and the server ends TLS, even with a certificate the client accepted.
+The default `"auto"` binds every login over `chunks://` (`tls-exporter` on TLS 1.3, `tls-server-end-point` on TLS 1.2) and logs in unbound over `chunk://`.
+`"require"` binds like `"auto"` and refuses `chunk://`, or a client without a user, with a `ChunkConnectionError` before connecting.
+`"off"` never binds: set it when a proxy or load balancer in front of the server ends TLS.
+Through such a proxy a bound login fails with `ChunkAuthError` (`AUTH_FAILED`, `reason` `channel_binding`); the client does not retry it unbound.
+A server started with `--auth-channel-binding require` refuses an unbound login with `ChunkAuthError` (`AUTH_REQUIRED`, `reason` `channel_binding`).
+On TLS 1.2 a server certificate signed with Ed25519 or Ed448 defines no binding, and a login fails with `ChunkTlsError`; use TLS 1.3 or `"off"`.
+
 ## Errors
 
 | Error | Meaning and action |
 |---|---|
-| `ChunkAuthError` | Check the user and password. |
+| `ChunkAuthError` | Check the user and password; for `reason` `channel_binding` see [channel binding](#channel-binding). |
 | `ChunkPermissionError` | Inspect `serverMessage` for the required right and table. |
 | `ChunkVersionMismatchError` | Re-read the chunk; `currentVersion` identifies its current state. |
 | `ChunkSchemaMismatchError` | Re-read the schema; `currentSchemaVersion` identifies its current layout. |

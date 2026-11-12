@@ -9,12 +9,15 @@ This client uses CQL protocol 3 with chunkdb 2.x; see the server's [compatibilit
 ### Added
 - Add explicit bounded area pages with exact coordinate cursors and enforce negotiated area reply budgets before decoding. ([chunkdb#136](https://github.com/chunkdb/chunkdb/issues/136)).
 - Add three-axis data methods, chunk metadata and selected-column writes, checked sectioned forms, and revision-aware scans with retained tombstones. ([chunkdb#133](https://github.com/chunkdb/chunkdb/issues/133)).
+- Logins over TLS are bound to their connection (SCRAM channel binding: `tls-exporter` on TLS 1.3, `tls-server-end-point` on TLS 1.2), so a relay that ends TLS fails the login; the `channelBinding` option (`"auto"`, `"off"`, `"require"`) turns it off or requires TLS. `createUser` accepts `requiresChannelBinding`, `setRequiresChannelBinding` changes it and `listUsers` returns it. (chunkdb/chunkdb#162)
+- `createSlot` accepts `owner`, sent as `OWNER`; `listSlots` returns each slot's `owner`, null when it is not shown to you.
 - Add extensible RESP3 decoding, structured errors, read metadata, feed progress and CHUNKS acknowledgments, HELLO options, slot filters and explicit feature helpers. (#69).
 - Rewrite user guides with checked examples and concise runtime reference. (#5).
 - Pull requests run build, unit and plain/TLS integration tests on Linux and macOS
 - Generic `BACKUP TO` integration coverage checks summaries and copied data over plain TCP and TLS
 
 ### Fixed
+- `scramVerifier` refuses a salt over 256 bytes, which chunkdb does not accept in a verifier.
 - Calls made on a client that has not connected yet wait for the first connection instead of failing with "connection closed" (#9).
 - Return null for never-written typed and raw chunk reads, including pools and transactions; expose nullable result types and retain versioned empty forms. (#72).
 - The README example uses an ESM filename that also runs outside an ESM package; feed guides link to the server's resync and ACK persistence rules

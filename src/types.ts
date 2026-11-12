@@ -40,6 +40,14 @@ export interface ChunkClientOptions {
   ca?: string | Buffer;
   cert?: string | Buffer;
   key?: string | Buffer;
+  /**
+   * Binding of the login to its TLS connection (SCRAM channel binding).
+   * `"auto"` (default) binds every login over TLS: `tls-exporter` on TLS 1.3,
+   * `tls-server-end-point` on TLS 1.2; plaintext logins are not bound.
+   * `"off"` never binds, for TLS that ends at a proxy in front of the server.
+   * `"require"` binds like `"auto"` and refuses a connection without TLS.
+   */
+  channelBinding?: ChunkChannelBinding;
   /** Max concurrent in-flight requests per connection. Default 1 (sequential). */
   pipelineDepth?: number;
   /**
@@ -51,6 +59,9 @@ export interface ChunkClientOptions {
   /** HELLO WITH options; unknown names are reported as not applied. */
   helloOptions?: Readonly<Record<string, ChunkValue>>;
 }
+
+/** The `channelBinding` option: `"auto"`, `"off"` or `"require"`. */
+export type ChunkChannelBinding = "auto" | "off" | "require";
 
 export interface ChunkPoolOptions extends ChunkClientOptions {
   maxConnections: number;
@@ -106,6 +117,8 @@ export interface ChunkUser {
   name: string;
   /** The user may create, alter and drop users and grant rights. */
   managesUsers: boolean;
+  /** The user logs in only with a login bound to its TLS connection. */
+  requiresChannelBinding: boolean;
   /** Rights by table name; `"*"` stands for every table. */
   grants: Record<string, ChunkRight>;
 }
@@ -113,12 +126,14 @@ export interface ChunkUser {
 export interface ChunkCreateUserOptions {
   /** The user may manage users and rights. Default false. */
   managesUsers?: boolean;
+  /** The user logs in only with a login bound to its TLS connection. Default false. */
+  requiresChannelBinding?: boolean;
 }
 
 export interface ChunkVerifierOptions {
   /** PBKDF2 iterations, at least 4096 (the default). */
   iterations?: number;
-  /** The salt, at least 16 bytes; 16 random bytes by default. */
+  /** The salt, 16 through 256 bytes; 16 random bytes by default. */
   salt?: Uint8Array;
 }
 
@@ -180,6 +195,8 @@ export interface ChunkSlotOptions {
   noBefore?: boolean;
   chunks?: boolean;
   ifNotExists?: boolean;
+  /** `OWNER`: the user the slot belongs to; the server defaults it to the user running CREATE SLOT. */
+  owner?: string;
 }
 
 /** A durable slot's written acknowledgement, retained history and filter identity. */
@@ -192,6 +209,8 @@ export interface ChunkSlot {
   lost: boolean;
   filters?: { area: bigint[] | null; columns: Array<string | null> | null; columnIds: bigint[] | null; noBefore: boolean; chunks: boolean };
   lostReason?: string | null;
+  /** Shown to the owner and to users with MANAGES USERS; null otherwise or when no owner is recorded. */
+  owner?: string | null;
 }
 
 export interface ChunkChangeEvent {
@@ -391,6 +410,7 @@ export interface ChunkState extends ChunkStateInput {
   width: number;
   height: number;
   depth?: number;
+  /** The producing commit's server time in milliseconds; zero for transaction-private state. */
   commitTimeMs?: bigint;
   projected?: boolean;
   private?: boolean;

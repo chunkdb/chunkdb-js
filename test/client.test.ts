@@ -143,7 +143,8 @@ test("users statements send verifiers and map their errors", async () => {
       const bulk = (text: string) => `$${text.length}\r\n${text}\r\n`;
       return (
         `*2\r\n%3\r\n${bulk("name")}${bulk("admin")}${bulk("manages_users")}#t\r\n${bulk("grants")}%1\r\n${bulk("*")}${bulk("ADMIN")}` +
-        `%3\r\n${bulk("name")}${bulk("bot")}${bulk("manages_users")}#f\r\n${bulk("grants")}%2\r\n` +
+        // Without requires_channel_binding (a server before channel binding) and with it.
+        `%4\r\n${bulk("name")}${bulk("bot")}${bulk("manages_users")}#f\r\n${bulk("requires_channel_binding")}#t\r\n${bulk("grants")}%2\r\n` +
         `${bulk("__proto__")}${bulk("READ")}${bulk("world")}${bulk("WRITE")}`
       );
     }
@@ -164,9 +165,14 @@ test("users statements send verifiers and map their errors", async () => {
     await client.revoke("WRITE", "*", "bot");
     await client.dropUser("bot");
     assert.deepEqual(await client.listUsers(), [
-      { name: "admin", managesUsers: true, grants: { "*": "ADMIN" } },
-      { name: "bot", managesUsers: false, grants: Object.fromEntries([["__proto__", "READ"], ["world", "WRITE"]]) },
+      { name: "admin", managesUsers: true, requiresChannelBinding: false, grants: { "*": "ADMIN" } },
+      { name: "bot", managesUsers: false, requiresChannelBinding: true, grants: Object.fromEntries([["__proto__", "READ"], ["world", "WRITE"]]) },
     ]);
+    await client.createUser("eve", "x", { requiresChannelBinding: true });
+    await client.createUser("ann", "x", { managesUsers: true, requiresChannelBinding: true });
+    await client.setRequiresChannelBinding("eve", false);
+    await client.setRequiresChannelBinding("eve", true);
+    await assert.rejects(client.setRequiresChannelBinding("Eve", true), /a user name must match/);
     await assert.rejects(client.dropUser("admin"), (error: unknown) => {
       assert.ok(error instanceof ChunkPermissionError && error instanceof ChunkServerError);
       assert.equal(error.serverCode, "PERMISSION_DENIED");
@@ -188,6 +194,12 @@ test("users statements send verifiers and map their errors", async () => {
       "REVOKE WRITE ON * FROM bot",
       "DROP USER bot",
       "SHOW USERS",
+    ]);
+    assert.deepEqual(lines.slice(8, 12), [
+      "CREATE USER eve VERIFIER $1 REQUIRE CHANNEL BINDING",
+      "CREATE USER ann VERIFIER $1 MANAGES USERS REQUIRE CHANNEL BINDING",
+      "ALTER USER eve NO REQUIRE CHANNEL BINDING",
+      "ALTER USER eve REQUIRE CHANNEL BINDING",
     ]);
     for (const request of server.requests.slice(1, 3)) {
       const verifier = request.frames[0]?.toString("utf8") ?? "";
