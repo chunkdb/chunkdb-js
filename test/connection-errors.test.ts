@@ -97,3 +97,35 @@ test("command timeout identifies the command and its timeout setting", async () 
     });
   } finally { await client.close(); await server.close(); }
 });
+
+test("a close names the scheme check only before the login completes", async () => {
+  const server = await startFakeServer(({ line }, socket) => {
+    if (line.startsWith("HELLO 3 WITH client_name = 'early'")) {
+      socket.end();
+      return null;
+    }
+    if (line.startsWith("HELLO 3")) return FAKE_HELLO;
+    socket.end();
+    return null;
+  });
+  const early = new ChunkClient({ port: server.port, helloOptions: { client_name: "early" } });
+  const late = new ChunkClient({ port: server.port });
+  try {
+    await assert.rejects(early.connect(), (error: unknown) => {
+      assert.ok(error instanceof ChunkConnectionError);
+      assert.match(error.message, /chunk:\/\/ uses plaintext and chunks:\/\/ uses TLS/);
+      return true;
+    });
+    await late.connect();
+    // A connection closed after login, as by KILL CONNECTION, is not a scheme mismatch.
+    await assert.rejects(late.ping(), (error: unknown) => {
+      assert.ok(error instanceof ChunkConnectionError);
+      assert.match(error.message, /^connection closed; check the server log$/);
+      return true;
+    });
+  } finally {
+    await early.close();
+    await late.close();
+    await server.close();
+  }
+});

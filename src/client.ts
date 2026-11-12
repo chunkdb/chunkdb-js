@@ -1880,8 +1880,10 @@ export class ChunkClient {
 
     socket.on("close", () => {
       if (this.socket === socket) {
-        this.clearConnectionState(new ChunkConnectionError(
-          "connection closed; check the server log and that chunk:// uses plaintext and chunks:// uses TLS", { phase: "connect" }));
+        // After a completed login the scheme matched; KILL CONNECTION, the
+        // idle timeout or a shutdown closes the connection instead.
+        const hint = this.info === null ? " and that chunk:// uses plaintext and chunks:// uses TLS" : "";
+        this.clearConnectionState(new ChunkConnectionError(`connection closed; check the server log${hint}`, { phase: "connect" }));
       }
     });
 
