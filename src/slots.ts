@@ -10,6 +10,10 @@ export function slotName(name: string): string {
   return `'${name}'`;
 }
 
+export function slotOwner(owner: string | undefined): string {
+  return owner === undefined ? "" : ` OWNER ${checkName(owner, "a user name")}`;
+}
+
 export function parseSlots(reply: ChunkReply): ChunkSlot[] {
   const command = "SHOW SLOTS";
   const malformed = (message: string): never => {
@@ -62,6 +66,12 @@ export function parseSlots(reply: ChunkReply): ChunkSlot[] {
       if ((columns === null) !== (columnIds === null) || columns?.length !== columnIds?.length) return malformed("column names and ids do not align");
       const bool = (key: string) => { const value = required(key); if (value.type !== "boolean") return malformed(`${key} is not boolean`); return value.value; };
       slot.filters = { area, columns, columnIds, noBefore: bool("no_before"), chunks: bool("chunks") };
+    }
+    if (fields.has("owner")) {
+      const value = field("owner");
+      const owner = value.type === "null" ? null : textOf(value, "owner", command);
+      if (owner !== null && !/^[a-z_][a-z0-9_]*$/.test(owner)) return malformed("invalid owner");
+      slot.owner = owner;
     }
     return slot;
   });

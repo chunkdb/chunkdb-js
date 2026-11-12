@@ -7,6 +7,7 @@ import path from "node:path";
 import { once } from "node:events";
 
 import { startScramLogin } from "../src/scram";
+import { testTlsFiles, type TestCertificateKind } from "./tls-cert";
 
 export interface StartedServer {
   process: ChildProcessWithoutNullStreams;
@@ -137,10 +138,6 @@ function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function tlsFixtureDir(): string {
-  return path.join(repoRoot(), "test/fixtures/tls");
-}
-
 async function waitForServer(host: string, port: number): Promise<void> {
   const deadline = Date.now() + 5000;
   while (Date.now() < deadline) {
@@ -166,19 +163,17 @@ function removeServerFiles(dataDir: string): void {
   fs.rmSync(`${dataDir}.admin-password`, { force: true });
 }
 
-function tlsFixtures(): { cert: string; key: string } {
-  const cert = path.join(tlsFixtureDir(), "cert.pem");
-  const key = path.join(tlsFixtureDir(), "key.pem");
-  assert.ok(fs.existsSync(cert), `TLS cert fixture not found: ${cert}`);
-  assert.ok(fs.existsSync(key), `TLS key fixture not found: ${key}`);
-  return { cert, key };
-}
-
 /**
  * Starts a server with an administrator (`admin`, whose password `uri`
  * carries), or with `--auth none`.
  */
-export async function startServer(options: { tls?: boolean; auth?: "users" | "none"; slotMaxBytes?: number; feedLingerMs?: number; backupDir?: string } = {}): Promise<StartedServer> {
+export async function startServer(options: {
+  tls?: boolean; auth?: "users" | "none"; slotMaxBytes?: number; feedLingerMs?: number; backupDir?: string;
+  /** The key and signature algorithm of the TLS certificate; RSA with SHA-256 by default. */
+  tlsCertificate?: TestCertificateKind;
+  /** `--auth-channel-binding`. */
+  authChannelBinding?: "allow" | "require";
+} = {}): Promise<StartedServer> {
   const host = "127.0.0.1";
   const port = await pickFreePort();
   const auth = options.auth ?? "users";
@@ -208,6 +203,7 @@ export async function startServer(options: { tls?: boolean; auth?: "users" | "no
   if (options.slotMaxBytes !== undefined) args.push("--slot-max-bytes", String(options.slotMaxBytes));
   if (options.feedLingerMs !== undefined) args.push("--feed-linger-ms", String(options.feedLingerMs));
   if (options.backupDir !== undefined) args.push("--backup-dir", options.backupDir);
+  if (options.authChannelBinding !== undefined) args.push("--auth-channel-binding", options.authChannelBinding);
 
   if (auth === "users") {
     // Outside the data directory, which must start empty.
@@ -219,7 +215,7 @@ export async function startServer(options: { tls?: boolean; auth?: "users" | "no
   }
 
   if (tlsEnabled) {
-    const { cert, key } = tlsFixtures();
+    const { cert, key } = testTlsFiles(options.tlsCertificate);
     args.push("--tls-cert", cert, "--tls-key", key);
   }
 

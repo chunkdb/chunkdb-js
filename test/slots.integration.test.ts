@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { setTimeout as wait } from "node:timers/promises";
-import { ChunkServerError, connectPool, connectUri, type ChunkChangeEvent, type ChunkWatch } from "../src/index";
+import { ChunkServerError, connect, connectPool, connectUri, type ChunkChangeEvent, type ChunkWatch } from "../src/index";
 import { startServer } from "./helpers";
 
 async function changed(watch: ChunkWatch): Promise<ChunkChangeEvent> {
@@ -72,3 +72,26 @@ for (const tls of [false, true]) {
     } finally { await client.close(); await server.stop(); }
   });
 }
+
+test("slots: OWNER is recorded, shown to its owner and MANAGES USERS, and checked by IF NOT EXISTS", { timeout: 15000 }, async () => {
+  const server = await startServer();
+  const admin = await connectUri(server.uri);
+  let reader: Awaited<ReturnType<typeof connect>> | undefined;
+  try {
+    await admin.createTable("world", { columns: [{ name: "n", type: "u16", required: true }], chunk: { width: 4, height: 4 } });
+    await admin.createSlot("world", "mine", { owner: "reader" });
+    await admin.createSlot("world", "theirs");
+    await admin.createUser("reader", "reader pass");
+    await admin.grant("READ", "world", "reader");
+    const owners = async (api: { listSlots(table?: string): Promise<Array<{ name: string; owner?: string | null }>> }) =>
+      Object.fromEntries((await api.listSlots("world")).map((slot) => [slot.name, slot.owner]));
+    assert.deepEqual(await owners(admin), { mine: "reader", theirs: server.user });
+    reader = await connect({ host: server.host, port: server.port, user: "reader", password: "reader pass" });
+    assert.deepEqual(await owners(reader), { mine: "reader", theirs: null });
+    await assert.rejects(admin.createSlot("world", "mine", { ifNotExists: true, owner: server.user }),
+      (error: unknown) => error instanceof ChunkServerError && error.serverCode === "INVALID_ARGUMENT" && error.reason === "slot_filters");
+    await admin.createSlot("world", "mine", { ifNotExists: true, owner: "reader" });
+    await admin.createSlot("world", "mine", { ifNotExists: true });
+    assert.deepEqual(await owners(admin), { mine: "reader", theirs: server.user });
+  } finally { await reader?.close(); await admin.close(); await server.stop(); }
+});

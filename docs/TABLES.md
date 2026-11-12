@@ -1,7 +1,7 @@
 # Tables
 
 A table defines the columns and chunk dimensions for its blocks.
-A block is one grid cell; a chunk groups a fixed rectangle of blocks.
+A block is one grid cell; a chunk groups a fixed box of blocks.
 A fresh server starts with no tables.
 Create a table before reading or writing its blocks.
 
@@ -35,6 +35,9 @@ await client.dropTable("land");
 ```
 
 Columns support `nullable`, `required` and typed `default` values.
+`chunk.depth` and `large.depth` select a three-axis geometry; both geometry domains must have matching arity.
+`chunkColumns` declares a separate typed metadata row per chunk, with independent stable column IDs and names.
+Use the `addChunkColumn`, `dropChunkColumn` and `renameChunkColumn` alteration kinds for that domain.
 A type change without `using` refuses narrowing that loses existing values.
 Use `clamp`, `default` or `truncate` where the server permits them.
 See [server tables reference](https://github.com/chunkdb/chunkdb/blob/main/docs/reference/TABLES.md) for conversions and schema constraints.
@@ -46,7 +49,7 @@ See [server tables reference](https://github.com/chunkdb/chunkdb/blob/main/docs/
 | `checkpointWalBytes` | WAL byte threshold |
 | `walGroupCommitUpdates` | group size |
 | `checkpointCompression` | `"none"`, `"zrle"` |
-| `varMaxChunkBytes` | variable-value byte budget per chunk |
+| `varMaxChunkBytes` | combined encoded block and chunk-metadata variable-value byte budget per chunk |
 | `feedBufferBytes` | positive byte budget for the table's in-memory feed; server default 64 MiB |
 | `slotMaxBytes` | positive retained byte budget for the table's durable slots; server default 1 GiB |
 

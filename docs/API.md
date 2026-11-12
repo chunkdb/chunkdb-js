@@ -4,7 +4,7 @@ The package exports `ChunkClient`, `connect`, `connectUri`, `ChunkPool`, `connec
 All methods return promises unless stated otherwise.
 Start with the [first write and read](../README.md#first-write-and-read) example.
 
-A block is one grid cell; a chunk groups a fixed rectangle of blocks.
+A block is one grid cell; a chunk groups a fixed box of blocks.
 A chunk version identifies committed state and orders writes within the same table epoch.
 
 | Client method | Result / purpose |
@@ -15,6 +15,8 @@ A chunk version identifies committed state and orders writes within the same tab
 | `deleteBlock(x, y, { table?, ifVersion? }?)` | written chunk version |
 | `getChunk(cx, cy, readOptions?)` | `ChunkState` or `null` |
 | `setChunk(cx, cy, state, writeOptions?)` | written chunk version |
+| `setChunkColumns(cx, cy, columns, state, writeOptions?)` | replace selected block columns, preserve metadata |
+| `setChunkMetadata(cx, cy, values, writeOptions?)` | update named chunk metadata |
 | `getChunkRaw(cx, cy, readOptions?)` | `Buffer` or `null` |
 | `setChunkRaw(cx, cy, form, writeOptions?)` | written chunk version |
 | `getArea(area, readOptions?)` | `ChunkAreaEntry[]` |
@@ -22,12 +24,14 @@ A chunk version identifies committed state and orders writes within the same tab
 | `getAreaWithSchema(area, readOptions?)`, `getAreaRawWithSchema(area, readOptions?)` | `{ schemaVersion: bigint, entries }` |
 | `scanChunks({ table?, after?, limit? }?)` | `ChunkScanPage`: `{ chunks, more }` |
 | `scanAllChunks({ table?, limit? }?)` | async generator of `{ cx, cy }` |
+| `scanChunksWithOptions(scanOptions?)` | retained versions, optional data and snapshot frontier |
+| `scanChunks3D(scanOptions?)`, `scanAllChunks3D(scanOptions?)` | three-axis page / populated-coordinate iterator |
 | `createTable(name, definition)` | create schema/geometry/options |
 | `alterTable(name, change)`, `dropTable(name)` | change schema/options or drop table |
 | `listTables()`, `describe(table?)` | visible names / `ChunkTableSchema` |
 | `clearSchemaCache(table?)` | synchronous cache invalidation |
-| `createUser(name, password, { managesUsers? }?)` | create user |
-| `setPassword(name, password)`, `setManagesUsers(name, value)` | change user |
+| `createUser(name, password, { managesUsers?, requiresChannelBinding? }?)` | create user |
+| `setPassword(name, password)`, `setManagesUsers(name, value)`, `setRequiresChannelBinding(name, value)` | change user |
 | `dropUser(name)`, `grant(right, table, user)`, `revoke(right, table, user)` | manage users/rights |
 | `listUsers()` | `ChunkUser[]` |
 | `transaction(fn, { retries? }?)` | commit version or null |
@@ -43,9 +47,9 @@ A chunk version identifies committed state and orders writes within the same tab
 | `serverInfo()`, `defaultTable()`, `uri()` | synchronous connection information |
 
 `readOptions` is `{ table?, columns? }`.
-`writeOptions` is `{ table?, ifVersion?: bigint }`.
-`watchOptions` accepts `slot`, `area`, `after`, `columns`, `noBefore`, `chunks`, `ackTimeoutMs` and `takeover`.
-`slotOptions` accepts `area`, `columns`, `noBefore`, `chunks` and `ifNotExists`.
+`writeOptions` is `{ table?, ifVersion?: bigint, ifAbsent?: boolean }`; the two conditions are mutually exclusive and `ifAbsent` applies only to chunk writes.
+`watchOptions` accepts `slot`, `area`, `area3D`, `after`, `columns`, `noBefore`, `chunks`, `ackTimeoutMs` and `takeover`.
+`slotOptions` accepts `area`, `area3D`, `columns`, `noBefore`, `chunks`, `ifNotExists` and `owner`.
 
 See [slots](SLOTS.md) for persisted filter identity.
 
@@ -56,7 +60,11 @@ The transaction and pool expose these metadata methods too.
 `ChunkRow` maps column names to `ChunkValue`.
 See [values](VALUES.md) for encoding and chunk state.
 `ChunkArea` is `{ cx0, cy0, cx1, cy1 }` or `{ cx, cy, radius }`.
-`ChunkTableDefinition` is `{ columns, chunk, large?, options? }`.
+`ChunkTableDefinition` is `{ columns, chunkColumns?, chunk, large?, options? }`.
+Geometry supports an optional `depth` axis.
+Explicit three-axis block, chunk and area methods use the `3D` suffix and accept safe numbers or int64 bigint axes.
+Read metadata methods use `getBlock3DWithMetadata`, `getArea3DWithSchema` and `getAreaRaw3DWithSchema`.
+See [values](VALUES.md#three-dimensions) for dimensional methods and scan metadata.
 
 
 [Tables](TABLES.md) lists changes and options.

@@ -67,3 +67,33 @@ test("slot management preserves server errors", async () => {
     }
   } finally { await client.close(); await server.close(); }
 });
+
+test("createSlot renders OWNER after the filters and checks the user name", async () => {
+  const server = await startFakeServer(({ line }) => line === "HELLO 3" ? FAKE_HELLO : "+OK\r\n");
+  const client = new ChunkClient({ port: server.port });
+  const pool = new ChunkPool({ port: server.port, maxConnections: 1 });
+  try {
+    await client.createSlot("t", "consumer", { owner: "reader" });
+    await pool.createSlot("t", "consumer", { ifNotExists: true, noBefore: true, owner: "_reader_2" });
+    for (const owner of ["", "Reader", "reader x", "reader\r\nPING", "a-b"]) {
+      await assert.rejects(client.createSlot("t", "consumer", { owner }), ChunkProtocolError);
+    }
+    assert.deepEqual(server.requests.map(({ line }) => line).filter((line) => line.startsWith("CREATE SLOT")), [
+      "CREATE SLOT 'consumer' ON t OWNER reader",
+      "CREATE SLOT IF NOT EXISTS 'consumer' ON t NO BEFORE OWNER _reader_2",
+    ]);
+  } finally { await client.close(); await pool.close(); await server.close(); }
+});
+
+test("SHOW SLOTS parses a shown, hidden or absent owner and rejects a malformed one", async () => {
+  const replies = [slot({ owner: bulk("reader") }), slot({ owner: "_\r\n" }), slot(), slot({ owner: bulk("Bad name") }), slot({ owner: ":1\r\n" })];
+  const server = await startFakeServer(({ line }) => line === "HELLO 3" ? FAKE_HELLO : replies.shift()!);
+  const client = new ChunkClient({ port: server.port });
+  try {
+    assert.equal((await client.listSlots())[0].owner, "reader");
+    assert.equal((await client.listSlots())[0].owner, null);
+    assert.equal("owner" in (await client.listSlots())[0], false);
+    await assert.rejects(client.listSlots(), ChunkProtocolError);
+    await assert.rejects(client.listSlots(), ChunkProtocolError);
+  } finally { await client.close(); await server.close(); }
+});

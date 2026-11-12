@@ -29,11 +29,15 @@ import {
   ChunkVersionMismatchError,
   type ChunkError,
 } from "./errors";
+import { tlsChannelBinding, type ScramChannelBinding } from "./channel-binding";
 import { chunkFormLimit, decodeChunkForm, encodeChunkForm } from "./chunk-form";
 import { connectionId, controlAcknowledgment, parseConnections } from "./connection-controls";
+import { decodeSectionedChunk, encodeSectionedChunk } from "./sectioned-chunk";
+import { parseSectionedForm } from "./chunk-sections";
+import { decodeChunkScanPage } from "./chunk-scan";
 import { encodeStatement, ReplyReader, type ChunkParameter, type ChunkReply, type ErrorReply, type PushReply } from "./protocol";
 import { filterClause, ChunkWatch, kWatchAck, kWatchPause, kWatchStream } from "./watch";
-import { parseSlots, slotName } from "./slots";
+import { parseSlots, slotName, slotOwner } from "./slots";
 import {
   MIN_SCRAM_ITERATIONS,
   finishScramLogin,
@@ -47,12 +51,24 @@ import { integerOf, mapOf, parseDescribe, parseServerInfo, parseStatus, uint64Of
 import { formatChunkUri, parseChunkUri, tableFromUriPath } from "./uri";
 import type {
   ChunkConnectionInfo,
+  ChunkAxis,
+  ChunkArea3D,
+  ChunkAreaEntry3D,
+  ChunkAreaRawEntry3D,
+  ChunkCoord3D,
+  ChunkScanDataOptions,
+  ChunkScanOptions3D,
+  ChunkScanEntry,
+  ChunkScanEntry3D,
+  ChunkScanDataPage,
+  ChunkScanPage3D,
   ChunkBlockMetadata,
   ChunkAreaMetadata,
   ChunkStatus,
   ChunkArea,
   ChunkAreaEntry,
   ChunkAreaRawEntry,
+  ChunkChannelBinding,
   ChunkClientOptions,
   ChunkColumnDefinition,
   ChunkColumnType,
@@ -86,6 +102,7 @@ import type {
 import {
   StaleSchemaError,
   checkCoordinate,
+  checkInt64Coordinate as axis3D,
   checkName,
   checkVersion,
   encodeParameter,
@@ -112,6 +129,7 @@ interface ResolvedOptions {
   ca?: string | Buffer;
   cert?: string | Buffer;
   key?: string | Buffer;
+  channelBinding: ChunkChannelBinding;
   uri: ParsedChunkUri;
   pipelineDepth: number;
   table: string;
@@ -173,6 +191,7 @@ const DEFAULT_TRANSACTION_RETRIES = 5;
 
 const TABLE_STATEMENT = /^\s*(?:migrate\s+'[a-z_][a-z0-9_]{0,62}'\s+)?(?:create|alter|drop)\s+table\s+([a-z_][a-z0-9_]*)/i;
 const RIGHTS: readonly ChunkRight[] = ["READ", "WRITE", "ADMIN"];
+const CHANNEL_BINDINGS: readonly ChunkChannelBinding[] = ["auto", "off", "require"];
 // The statements of the login, sent while connecting.
 const HANDSHAKE = new Set(["HELLO", "AUTH"]);
 const PUSH_KINDS = new Set(["schema", "change", "progress", "resync", "chunks", "catalog"]);
@@ -196,6 +215,15 @@ function closesConnection(reply: ErrorReply, _withParameters: boolean): boolean 
 /** The table a `CREATE` / `ALTER` / `DROP TABLE` statement names, or null. */
 export function tableOfStatement(statement: string): string | null {
   return TABLE_STATEMENT.exec(statement)?.[1] ?? null;
+}
+
+/** `text` without leading and trailing spaces and tabs; other whitespace stays. Linear in the length. */
+export function trimSpacesAndTabs(text: string): string {
+  let start = 0;
+  let end = text.length;
+  while (start < end && (text[start] === " " || text[start] === "\t")) start++;
+  while (end > start && (text[end - 1] === " " || text[end - 1] === "\t")) end--;
+  return text.slice(start, end);
 }
 
 // The verb of a statement, for errors: "SET BLOCK", "PING", ...
@@ -230,6 +258,17 @@ function resolveOptions(options: ChunkClientOptions = {}): ResolvedOptions {
   if (!Number.isSafeInteger(verifierIterations) || verifierIterations < MIN_SCRAM_ITERATIONS) {
     throw new TypeError(`verifierIterations must be an integer of at least ${MIN_SCRAM_ITERATIONS}`);
   }
+  const channelBinding = options.channelBinding ?? "auto";
+  if (!CHANNEL_BINDINGS.includes(channelBinding)) {
+    throw new TypeError(`channelBinding must be "auto", "off" or "require", got ${JSON.stringify(channelBinding)}`);
+  }
+  // Refused before connecting: nothing that depends on the password is sent.
+  if (channelBinding === "require" && !secure) {
+    throw new ChunkConnectionError('channelBinding "require" needs TLS; use chunks:// or tls: true', { phase: "connect" });
+  }
+  if (channelBinding === "require" && user === "") {
+    throw new ChunkConnectionError('channelBinding "require" needs a user: only a login with a user can be bound', { phase: "connect" });
+  }
   const named =
     options.table !== undefined && options.table !== "" ? options.table : tableFromUriPath(parsed?.path ?? "/");
   const helloOptions: Record<string, ChunkValue> = Object.create(null);
@@ -257,6 +296,7 @@ function resolveOptions(options: ChunkClientOptions = {}): ResolvedOptions {
     ca: options.ca,
     cert: options.cert,
     key: options.key,
+    channelBinding,
     pipelineDepth: Math.max(1, options.pipelineDepth ?? 1),
     table: named ?? DEFAULT_TABLE,
     helloOptions,
@@ -325,8 +365,10 @@ function userOf(reply: ChunkReply, command: string): ChunkUser {
   const entries = mapOf(reply, command);
   const name = entries.get("name");
   const managesUsers = entries.get("manages_users");
+  // A server without channel binding has no such key: none of its users requires it.
+  const requiresChannelBinding = entries.get("requires_channel_binding") ?? { type: "boolean", value: false };
   const grantsReply = entries.get("grants");
-  if (name === undefined || managesUsers?.type !== "boolean" || grantsReply === undefined) {
+  if (name === undefined || managesUsers?.type !== "boolean" || requiresChannelBinding.type !== "boolean" || grantsReply === undefined) {
     throw new ChunkProtocolError(`malformed ${command} reply`, { phase: "protocol", command });
   }
   // fromEntries defines every table as its own key, `__proto__` included.
@@ -340,11 +382,33 @@ function userOf(reply: ChunkReply, command: string): ChunkUser {
       return [table, known];
     }),
   );
-  return { name: textOf(name, "a user name", command), managesUsers: managesUsers.value, grants };
+  return {
+    name: textOf(name, "a user name", command),
+    managesUsers: managesUsers.value,
+    requiresChannelBinding: requiresChannelBinding.value,
+    grants,
+  };
 }
 
-function ifVersionClause(ifVersion: bigint | undefined): string {
-  return ifVersion === undefined ? "" : ` IF VERSION ${checkVersion(ifVersion)}`;
+function writeClause(options: ChunkWriteOptions, command: string, chunk = false): string {
+  if (options.ifAbsent !== undefined && typeof options.ifAbsent !== "boolean") throw requestError("ifAbsent must be a boolean", command);
+  if (options.ifAbsent === true) {
+    if (!chunk || options.ifVersion !== undefined) throw requestError("ifAbsent needs a chunk write without ifVersion", command);
+    return " IF ABSENT";
+  }
+  return options.ifVersion === undefined ? "" : ` IF VERSION ${checkVersion(options.ifVersion)}`;
+}
+
+type GridPoint = readonly [number, number] | readonly [ChunkAxis, ChunkAxis, ChunkAxis];
+
+function pointClause(point: GridPoint): string {
+  return point.length === 2 ? `${checkCoordinate(point[0], "x")} ${checkCoordinate(point[1], "y")}` :
+    point.map((value, i) => axis3D(value, ["x", "y", "z"][i]).toString()).join(" ");
+}
+
+function axisReply(reply: ChunkReply, name: string, command: string): bigint {
+  if (reply.type !== "integer" || reply.value < -(1n << 63n) || reply.value > (1n << 63n) - 1n) throw new ChunkProtocolError(`invalid ${name} coordinate`, { phase: "protocol", command });
+  return reply.value;
 }
 
 function isTransportError(error: unknown): error is ChunkError {
@@ -390,6 +454,7 @@ function noIfVersion(options: ChunkWriteOptions | undefined, command: string): v
   if (options?.ifVersion !== undefined) {
     throw requestError("ifVersion is not taken inside a transaction: COMMIT checks every chunk the transaction read or wrote", command);
   }
+  if (options?.ifAbsent === true) throw requestError("ifAbsent is not taken inside a transaction: COMMIT checks every chunk the transaction read or wrote", command);
 }
 
 function typeText(type: string | ChunkColumnType): string {
@@ -439,6 +504,15 @@ function areaClause(area: ChunkArea): string {
     `${checkCoordinate(area.cx0, "cx0")} ${checkCoordinate(area.cy0, "cy0")} TO ` +
     `${checkCoordinate(area.cx1, "cx1")} ${checkCoordinate(area.cy1, "cy1")}`
   );
+}
+
+function areaClause3D(area: ChunkArea3D): string {
+  if ("radius" in area) {
+    const radius = axis3D(area.radius, "radius");
+    if (radius < 0n) throw requestError("radius must be non-negative", "GET AREA");
+    return `AROUND ${pointClause([area.cx, area.cy, area.cz])} RADIUS ${radius}`;
+  }
+  return `${pointClause([area.cx0, area.cy0, area.cz0])} TO ${pointClause([area.cx1, area.cy1, area.cz1])}`;
 }
 
 function columnsClause(names: readonly string[]): string {
@@ -591,7 +665,7 @@ export class ChunkClient {
         if (typeof migration.statement !== "string" || /[\r\n\0]/.test(migration.statement)) {
           throw requestError("a migration statement must be one line without CR, LF or NUL", "MIGRATE");
         }
-        const statement = migration.statement.replace(/^[ \t]+|[ \t]+$/g, "");
+        const statement = trimSpacesAndTabs(migration.statement);
         if (statement === "") throw requestError("a migration needs one statement", "MIGRATE");
         if (/\$[0-9]+/.test(statement.replace(/'(?:[^']|'')*'/g, ""))) {
           throw requestError("a migration statement cannot take parameters", "MIGRATE");
@@ -707,7 +781,7 @@ export class ChunkClient {
   /** Creates a durable slot; requires ADMIN on the table. */
   createSlot(table: string, name: string, options: ChunkSlotOptions = {}): Promise<void> {
     return this.enqueue(async () => {
-      const statement = `CREATE SLOT ${options.ifNotExists ? "IF NOT EXISTS " : ""}${slotName(name)} ON ${checkName(table, "a table name")}${filterClause(options)}`;
+      const statement = `CREATE SLOT ${options.ifNotExists ? "IF NOT EXISTS " : ""}${slotName(name)} ON ${checkName(table, "a table name")}${filterClause(options)}${slotOwner(options.owner)}`;
       expectOk(await this.run(statement, [], "CREATE SLOT"), "CREATE SLOT");
     });
   }
@@ -735,19 +809,28 @@ export class ChunkClient {
       if (definition.columns.length === 0) {
         throw requestError("a table needs at least one column", "CREATE TABLE");
       }
-      const size = (what: string, value: { width: number; height: number }) => {
-        for (const n of [value.width, value.height]) {
-          if (!Number.isSafeInteger(n) || n < 1) {
+      const dims = definition.chunk.depth === undefined ? 2 : 3;
+      const size = (what: string, value: { width: number; height: number; depth?: number }) => {
+        if ((value.depth === undefined ? 2 : 3) !== dims) throw requestError(`${what} needs ${dims} dimensions`, "CREATE TABLE");
+        const sides = [value.width, value.height, ...(dims === 3 ? [value.depth!] : [])];
+        for (const n of sides) {
+          if (!Number.isSafeInteger(n) || n < 1 || n > (what === "chunk" ? 4096 : 1_000_000)) {
             throw requestError(`${what} sizes are positive integers`, "CREATE TABLE");
           }
         }
-        return `${value.width} x ${value.height}`;
+        return sides.join(" x ");
       };
+      if (definition.chunk.width * definition.chunk.height * (definition.chunk.depth ?? 1) > 1_048_576) {
+        throw requestError("a chunk has at most 1048576 blocks", "CREATE TABLE");
+      }
       let statement =
         `CREATE TABLE ${name} (${definition.columns.map(columnDefinition).join(", ")})` +
         ` CHUNK ${size("chunk", definition.chunk)}`;
       if (definition.large !== undefined) {
         statement += ` LARGE ${size("large chunk", definition.large)}`;
+      }
+      if (definition.chunkColumns !== undefined && definition.chunkColumns.length !== 0) {
+        statement += ` CHUNK COLUMNS (${definition.chunkColumns.map(columnDefinition).join(", ")})`;
       }
       const options = Object.entries(definition.options ?? {}).filter(([, value]) => value !== undefined);
       if (options.length > 0) {
@@ -773,6 +856,15 @@ export class ChunkClient {
           break;
         case "renameColumn":
           clause = `RENAME COLUMN ${checkName(change.column, "a column name")} TO ${checkName(change.to, "a column name")}`;
+          break;
+        case "addChunkColumn":
+          clause = `ADD CHUNK COLUMN ${change.ifNotExists === true ? "IF NOT EXISTS " : ""}${columnDefinition(change.column)}`;
+          break;
+        case "dropChunkColumn":
+          clause = `DROP CHUNK COLUMN ${change.ifExists === true ? "IF EXISTS " : ""}${checkName(change.column, "a column name")}`;
+          break;
+        case "renameChunkColumn":
+          clause = `RENAME CHUNK COLUMN ${checkName(change.column, "a column name")} TO ${checkName(change.to, "a column name")}`;
           break;
         case "alterColumnType":
           clause = `ALTER COLUMN ${checkName(change.column, "a column name")} TYPE ${typeText(change.type)}`;
@@ -803,12 +895,12 @@ export class ChunkClient {
 
   /** A block's values by column name, or null when the block is absent. */
   getBlock(x: number, y: number, options: ChunkReadOptions = {}): Promise<ChunkRow | null> {
-    return this.enqueue(() => this.getBlockOp(x, y, options));
+    return this.enqueue(() => this.getBlockOp([x, y], options));
   }
 
   /** Row, chunk version and schema version from one read boundary. */
   getBlockWithMetadata(x: number, y: number, options: ChunkReadOptions = {}): Promise<ChunkBlockMetadata> {
-    return this.enqueue(() => this.getBlockWithMetadataOp(x, y, options));
+    return this.enqueue(() => this.getBlockWithMetadataOp([x, y], options));
   }
 
   /**
@@ -816,12 +908,12 @@ export class ChunkClient {
    * Values travel as parameters. Resolves the chunk version after the write.
    */
   setBlock(x: number, y: number, values: Readonly<Record<string, ChunkValue>>, options: ChunkWriteOptions = {}): Promise<bigint> {
-    return this.enqueue(async () => versionOf(await this.setBlockOp(x, y, values, options), "SET BLOCK"));
+    return this.enqueue(async () => versionOf(await this.setBlockOp([x, y], values, options), "SET BLOCK"));
   }
 
   /** Deletes a block. Resolves the chunk version after it. */
   deleteBlock(x: number, y: number, options: ChunkWriteOptions = {}): Promise<bigint> {
-    return this.enqueue(async () => versionOf(await this.deleteBlockOp(x, y, options), "DELETE BLOCK"));
+    return this.enqueue(async () => versionOf(await this.deleteBlockOp([x, y], options), "DELETE BLOCK"));
   }
 
   /**
@@ -830,12 +922,12 @@ export class ChunkClient {
    * chunk is null; a written empty chunk keeps its form and version until collected.
    */
   getChunk(cx: number, cy: number, options: ChunkReadOptions = {}): Promise<ChunkState | null> {
-    return this.enqueue(() => this.getChunkOp(cx, cy, options));
+    return this.enqueue(() => this.getChunkOp([cx, cy], options));
   }
 
   /** The chunk form as the server sends it, or null for a never-written chunk. */
   getChunkRaw(cx: number, cy: number, options: ChunkReadOptions = {}): Promise<Buffer | null> {
-    return this.enqueue(() => this.getChunkRawOp(cx, cy, options));
+    return this.enqueue(() => this.getChunkRawOp([cx, cy], options));
   }
 
   /**
@@ -845,7 +937,7 @@ export class ChunkClient {
    * the write.
    */
   setChunk(cx: number, cy: number, state: ChunkStateInput, options: ChunkWriteOptions = {}): Promise<bigint> {
-    return this.enqueue(async () => versionOf(await this.setChunkOp(cx, cy, state, options), "SET CHUNK"));
+    return this.enqueue(async () => versionOf(await this.setChunkOp([cx, cy], state, options), "SET CHUNK"));
   }
 
   /**
@@ -854,7 +946,74 @@ export class ChunkClient {
    * version than the table's rejects with `ChunkSchemaMismatchError`.
    */
   setChunkRaw(cx: number, cy: number, form: Uint8Array, options: ChunkWriteOptions = {}): Promise<bigint> {
-    return this.enqueue(async () => versionOf(await this.setChunkRawOp(cx, cy, form, options), "SET CHUNK"));
+    return this.enqueue(async () => versionOf(await this.setChunkRawOp([cx, cy], form, options), "SET CHUNK"));
+  }
+
+  /** Read a block at explicit three-axis coordinates without rounding int64 values. */
+  getBlock3D(x: ChunkAxis, y: ChunkAxis, z: ChunkAxis, options: ChunkReadOptions = {}): Promise<ChunkRow | null> {
+    return this.enqueue(() => this.getBlockOp([x, y, z], options));
+  }
+
+  getBlock3DWithMetadata(x: ChunkAxis, y: ChunkAxis, z: ChunkAxis, options: ChunkReadOptions = {}): Promise<ChunkBlockMetadata> {
+    return this.enqueue(() => this.getBlockWithMetadataOp([x, y, z], options));
+  }
+
+  setBlock3D(x: ChunkAxis, y: ChunkAxis, z: ChunkAxis, values: Readonly<Record<string, ChunkValue>>, options: ChunkWriteOptions = {}): Promise<bigint> {
+    return this.enqueue(async () => versionOf(await this.setBlockOp([x, y, z], values, options), "SET BLOCK"));
+  }
+
+  deleteBlock3D(x: ChunkAxis, y: ChunkAxis, z: ChunkAxis, options: ChunkWriteOptions = {}): Promise<bigint> {
+    return this.enqueue(async () => versionOf(await this.deleteBlockOp([x, y, z], options), "DELETE BLOCK"));
+  }
+
+  getChunk3D(cx: ChunkAxis, cy: ChunkAxis, cz: ChunkAxis, options: ChunkReadOptions = {}): Promise<ChunkState | null> {
+    return this.enqueue(() => this.getChunkOp([cx, cy, cz], options));
+  }
+
+  getChunkRaw3D(cx: ChunkAxis, cy: ChunkAxis, cz: ChunkAxis, options: ChunkReadOptions = {}): Promise<Buffer | null> {
+    return this.enqueue(() => this.getChunkRawOp([cx, cy, cz], options));
+  }
+
+  setChunk3D(cx: ChunkAxis, cy: ChunkAxis, cz: ChunkAxis, state: ChunkStateInput, options: ChunkWriteOptions = {}): Promise<bigint> {
+    return this.enqueue(async () => versionOf(await this.setChunkOp([cx, cy, cz], state, options), "SET CHUNK"));
+  }
+
+  setChunkRaw3D(cx: ChunkAxis, cy: ChunkAxis, cz: ChunkAxis, form: Uint8Array, options: ChunkWriteOptions = {}): Promise<bigint> {
+    return this.enqueue(async () => versionOf(await this.setChunkRawOp([cx, cy, cz], form, options), "SET CHUNK"));
+  }
+
+  /** Replace selected block columns and presence while preserving chunk metadata. */
+  setChunkColumns(cx: number, cy: number, columns: readonly string[], state: ChunkStateInput, options: ChunkWriteOptions = {}): Promise<bigint> {
+    return this.enqueue(async () => versionOf(await this.setChunkColumnsOp([cx, cy], columns, state, options), "SET CHUNK"));
+  }
+
+  setChunkColumns3D(cx: ChunkAxis, cy: ChunkAxis, cz: ChunkAxis, columns: readonly string[], state: ChunkStateInput, options: ChunkWriteOptions = {}): Promise<bigint> {
+    return this.enqueue(async () => versionOf(await this.setChunkColumnsOp([cx, cy, cz], columns, state, options), "SET CHUNK"));
+  }
+
+  /** Update named chunk columns without changing block values. */
+  setChunkMetadata(cx: number, cy: number, values: Readonly<ChunkRow>, options: ChunkWriteOptions = {}): Promise<bigint> {
+    return this.enqueue(async () => versionOf(await this.setChunkMetadataOp([cx, cy], values, options), "SET CHUNK"));
+  }
+
+  setChunkMetadata3D(cx: ChunkAxis, cy: ChunkAxis, cz: ChunkAxis, values: Readonly<ChunkRow>, options: ChunkWriteOptions = {}): Promise<bigint> {
+    return this.enqueue(async () => versionOf(await this.setChunkMetadataOp([cx, cy, cz], values, options), "SET CHUNK"));
+  }
+
+  getArea3D(area: ChunkArea3D, options: ChunkReadOptions = {}): Promise<ChunkAreaEntry3D[]> {
+    return this.enqueue(async () => (await this.getArea3DOp(area, options, false, false)).entries);
+  }
+
+  getAreaRaw3D(area: ChunkArea3D, options: ChunkReadOptions = {}): Promise<ChunkAreaRawEntry3D[]> {
+    return this.enqueue(async () => (await this.getArea3DOp(area, options, true, false)).entries);
+  }
+
+  getArea3DWithSchema(area: ChunkArea3D, options: ChunkReadOptions = {}): Promise<ChunkAreaMetadata<ChunkAreaEntry3D>> {
+    return this.enqueue(() => this.getArea3DOp(area, options, false, true));
+  }
+
+  getAreaRaw3DWithSchema(area: ChunkArea3D, options: ChunkReadOptions = {}): Promise<ChunkAreaMetadata<ChunkAreaRawEntry3D>> {
+    return this.enqueue(() => this.getArea3DOp(area, options, true, true));
   }
 
   /**
@@ -965,16 +1124,64 @@ export class ChunkClient {
     });
   }
 
+  /** Scan retained two-dimensional versions and optional complete forms. */
+  scanChunksWithOptions(options: ChunkScanDataOptions = {}): Promise<ChunkScanDataPage> {
+    return this.enqueue(async () => {
+      const after = options.after === undefined ? undefined : [BigInt(checkCoordinate(options.after.cx, "after.cx")), BigInt(checkCoordinate(options.after.cy, "after.cy"))];
+      const page = await this.scanChunksDataOp(options, 2, after);
+      return { ...page, chunks: page.chunks.map(({ cx, cy, cz: _cz, ...chunk }): ChunkScanEntry => ({ ...chunk,
+        cx: integerOf({ type: "integer", value: cx }, "cx", "SCAN CHUNKS"), cy: integerOf({ type: "integer", value: cy }, "cy", "SCAN CHUNKS") })) };
+    });
+  }
+
+  /** Three-dimensional scans retain exact coordinates and tombstone versions. */
+  scanChunks3D(options: ChunkScanOptions3D = {}): Promise<ChunkScanPage3D> {
+    return this.enqueue(() => {
+      const after = options.after === undefined ? undefined : [axis3D(options.after.cx, "after.cx"), axis3D(options.after.cy, "after.cy"), axis3D(options.after.cz, "after.cz")];
+      return this.scanChunksDataOp(options, 3, after);
+    });
+  }
+
+  async *scanAllChunks3D(options: Omit<ChunkScanOptions3D, "after" | "since" | "withData" | "columns"> = {}): AsyncGenerator<ChunkCoord3D, void, undefined> {
+    let after: ChunkCoord3D | undefined;
+    let epoch = options.epoch;
+    while (true) {
+      const page = await this.scanChunks3D({ table: options.table, limit: options.limit, epoch, after });
+      epoch ??= page.epoch;
+      for (const { cx, cy, cz } of page.chunks) { after = { cx, cy, cz }; yield { cx, cy, cz }; }
+      if (!page.more) return;
+    }
+  }
+
+  private async scanChunksDataOp(options: Omit<ChunkScanDataOptions, "after">, dims: 2 | 3, after: readonly bigint[] | undefined): Promise<ChunkScanPage3D> {
+    const command = "SCAN CHUNKS", table = this.tableOf(options);
+    if (options.limit !== undefined && (!Number.isSafeInteger(options.limit) || options.limit < 1)) throw requestError("limit must be a positive integer", command);
+    if (options.since !== undefined && (typeof options.since !== "bigint" || options.since < 0n || options.since > (1n << 64n) - 1n)) throw requestError("since must be a uint64 bigint", command);
+    if (options.withData !== undefined && typeof options.withData !== "boolean") throw requestError("withData must be a boolean", command);
+    if (options.columns !== undefined && options.withData !== true) throw requestError("column projections need WITH DATA", command);
+    if (options.epoch !== undefined && (typeof options.epoch !== "string" || !/^[0-9a-f]{32}$/i.test(options.epoch))) throw requestError("epoch must be 32 hex digits", command);
+    const epoch = options.epoch?.toLowerCase();
+    return this.withLayout(table, false, async (layout) => {
+      if ((layout.schema.dims ?? 2) !== dims) throw requestError(`table ${table} needs ${layout.schema.dims ?? 2} coordinates`, command);
+      if (epoch !== undefined && layout.schema.epoch?.toLowerCase() !== epoch) throw requestError("scan position belongs to another table epoch", command);
+      const indexes = columnIndexes(layout, options.columns);
+      let statement = `SCAN CHUNKS FROM ${table}`;
+      if (after !== undefined) statement += ` AFTER ${after.join(" ")}`;
+      if (options.since !== undefined) statement += ` SINCE ${options.since}`;
+      if (options.limit !== undefined) statement += ` LIMIT ${options.limit}`;
+      if (options.withData) statement += ` WITH DATA${columnsClause(options.columns ?? [])}`;
+      const reply = await this.run(statement, [], command);
+      return decodeChunkScanPage(layout, reply, { dims, after, since: options.since, limit: options.limit, withData: options.withData === true, epoch, indexes });
+    });
+  }
+
   /** Every chunk that has a present block, page by page (`limit` per page). */
   async *scanAllChunks(options: Omit<ChunkScanOptions, "after"> = {}): AsyncGenerator<ChunkCoord, void, undefined> {
     let after: ChunkCoord | undefined;
     while (true) {
       const page = await this.scanChunks({ ...options, after });
-      yield* page.chunks;
-      if (!page.more || page.chunks.length === 0) {
-        return;
-      }
-      after = page.chunks[page.chunks.length - 1];
+      for (const { cx, cy } of page.chunks) { after = { cx, cy }; yield { cx, cy }; }
+      if (!page.more || page.chunks.length === 0) return;
     }
   }
 
@@ -1021,7 +1228,8 @@ export class ChunkClient {
       checkName(name, "a user name");
       const verifier = await this.verifier(password);
       const manages = options.managesUsers === true ? " MANAGES USERS" : "";
-      expectOk(await this.run(`CREATE USER ${name} VERIFIER $1${manages}`, [verifier], "CREATE USER"), "CREATE USER");
+      const binding = options.requiresChannelBinding === true ? " REQUIRE CHANNEL BINDING" : "";
+      expectOk(await this.run(`CREATE USER ${name} VERIFIER $1${manages}${binding}`, [verifier], "CREATE USER"), "CREATE USER");
     });
   }
 
@@ -1043,6 +1251,15 @@ export class ChunkClient {
     return this.enqueue(async () => {
       checkName(name, "a user name");
       const clause = managesUsers ? "MANAGES USERS" : "NO MANAGES USERS";
+      expectOk(await this.run(`ALTER USER ${name} ${clause}`, [], "ALTER USER"), "ALTER USER");
+    });
+  }
+
+  /** `ALTER USER ... [NO] REQUIRE CHANNEL BINDING`: whether the user logs in only with a login bound to its TLS connection. */
+  setRequiresChannelBinding(name: string, requiresChannelBinding: boolean): Promise<void> {
+    return this.enqueue(async () => {
+      checkName(name, "a user name");
+      const clause = requiresChannelBinding ? "REQUIRE CHANNEL BINDING" : "NO REQUIRE CHANNEL BINDING";
       expectOk(await this.run(`ALTER USER ${name} ${clause}`, [], "ALTER USER"), "ALTER USER");
     });
   }
@@ -1090,9 +1307,9 @@ export class ChunkClient {
   // client's calls and a transaction's. Writes resolve the reply: a version,
   // or null inside a transaction.
 
-  private async getBlockOp(x: number, y: number, options: ChunkReadOptions): Promise<ChunkRow | null> {
+  private async getBlockOp(point: GridPoint, options: ChunkReadOptions): Promise<ChunkRow | null> {
     const table = this.tableOf(options);
-    const at = `${checkCoordinate(x, "x")} ${checkCoordinate(y, "y")}`;
+    const at = pointClause(point);
     return await this.withLayout(table, false, async (layout) => {
       const indexes = columnIndexes(layout, options.columns);
       const names = indexes.map((index) => layout.schema.columns[index].name);
@@ -1113,12 +1330,12 @@ export class ChunkClient {
     });
   }
 
-  private async getBlockWithMetadataOp(x: number, y: number, options: ChunkReadOptions): Promise<ChunkBlockMetadata> {
+  private async getBlockWithMetadataOp(point: GridPoint, options: ChunkReadOptions): Promise<ChunkBlockMetadata> {
     const table = this.tableOf(options);
     return this.withLayout(table, false, async (layout) => {
       const indexes = columnIndexes(layout, options.columns);
       const names = indexes.map((index) => layout.schema.columns[index].name);
-      const statement = `GET BLOCK ${checkCoordinate(x, "x")} ${checkCoordinate(y, "y")} FROM ${table}${columnsClause(names)} WITH VERSION WITH SCHEMA`;
+      const statement = `GET BLOCK ${pointClause(point)} FROM ${table}${columnsClause(names)} WITH VERSION WITH SCHEMA`;
       const reply = await this.run(statement, [], "GET BLOCK");
       const items = itemsOf(reply, "GET BLOCK");
       if (items.length < 3) throw new ChunkProtocolError("GET BLOCK metadata is missing fields", { phase: "protocol", command: "GET BLOCK" });
@@ -1138,14 +1355,13 @@ export class ChunkClient {
   }
 
   private async setBlockOp(
-    x: number,
-    y: number,
+    point: GridPoint,
     values: Readonly<Record<string, ChunkValue>>,
     options: ChunkWriteOptions,
   ): Promise<ChunkReply> {
     const table = this.tableOf(options);
-    const at = `${checkCoordinate(x, "x")} ${checkCoordinate(y, "y")}`;
-    const condition = ifVersionClause(options.ifVersion);
+    const at = pointClause(point);
+    const condition = writeClause(options, "SET BLOCK");
     const names = Object.keys(values);
     if (names.length === 0) {
       throw requestError("setBlock needs at least one column", "SET BLOCK");
@@ -1158,17 +1374,16 @@ export class ChunkClient {
     });
   }
 
-  private async deleteBlockOp(x: number, y: number, options: ChunkWriteOptions): Promise<ChunkReply> {
+  private async deleteBlockOp(point: GridPoint, options: ChunkWriteOptions): Promise<ChunkReply> {
     const table = this.tableOf(options);
     const statement =
-      `DELETE BLOCK ${checkCoordinate(x, "x")} ${checkCoordinate(y, "y")} FROM ${table}` +
-      ifVersionClause(options.ifVersion);
+      `DELETE BLOCK ${pointClause(point)} FROM ${table}` + writeClause(options, "DELETE BLOCK");
     return await this.run(statement, [], "DELETE BLOCK");
   }
 
-  private async getChunkOp(cx: number, cy: number, options: ChunkReadOptions): Promise<ChunkState | null> {
+  private async getChunkOp(point: GridPoint, options: ChunkReadOptions): Promise<ChunkState | null> {
     const table = this.tableOf(options);
-    const at = `${checkCoordinate(cx, "cx")} ${checkCoordinate(cy, "cy")}`;
+    const at = pointClause(point);
     return await this.withLayout(table, false, async (layout) => {
       const indexes = columnIndexes(layout, options.columns);
       const names = indexes.map((index) => layout.schema.columns[index].name);
@@ -1177,30 +1392,29 @@ export class ChunkClient {
     });
   }
 
-  private async getChunkRawOp(cx: number, cy: number, options: ChunkReadOptions): Promise<Buffer | null> {
+  private async getChunkRawOp(point: GridPoint, options: ChunkReadOptions): Promise<Buffer | null> {
     const table = this.tableOf(options);
     const names = (options.columns ?? []).map((name) => checkName(name, "a column name"));
-    const statement = `GET CHUNK ${checkCoordinate(cx, "cx")} ${checkCoordinate(cy, "cy")} FROM ${table}${columnsClause(names)}`;
+    const statement = `GET CHUNK ${pointClause(point)} FROM ${table}${columnsClause(names)}`;
     const reply = await this.run(statement, [], "GET CHUNK");
     return reply.type === "null" ? null : bulkOf(reply, "GET CHUNK");
   }
 
-  private async setChunkOp(cx: number, cy: number, state: ChunkStateInput, options: ChunkWriteOptions): Promise<ChunkReply> {
+  private async setChunkOp(point: GridPoint, state: ChunkStateInput, options: ChunkWriteOptions): Promise<ChunkReply> {
     const table = this.tableOf(options);
     const statement =
-      `SET CHUNK ${checkCoordinate(cx, "cx")} ${checkCoordinate(cy, "cy")} IN ${table} $1` +
-      ifVersionClause(options.ifVersion);
+      `SET CHUNK ${pointClause(point)} IN ${table} $1` + writeClause(options, "SET CHUNK", true);
     return await this.withLayout(table, true, async (layout) => {
-      const form = encodeChunkForm(layout, state);
+      const writeLayout = { ...layout, schema: { ...layout.schema, options: { ...layout.schema.options, varMaxChunkBytes: 64 * 1024 * 1024 } } };
+      const form = encodeChunkForm(writeLayout, state);
       return await this.run(statement, [form], "SET CHUNK");
     }, true);
   }
 
-  private async setChunkRawOp(cx: number, cy: number, form: Uint8Array, options: ChunkWriteOptions): Promise<ChunkReply> {
+  private async setChunkRawOp(point: GridPoint, form: Uint8Array, options: ChunkWriteOptions): Promise<ChunkReply> {
     const table = this.tableOf(options);
     const statement =
-      `SET CHUNK ${checkCoordinate(cx, "cx")} ${checkCoordinate(cy, "cy")} IN ${table} $1` +
-      ifVersionClause(options.ifVersion);
+      `SET CHUNK ${pointClause(point)} IN ${table} $1` + writeClause(options, "SET CHUNK", true);
     if (!(form instanceof Uint8Array)) {
       throw requestError("setChunkRaw takes the chunk form as a Uint8Array", "SET CHUNK");
     }
@@ -1213,7 +1427,65 @@ export class ChunkClient {
           command: "SET CHUNK",
         });
       }
+      parseSectionedForm(form, limit, true);
       return await this.run(statement, [form], "SET CHUNK");
+    });
+  }
+
+  private async setChunkColumnsOp(point: GridPoint, columns: readonly string[], state: ChunkStateInput, options: ChunkWriteOptions): Promise<ChunkReply> {
+    const table = this.tableOf(options), at = pointClause(point), condition = writeClause(options, "SET CHUNK", true);
+    if (columns.length === 0) throw requestError("a block-column mutation needs columns", "SET CHUNK");
+    return this.withLayout(table, true, async (layout) => {
+      const indexes = columnIndexes(layout, columns);
+      const names = indexes.map((index) => layout.schema.columns[index].name);
+      const writeLayout = { ...layout, schema: { ...layout.schema, options: { ...layout.schema.options, varMaxChunkBytes: 64 * 1024 * 1024 } } };
+      const form = encodeSectionedChunk(writeLayout, state, indexes, {}, "preserve");
+      return this.run(`SET CHUNK ${at} IN ${table}${columnsClause(names)} $1${condition}`, [form], "SET CHUNK");
+    }, true);
+  }
+
+  private async setChunkMetadataOp(point: GridPoint, values: Readonly<ChunkRow>, options: ChunkWriteOptions): Promise<ChunkReply> {
+    const table = this.tableOf(options), at = pointClause(point), condition = writeClause(options, "SET CHUNK", true);
+    const names = Object.keys(values);
+    if (names.length === 0) throw requestError("META needs at least one chunk column", "SET CHUNK");
+    names.forEach((name) => checkName(name, "a chunk column name"));
+    return this.withLayout(table, true, async (layout) => {
+      const parameters = names.map((name) => {
+        const column = layout.schema.chunkColumns?.find((column) => column.name === name);
+        if (column === undefined) throw new StaleSchemaError(`table ${table} has no chunk column ${name}`, { phase: "request", command: "SET CHUNK" });
+        return encodeParameter(column, values[name]);
+      });
+      const assignments = names.map((name, i) => `${name} = $${i + 1}`).join(", ");
+      return this.run(`SET CHUNK ${at} IN ${table} META ${assignments}${condition}`, parameters, "SET CHUNK");
+    }, true);
+  }
+
+  private getArea3DOp(area: ChunkArea3D, options: ChunkReadOptions, raw: false, withSchema: false): Promise<{ entries: ChunkAreaEntry3D[] }>;
+  private getArea3DOp(area: ChunkArea3D, options: ChunkReadOptions, raw: true, withSchema: false): Promise<{ entries: ChunkAreaRawEntry3D[] }>;
+  private getArea3DOp(area: ChunkArea3D, options: ChunkReadOptions, raw: false, withSchema: true): Promise<ChunkAreaMetadata<ChunkAreaEntry3D>>;
+  private getArea3DOp(area: ChunkArea3D, options: ChunkReadOptions, raw: true, withSchema: true): Promise<ChunkAreaMetadata<ChunkAreaRawEntry3D>>;
+  private async getArea3DOp(area: ChunkArea3D, options: ChunkReadOptions, raw: boolean, withSchema: boolean): Promise<{ entries: Array<ChunkAreaEntry3D | ChunkAreaRawEntry3D>; schemaVersion?: bigint }> {
+    const table = this.tableOf(options), clause = areaClause3D(area);
+    return this.withLayout(table, false, async (layout) => {
+      if (layout.schema.dims !== 3) throw requestError(`table ${table} is not three-dimensional`, "GET AREA");
+      const indexes = columnIndexes(layout, options.columns), names = indexes.map((index) => layout.schema.columns[index].name);
+      let reply = await this.run(`GET AREA ${clause} FROM ${table}${columnsClause(names)}${withSchema ? " WITH SCHEMA" : ""}`, [], "GET AREA");
+      let schemaVersion: bigint | undefined;
+      if (withSchema) {
+        const fields = itemsOf(reply, "GET AREA");
+        if (fields.length < 2) throw new ChunkProtocolError("GET AREA metadata is missing fields", { phase: "protocol", command: "GET AREA" });
+        schemaVersion = uint64Of(fields[0], "schema version", "GET AREA");
+        this.checkReadSchema(layout, schemaVersion);
+        reply = fields[1];
+      }
+      const entries = itemsOf(reply, "GET AREA").map((item) => {
+        const fields = itemsOf(item, "GET AREA");
+        if (fields.length < 4) throw new ChunkProtocolError("GET AREA entry needs three coordinates and a form", { phase: "protocol", command: "GET AREA" });
+        const point = { cx: axisReply(fields[0], "cx", "GET AREA"), cy: axisReply(fields[1], "cy", "GET AREA"), cz: axisReply(fields[2], "cz", "GET AREA") };
+        const form = bulkOf(fields[3], "GET AREA");
+        return raw ? { ...point, chunk: form } : { ...point, chunk: decodeSectionedChunk(layout, form, indexes) };
+      });
+      return { entries, ...(schemaVersion === undefined ? {} : { schemaVersion }) };
     });
   }
 
@@ -1338,18 +1610,34 @@ export class ChunkClient {
       }
     };
     return {
-      getBlock: (x, y, options = {}) => call(() => this.getBlockOp(x, y, options)),
-      getBlockWithMetadata: (x, y, options = {}) => call(() => this.getBlockWithMetadataOp(x, y, options)),
-      setBlock: (x, y, values, options = {}) => write(options, "SET BLOCK", () => this.setBlockOp(x, y, values, options)),
-      deleteBlock: (x, y, options = {}) => write(options, "DELETE BLOCK", () => this.deleteBlockOp(x, y, options)),
-      getChunk: (cx, cy, options = {}) => call(() => this.getChunkOp(cx, cy, options)),
-      getChunkRaw: (cx, cy, options = {}) => call(() => this.getChunkRawOp(cx, cy, options)),
-      setChunk: (cx, cy, state, options = {}) => write(options, "SET CHUNK", () => this.setChunkOp(cx, cy, state, options)),
-      setChunkRaw: (cx, cy, form, options = {}) => write(options, "SET CHUNK", () => this.setChunkRawOp(cx, cy, form, options)),
+      getBlock: (x, y, options = {}) => call(() => this.getBlockOp([x, y], options)),
+      getBlockWithMetadata: (x, y, options = {}) => call(() => this.getBlockWithMetadataOp([x, y], options)),
+      setBlock: (x, y, values, options = {}) => write(options, "SET BLOCK", () => this.setBlockOp([x, y], values, options)),
+      deleteBlock: (x, y, options = {}) => write(options, "DELETE BLOCK", () => this.deleteBlockOp([x, y], options)),
+      getChunk: (cx, cy, options = {}) => call(() => this.getChunkOp([cx, cy], options)),
+      getChunkRaw: (cx, cy, options = {}) => call(() => this.getChunkRawOp([cx, cy], options)),
+      setChunk: (cx, cy, state, options = {}) => write(options, "SET CHUNK", () => this.setChunkOp([cx, cy], state, options)),
+      setChunkRaw: (cx, cy, form, options = {}) => write(options, "SET CHUNK", () => this.setChunkRawOp([cx, cy], form, options)),
       getArea: (area, options = {}) => call(() => this.getAreaOp(area, options)),
       getAreaRaw: (area, options = {}) => call(() => this.getAreaRawOp(area, options)),
       getAreaWithSchema: (area, options = {}) => call(() => this.getAreaWithSchemaOp(area, options, false)),
       getAreaRawWithSchema: (area, options = {}) => call(() => this.getAreaWithSchemaOp(area, options, true)),
+      getBlock3D: (x, y, z, options = {}) => call(() => this.getBlockOp([x, y, z], options)),
+      getBlock3DWithMetadata: (x, y, z, options = {}) => call(() => this.getBlockWithMetadataOp([x, y, z], options)),
+      setBlock3D: (x, y, z, values, options = {}) => write(options, "SET BLOCK", () => this.setBlockOp([x, y, z], values, options)),
+      deleteBlock3D: (x, y, z, options = {}) => write(options, "DELETE BLOCK", () => this.deleteBlockOp([x, y, z], options)),
+      getChunk3D: (x, y, z, options = {}) => call(() => this.getChunkOp([x, y, z], options)),
+      getChunkRaw3D: (x, y, z, options = {}) => call(() => this.getChunkRawOp([x, y, z], options)),
+      setChunk3D: (x, y, z, state, options = {}) => write(options, "SET CHUNK", () => this.setChunkOp([x, y, z], state, options)),
+      setChunkRaw3D: (x, y, z, form, options = {}) => write(options, "SET CHUNK", () => this.setChunkRawOp([x, y, z], form, options)),
+      getArea3D: (area, options = {}) => call(async () => (await this.getArea3DOp(area, options, false, false)).entries),
+      getAreaRaw3D: (area, options = {}) => call(async () => (await this.getArea3DOp(area, options, true, false)).entries),
+      getArea3DWithSchema: (area, options = {}) => call(() => this.getArea3DOp(area, options, false, true)),
+      getAreaRaw3DWithSchema: (area, options = {}) => call(() => this.getArea3DOp(area, options, true, true)),
+      setChunkColumns: (x, y, columns, state, options = {}) => write(options, "SET CHUNK", () => this.setChunkColumnsOp([x, y], columns, state, options)),
+      setChunkColumns3D: (x, y, z, columns, state, options = {}) => write(options, "SET CHUNK", () => this.setChunkColumnsOp([x, y, z], columns, state, options)),
+      setChunkMetadata: (x, y, values, options = {}) => write(options, "SET CHUNK", () => this.setChunkMetadataOp([x, y], values, options)),
+      setChunkMetadata3D: (x, y, z, values, options = {}) => write(options, "SET CHUNK", () => this.setChunkMetadataOp([x, y, z], values, options)),
     };
   }
 
@@ -1600,7 +1888,7 @@ export class ChunkClient {
     // A failed handshake (failed login, older server) must not leave the
     // socket open behind a client the caller never received.
     try {
-      await this.hello();
+      await this.hello(socket);
     } catch (error) {
       if (this.socket === socket) {
         this.clearConnectionState();
@@ -1614,7 +1902,7 @@ export class ChunkClient {
   // HELLO is the first statement on every connection; with a user it starts
   // the SCRAM-SHA-256 login, which AUTH finishes. Both are sent outside the
   // pipeline queue: operations waiting for the connection hold its slots.
-  private async hello(): Promise<void> {
+  private async hello(socket: TransportSocket): Promise<void> {
     const user = this.options.user;
     let login: ScramLogin | null = null;
     let reply: ChunkReply;
@@ -1623,7 +1911,7 @@ export class ChunkClient {
     if (user === "") {
       reply = await this.send(`HELLO ${PROTOCOL_VERSION}${withClause}`, [], "HELLO");
     } else {
-      login = startScramLogin(user);
+      login = startScramLogin(user, undefined, this.channelBindingOf(socket));
       reply = await this.send(`HELLO ${PROTOCOL_VERSION} USER ${user} $1${withClause}`, [Buffer.from(login.first, "utf8")], "HELLO");
     }
     if (reply.type === "error") {
@@ -1677,6 +1965,20 @@ export class ChunkClient {
       );
     }
     this.info = info;
+  }
+
+  // The data that binds the login to this connection, read after the TLS
+  // handshake and before HELLO; none on plain TCP or with channelBinding "off".
+  // A failed bound login is never retried unbound.
+  private channelBindingOf(socket: TransportSocket): ScramChannelBinding | undefined {
+    if (!(socket instanceof tls.TLSSocket) || this.options.channelBinding === "off") {
+      return undefined;
+    }
+    try {
+      return tlsChannelBinding(socket);
+    } catch (error) {
+      throw error instanceof ChunkTlsError ? error : this.wrapTransportError(error, "tls", "HELLO");
+    }
   }
 
   private serverError(reply: ErrorReply, command: string): ChunkError {

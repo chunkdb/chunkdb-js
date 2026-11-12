@@ -81,8 +81,8 @@ test("users and rights end to end", async () => {
     await assert.rejects(bot.listUsers(), ChunkPermissionError);
 
     assert.deepEqual(await admin.listUsers(), [
-      { name: "admin", managesUsers: true, grants: { "*": "ADMIN" } },
-      { name: "bot", managesUsers: false, grants: { world: "READ" } },
+      { name: "admin", managesUsers: true, requiresChannelBinding: false, grants: { "*": "ADMIN" } },
+      { name: "bot", managesUsers: false, requiresChannelBinding: false, grants: { world: "READ" } },
     ]);
 
     // A user changes their own password; the old one no longer logs in.

@@ -40,6 +40,14 @@ export interface ChunkClientOptions {
   ca?: string | Buffer;
   cert?: string | Buffer;
   key?: string | Buffer;
+  /**
+   * Binding of the login to its TLS connection (SCRAM channel binding).
+   * `"auto"` (default) binds every login over TLS: `tls-exporter` on TLS 1.3,
+   * `tls-server-end-point` on TLS 1.2; plaintext logins are not bound.
+   * `"off"` never binds, for TLS that ends at a proxy in front of the server.
+   * `"require"` binds like `"auto"` and refuses a connection without TLS.
+   */
+  channelBinding?: ChunkChannelBinding;
   /** Max concurrent in-flight requests per connection. Default 1 (sequential). */
   pipelineDepth?: number;
   /**
@@ -51,6 +59,9 @@ export interface ChunkClientOptions {
   /** HELLO WITH options; unknown names are reported as not applied. */
   helloOptions?: Readonly<Record<string, ChunkValue>>;
 }
+
+/** The `channelBinding` option: `"auto"`, `"off"` or `"require"`. */
+export type ChunkChannelBinding = "auto" | "off" | "require";
 
 export interface ChunkPoolOptions extends ChunkClientOptions {
   maxConnections: number;
@@ -115,6 +126,8 @@ export interface ChunkUser {
   name: string;
   /** The user may create, alter and drop users and grant rights. */
   managesUsers: boolean;
+  /** The user logs in only with a login bound to its TLS connection. */
+  requiresChannelBinding: boolean;
   /** Rights by table name; `"*"` stands for every table. */
   grants: Record<string, ChunkRight>;
 }
@@ -122,12 +135,14 @@ export interface ChunkUser {
 export interface ChunkCreateUserOptions {
   /** The user may manage users and rights. Default false. */
   managesUsers?: boolean;
+  /** The user logs in only with a login bound to its TLS connection. Default false. */
+  requiresChannelBinding?: boolean;
 }
 
 export interface ChunkVerifierOptions {
   /** PBKDF2 iterations, at least 4096 (the default). */
   iterations?: number;
-  /** The salt, at least 16 bytes; 16 random bytes by default. */
+  /** The salt, 16 through 256 bytes; 16 random bytes by default. */
   salt?: Uint8Array;
 }
 
@@ -172,6 +187,7 @@ export interface ChunkWatchOptions {
   slot?: string;
   /** Inclusive chunk coordinates. */
   area?: { cx0: number; cy0: number; cx1: number; cy1: number };
+  area3D?: ChunkBox3D;
   after?: ChunkPosition;
   columns?: readonly string[];
   noBefore?: boolean;
@@ -183,10 +199,13 @@ export interface ChunkWatchOptions {
 /** Filters persisted when a durable slot is created. */
 export interface ChunkSlotOptions {
   area?: ChunkWatchOptions["area"];
+  area3D?: ChunkBox3D;
   columns?: readonly string[];
   noBefore?: boolean;
   chunks?: boolean;
   ifNotExists?: boolean;
+  /** `OWNER`: the user the slot belongs to; the server defaults it to the user running CREATE SLOT. */
+  owner?: string;
 }
 
 /** A durable slot's written acknowledgement, retained history and filter identity. */
@@ -199,6 +218,8 @@ export interface ChunkSlot {
   lost: boolean;
   filters?: { area: bigint[] | null; columns: Array<string | null> | null; columnIds: bigint[] | null; noBefore: boolean; chunks: boolean };
   lostReason?: string | null;
+  /** Shown to the owner and to users with MANAGES USERS; null otherwise or when no owner is recorded. */
+  owner?: string | null;
 }
 
 export interface ChunkChangeEvent {
@@ -282,6 +303,7 @@ export interface ChunkColumn {
 export interface ChunkSize {
   width: number;
   height: number;
+  depth?: number;
 }
 
 export type ChunkDurabilityMode = "relaxed" | "fsync-wal" | "fsync-checkpoint";
@@ -294,7 +316,7 @@ export interface ChunkTableOptions {
   checkpointWalBytes?: number;
   walGroupCommitUpdates?: number;
   checkpointCompression?: ChunkCheckpointCompression;
-  /** The most bytes of `text` and `bytes` values in one chunk. */
+  /** Combined encoded variable-value budget for block and chunk columns. */
   varMaxChunkBytes?: number;
   /** In-memory change-feed byte budget for this table. */
   feedBufferBytes?: number;
@@ -343,6 +365,7 @@ export interface ChunkColumnDefinition {
 
 export interface ChunkTableDefinition {
   columns: readonly ChunkColumnDefinition[];
+  chunkColumns?: readonly ChunkColumnDefinition[];
   chunk: ChunkSize;
   large?: ChunkSize;
   options?: ChunkTableOptions;
@@ -363,6 +386,9 @@ export type ChunkTableChange =
   | { kind: "addColumn"; column: ChunkColumnDefinition }
   | { kind: "dropColumn"; column: string }
   | { kind: "renameColumn"; column: string; to: string }
+  | { kind: "addChunkColumn"; column: ChunkColumnDefinition; ifNotExists?: boolean }
+  | { kind: "dropChunkColumn"; column: string; ifExists?: boolean }
+  | { kind: "renameChunkColumn"; column: string; to: string }
   | {
       kind: "alterColumnType";
       column: string;
@@ -373,13 +399,15 @@ export type ChunkTableChange =
   | ChunkSetOption;
 
 /**
- * A chunk's blocks, block `i` at local `(i % width, floor(i / width))`.
+ * A chunk's blocks, with x varying fastest, followed by y and z.
  * `present[i]` tells whether block `i` exists; `columns[name][i]` is its
  * value (null for an absent block).
  */
 export interface ChunkStateInput {
   readonly present: readonly boolean[];
   readonly columns: Readonly<Record<string, readonly ChunkValue[]>>;
+  readonly metadata?: Readonly<ChunkRow>;
+  readonly unknownSections?: ReadonlyMap<number, Uint8Array>;
 }
 
 export interface ChunkState extends ChunkStateInput {
@@ -390,6 +418,11 @@ export interface ChunkState extends ChunkStateInput {
   /** Blocks per row. */
   width: number;
   height: number;
+  depth?: number;
+  /** The producing commit's server time in milliseconds; zero for transaction-private state. */
+  commitTimeMs?: bigint;
+  projected?: boolean;
+  private?: boolean;
   present: boolean[];
   columns: Record<string, ChunkValue[]>;
 }
@@ -398,6 +431,21 @@ export interface ChunkCoord {
   cx: number;
   cy: number;
 }
+
+/** An exact int64 coordinate, supplied as bigint or a safe integer number. */
+export type ChunkAxis = number | bigint;
+
+export interface ChunkPoint3D { cx: ChunkAxis; cy: ChunkAxis; cz: ChunkAxis }
+export interface ChunkCoord3D { cx: bigint; cy: bigint; cz: bigint }
+export interface ChunkBox3D { cx0: ChunkAxis; cy0: ChunkAxis; cz0: ChunkAxis; cx1: ChunkAxis; cy1: ChunkAxis; cz1: ChunkAxis }
+
+/** An inclusive box or ball of three-dimensional chunk coordinates. */
+export type ChunkArea3D =
+  | ChunkBox3D
+  | { cx: ChunkAxis; cy: ChunkAxis; cz: ChunkAxis; radius: ChunkAxis };
+
+export interface ChunkAreaEntry3D extends ChunkCoord3D { chunk: ChunkState }
+export interface ChunkAreaRawEntry3D extends ChunkCoord3D { chunk: Buffer }
 
 /** A rectangle of chunks, corners included, or the chunks within `radius` of a chunk. */
 export type ChunkArea =
@@ -437,6 +485,8 @@ export interface ChunkWriteOptions extends ChunkTableOption {
    * changes nothing and rejects with `ChunkVersionMismatchError`.
    */
   ifVersion?: bigint;
+  /** Chunk writes only; tombstones count as absent and metadata-only chunks remain present. */
+  ifAbsent?: boolean;
 }
 
 export interface ChunkScanOptions extends ChunkTableOption {
@@ -445,6 +495,39 @@ export interface ChunkScanOptions extends ChunkTableOption {
   /** Chunks per page, 1 to `maxScanLimit`; the server's maximum by default. */
   limit?: number;
 }
+
+export interface ChunkScanDataOptions extends ChunkScanOptions {
+  since?: bigint;
+  /** Bind a resumed scan to the table lifetime returned by its previous page. */
+  epoch?: string;
+  withData?: boolean;
+  columns?: readonly string[];
+}
+
+export interface ChunkScanOptions3D extends Omit<ChunkScanDataOptions, "after"> { after?: ChunkPoint3D }
+
+export interface ChunkScanEntry extends ChunkCoord {
+  version: bigint;
+  /** Present only with WITH DATA; null represents a retained tombstone. */
+  chunk?: ChunkState | null;
+  deleted?: boolean;
+}
+
+export interface ChunkScanEntry3D extends ChunkCoord3D {
+  version: bigint;
+  chunk?: ChunkState | null;
+  deleted?: boolean;
+}
+
+export interface ChunkScanDataPage {
+  chunks: ChunkScanEntry[];
+  more: boolean;
+  epoch: string;
+  position: bigint | null;
+  retainedDeletionFloor: bigint;
+}
+
+export interface ChunkScanPage3D extends Omit<ChunkScanDataPage, "chunks"> { chunks: ChunkScanEntry3D[] }
 
 export interface ChunkTransactionOptions {
   /** How many times a transaction that ends with `CONFLICT` runs again; 5 by default. */
@@ -471,6 +554,22 @@ export interface ChunkTransaction {
   getAreaRaw(area: ChunkArea, options?: ChunkReadOptions): Promise<ChunkAreaRawEntry[]>;
   getAreaWithSchema(area: ChunkArea, options?: ChunkReadOptions): Promise<ChunkAreaMetadata<ChunkAreaEntry>>;
   getAreaRawWithSchema(area: ChunkArea, options?: ChunkReadOptions): Promise<ChunkAreaMetadata<ChunkAreaRawEntry>>;
+  getBlock3D(x: ChunkAxis, y: ChunkAxis, z: ChunkAxis, options?: ChunkReadOptions): Promise<ChunkRow | null>;
+  getBlock3DWithMetadata(x: ChunkAxis, y: ChunkAxis, z: ChunkAxis, options?: ChunkReadOptions): Promise<ChunkBlockMetadata>;
+  setBlock3D(x: ChunkAxis, y: ChunkAxis, z: ChunkAxis, values: Readonly<Record<string, ChunkValue>>, options?: ChunkTableOption): Promise<void>;
+  deleteBlock3D(x: ChunkAxis, y: ChunkAxis, z: ChunkAxis, options?: ChunkTableOption): Promise<void>;
+  getChunk3D(cx: ChunkAxis, cy: ChunkAxis, cz: ChunkAxis, options?: ChunkReadOptions): Promise<ChunkState | null>;
+  getChunkRaw3D(cx: ChunkAxis, cy: ChunkAxis, cz: ChunkAxis, options?: ChunkReadOptions): Promise<Buffer | null>;
+  setChunk3D(cx: ChunkAxis, cy: ChunkAxis, cz: ChunkAxis, state: ChunkStateInput, options?: ChunkTableOption): Promise<void>;
+  setChunkRaw3D(cx: ChunkAxis, cy: ChunkAxis, cz: ChunkAxis, form: Uint8Array, options?: ChunkTableOption): Promise<void>;
+  getArea3D(area: ChunkArea3D, options?: ChunkReadOptions): Promise<ChunkAreaEntry3D[]>;
+  getAreaRaw3D(area: ChunkArea3D, options?: ChunkReadOptions): Promise<ChunkAreaRawEntry3D[]>;
+  getArea3DWithSchema(area: ChunkArea3D, options?: ChunkReadOptions): Promise<ChunkAreaMetadata<ChunkAreaEntry3D>>;
+  getAreaRaw3DWithSchema(area: ChunkArea3D, options?: ChunkReadOptions): Promise<ChunkAreaMetadata<ChunkAreaRawEntry3D>>;
+  setChunkColumns(cx: number, cy: number, columns: readonly string[], state: ChunkStateInput, options?: ChunkTableOption): Promise<void>;
+  setChunkColumns3D(cx: ChunkAxis, cy: ChunkAxis, cz: ChunkAxis, columns: readonly string[], state: ChunkStateInput, options?: ChunkTableOption): Promise<void>;
+  setChunkMetadata(cx: number, cy: number, values: Readonly<ChunkRow>, options?: ChunkTableOption): Promise<void>;
+  setChunkMetadata3D(cx: ChunkAxis, cy: ChunkAxis, cz: ChunkAxis, values: Readonly<ChunkRow>, options?: ChunkTableOption): Promise<void>;
 }
 
 export type ChunkErrorPhase =

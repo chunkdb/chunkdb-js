@@ -13,7 +13,7 @@ import type {
   ChunkTableSchema,
   ChunkSchemaVersion,
 } from "./types";
-import { ChunkBits, checkCoordinate, checkName, requestError, valueFromReply } from "./values";
+import { ChunkBits, checkCoordinate, checkInt64Coordinate, checkName, requestError, valueFromReply } from "./values";
 
 // Internal stream access; ordinary operations never switch their connection to WATCH.
 export const kWatchStream = Symbol("watchStream");
@@ -92,8 +92,15 @@ function statementOf(table: string, options: ChunkWatchOptions): string {
   return statement;
 }
 
-export function filterClause(options: Pick<ChunkWatchOptions, "area" | "columns" | "noBefore" | "chunks">): string {
+export function filterClause(options: Pick<ChunkWatchOptions, "area" | "area3D" | "columns" | "noBefore" | "chunks">): string {
   let statement = "";
+  if (options.area !== undefined && options.area3D !== undefined) throw requestError("AREA needs either two or three dimensions", "WATCH");
+  if (options.area3D !== undefined) {
+    const area = options.area3D;
+    const values = [area.cx0, area.cy0, area.cz0, area.cx1, area.cy1, area.cz1].map((value) => checkInt64Coordinate(value, "area coordinate"));
+    if (values[0] > values[3] || values[1] > values[4] || values[2] > values[5]) throw requestError("WATCH area bounds are reversed", "WATCH");
+    statement += ` AREA ${values.slice(0, 3).join(" ")} TO ${values.slice(3).join(" ")}`;
+  }
   if (options.area !== undefined) {
     const area = options.area;
     const values = [area.cx0, area.cy0, area.cx1, area.cy1].map((value) => checkCoordinate(value, "area coordinate"));
