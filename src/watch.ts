@@ -1,8 +1,8 @@
-import type { ChunkClient } from "./client";
-import { ChunkConnectionError, ChunkProtocolError } from "./errors";
-import type { ChunkReply, PushReply } from "./protocol";
-import { integerOf, mapOf, parseColumns, schemaVersionOf, textOf } from "./schema";
-import { slotName } from "./slots";
+import type { ChunkClient } from "./client.js";
+import { ChunkConnectionError, ChunkProtocolError } from "./errors.js";
+import type { ChunkReply, PushReply } from "./protocol.js";
+import { integerOf, mapOf, parseColumns, schemaVersionOf, textOf } from "./schema.js";
+import { slotName } from "./slots.js";
 import type {
   ChunkColumn,
   ChunkPosition,
@@ -12,8 +12,8 @@ import type {
   ChunkWatchOptions,
   ChunkTableSchema,
   ChunkSchemaVersion,
-} from "./types";
-import { ChunkBits, checkCoordinate, checkInt64Coordinate, checkName, requestError, valueFromReply } from "./values";
+} from "./types.js";
+import { ChunkBits, checkCoordinate, checkInt64Coordinate, checkName, requestError, valueFromReply } from "./values.js";
 
 // Internal stream access; ordinary operations never switch their connection to WATCH.
 export const kWatchStream = Symbol("watchStream");

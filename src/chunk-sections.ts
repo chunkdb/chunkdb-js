@@ -1,4 +1,4 @@
-import { ChunkProtocolError } from "./errors";
+import { ChunkProtocolError } from "./errors.js";
 
 const HEADER_BYTES = 36;
 const DIRECTORY_BYTES = 12;

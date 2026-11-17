@@ -28,16 +28,16 @@ import {
   ChunkTlsError,
   ChunkVersionMismatchError,
   type ChunkError,
-} from "./errors";
-import { tlsChannelBinding, type ScramChannelBinding } from "./channel-binding";
-import { chunkFormLimit, decodeChunkForm, encodeChunkForm } from "./chunk-form";
-import { AreaDecodeLimitError, checkAreaDecodedCells, decodeSectionedChunk, encodeSectionedChunk } from "./sectioned-chunk";
-import { captureAreaPage, decodeAreaPage, rawAreaReplyOptions, type AreaPageRequest } from "./area-page";
-import { parseSectionedForm } from "./chunk-sections";
-import { decodeChunkScanPage } from "./chunk-scan";
-import { encodeStatement, ReplyReader, type ChunkParameter, type ChunkReply, type ErrorReply, type PushReply, type ReplyLimits } from "./protocol";
-import { filterClause, ChunkWatch, kWatchAck, kWatchPause, kWatchStream } from "./watch";
-import { parseSlots, slotName, slotOwner } from "./slots";
+} from "./errors.js";
+import { tlsChannelBinding, type ScramChannelBinding } from "./channel-binding.js";
+import { chunkFormLimit, decodeChunkForm, encodeChunkForm } from "./chunk-form.js";
+import { AreaDecodeLimitError, checkAreaDecodedCells, decodeSectionedChunk, encodeSectionedChunk } from "./sectioned-chunk.js";
+import { captureAreaPage, decodeAreaPage, rawAreaReplyOptions, type AreaPageRequest } from "./area-page.js";
+import { parseSectionedForm } from "./chunk-sections.js";
+import { decodeChunkScanPage } from "./chunk-scan.js";
+import { encodeStatement, ReplyReader, type ChunkParameter, type ChunkReply, type ErrorReply, type PushReply, type ReplyLimits } from "./protocol.js";
+import { filterClause, ChunkWatch, kWatchAck, kWatchPause, kWatchStream } from "./watch.js";
+import { parseSlots, slotName, slotOwner } from "./slots.js";
 import {
   MIN_SCRAM_ITERATIONS,
   finishScramLogin,
@@ -46,9 +46,9 @@ import {
   startScramLogin,
   type ScramFinal,
   type ScramLogin,
-} from "./scram";
-import { integerOf, mapOf, parseDescribe, parseServerInfo, parseStatus, uint64Of, textOf, type TableLayout } from "./schema";
-import { formatChunkUri, parseChunkUri, tableFromUriPath } from "./uri";
+} from "./scram.js";
+import { integerOf, mapOf, parseDescribe, parseServerInfo, parseStatus, uint64Of, textOf, type TableLayout } from "./schema.js";
+import { formatChunkUri, parseChunkUri, tableFromUriPath } from "./uri.js";
 import type {
   ChunkAxis,
   ChunkArea3D,
@@ -104,7 +104,7 @@ import type {
   ChunkWriteOptions,
   ChunkWatchOptions,
   ParsedChunkUri,
-} from "./types";
+} from "./types.js";
 import {
   StaleSchemaError,
   checkCoordinate,
@@ -117,7 +117,7 @@ import {
   parseColumnType,
   requestError,
   valueFromReply,
-} from "./values";
+} from "./values.js";
 
 type TransportSocket = net.Socket | tls.TLSSocket;
 

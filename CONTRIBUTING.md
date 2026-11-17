@@ -10,6 +10,7 @@ Run these checks from the repository root:
 ```bash
 npm ci
 npm run build
+npm run test:types
 npm run test:unit
 ```
 
