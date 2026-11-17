@@ -1,5 +1,5 @@
-import { ChunkConnectionError } from "./errors";
-import type { ChunkScheme, ParsedChunkUri } from "./types";
+import { ChunkConnectionError } from "./errors.js";
+import type { ChunkScheme, ParsedChunkUri } from "./types.js";
 
 const DEFAULT_PORT = 4242;
 

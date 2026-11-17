@@ -18,6 +18,8 @@ This client uses CQL protocol 3 with chunkdb 2.x; see the server's [compatibilit
 
 ### Fixed
 - Server error `keys` keep diagnostic keys of any name, such as `Future-Key`, and the known fields after them, instead of stopping at the first key that is not lowercase snake_case.
+- The package type declarations resolve under TypeScript `--module NodeNext`; relative imports in them now carry `.js` extensions.
+- `execute` with `CREATE TABLE IF NOT EXISTS` or `DROP TABLE IF EXISTS` clears the cached schema of the named table, so typed reads and writes after a guarded re-creation use the new column types.
 - `scramVerifier` refuses a salt over 256 bytes, which chunkdb does not accept in a verifier.
 - Calls made on a client that has not connected yet wait for the first connection instead of failing with "connection closed" (#9).
 - Return null for never-written typed and raw chunk reads, including pools and transactions; expose nullable result types and retain versioned empty forms. (#72).

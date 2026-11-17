@@ -1,7 +1,7 @@
-export { ChunkClient, connect, connectUri } from "./client";
-export { ChunkPool, connectPool } from "./pool";
-export { ChunkWatch } from "./watch";
-export { emptyChunk } from "./chunk-form";
+export { ChunkClient, connect, connectUri } from "./client.js";
+export { ChunkPool, connectPool } from "./pool.js";
+export { ChunkWatch } from "./watch.js";
+export { emptyChunk } from "./chunk-form.js";
 export {
   ChunkAuthError,
   ChunkConditionFailedError,
@@ -31,8 +31,8 @@ export {
   ChunkTimeoutError,
   ChunkTlsError,
   ChunkVersionMismatchError,
-} from "./errors";
-export { countParameters, encodeStatement, parseReply } from "./protocol";
+} from "./errors.js";
+export { countParameters, encodeStatement, parseReply } from "./protocol.js";
 export type {
   ArrayReply,
   BooleanReply,
@@ -46,10 +46,10 @@ export type {
   NullReply,
   SimpleReply,
   PushReply,
-} from "./protocol";
-export { ChunkBits, encodeParameter, formatColumnType, parseColumnType } from "./values";
-export { formatChunkUri, parseChunkUri, tableFromUriPath } from "./uri";
-export { scramVerifier } from "./scram";
+} from "./protocol.js";
+export { ChunkBits, encodeParameter, formatColumnType, parseColumnType } from "./values.js";
+export { formatChunkUri, parseChunkUri, tableFromUriPath } from "./uri.js";
+export { scramVerifier } from "./scram.js";
 export type {
   ChunkAxis,
   ChunkPoint3D,
@@ -132,4 +132,4 @@ export type {
   ChunkVerifierOptions,
   ChunkWriteOptions,
   ParsedChunkUri,
-} from "./types";
+} from "./types.js";

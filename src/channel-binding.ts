@@ -4,7 +4,7 @@
 import { createHash } from "node:crypto";
 import type tls from "node:tls";
 
-import { ChunkTlsError } from "./errors";
+import { ChunkTlsError } from "./errors.js";
 
 export type ScramChannelBindingType = "tls-exporter" | "tls-server-end-point";
 

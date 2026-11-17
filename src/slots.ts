@@ -1,8 +1,8 @@
-import { ChunkProtocolError } from "./errors";
-import type { ChunkReply } from "./protocol";
-import { mapOf, textOf, uint64Of } from "./schema";
-import type { ChunkSlot } from "./types";
-import { checkName, requestError } from "./values";
+import { ChunkProtocolError } from "./errors.js";
+import type { ChunkReply } from "./protocol.js";
+import { mapOf, textOf, uint64Of } from "./schema.js";
+import type { ChunkSlot } from "./types.js";
+import { checkName, requestError } from "./values.js";
 
 export function slotName(name: string): string {
   checkName(name, "a slot name");

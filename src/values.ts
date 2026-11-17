@@ -1,6 +1,6 @@
-import { ChunkProtocolError, ChunkUnknownColumnTypeError } from "./errors";
-import type { ChunkReply } from "./protocol";
-import type { ChunkColumn, ChunkColumnType, ChunkValue } from "./types";
+import { ChunkProtocolError, ChunkUnknownColumnTypeError } from "./errors.js";
+import type { ChunkReply } from "./protocol.js";
+import type { ChunkColumn, ChunkColumnType, ChunkValue } from "./types.js";
 
 /** A `bits(N)` value: N bits, bit 0 first (as CQL's `b'..'` writes them). */
 export class ChunkBits {

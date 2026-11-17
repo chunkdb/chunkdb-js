@@ -1,9 +1,9 @@
-import { ChunkProtocolError, ChunkUnknownColumnTypeError } from "./errors";
-import type { TableLayout } from "./schema";
-import type { ChunkColumn, ChunkState, ChunkStateInput, ChunkValue } from "./types";
-import { ChunkBits, decodeFixedValue, encodeFixedValue, encodeVarValue, fixedWidth, requestError, StaleSchemaError } from "./values";
-import { FormFlag, FormSection, parseFormBlockSpans, parseFormChunkColumns, parseSectionedForm, serializeSectionedForm, validFormPadding } from "./chunk-sections";
-import type { SectionedForm } from "./chunk-sections";
+import { ChunkProtocolError, ChunkUnknownColumnTypeError } from "./errors.js";
+import type { TableLayout } from "./schema.js";
+import type { ChunkColumn, ChunkState, ChunkStateInput, ChunkValue } from "./types.js";
+import { ChunkBits, decodeFixedValue, encodeFixedValue, encodeVarValue, fixedWidth, requestError, StaleSchemaError } from "./values.js";
+import { FormFlag, FormSection, parseFormBlockSpans, parseFormChunkColumns, parseSectionedForm, serializeSectionedForm, validFormPadding } from "./chunk-sections.js";
+import type { SectionedForm } from "./chunk-sections.js";
 
 const MAX_VARIABLE_BYTES = 64 * 1024 * 1024;
 const MAX_DECODED_CELLS = 4 * 1024 * 1024;
