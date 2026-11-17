@@ -260,7 +260,7 @@ function resolveOptions(options: ChunkClientOptions = {}): ResolvedOptions {
   const user = options.user ?? parsed?.user ?? "";
   const password = options.password ?? parsed?.password ?? "";
   if (user === "" && password !== "") {
-    throw new ChunkConnectionError("a password needs a user", { phase: "connect" });
+    throw new ChunkConnectionError("a password needs a user; set the user option, or use the form chunk://user:password@host:4242/table", { phase: "connect" });
   }
   if (user !== "") {
     checkName(user, "a user name");
@@ -530,7 +530,7 @@ function columnIndexes(layout: TableLayout, names: readonly string[] | undefined
     checkName(name, "a column name");
     const index = columns.findIndex((column) => column.name === name);
     if (index === -1) {
-      throw new StaleSchemaError(`table ${layout.schema.table} has no column ${name}`, { phase: "request" });
+      throw new StaleSchemaError(`table ${layout.schema.table} has no column ${name}; DESCRIBE ${layout.schema.table} lists its columns`, { phase: "request" });
     }
     return index;
   });
@@ -595,6 +595,13 @@ export class ChunkClient {
     }
     if (this.connected) {
       return this;
+    }
+    // Refused before connecting: a login without a password always fails.
+    if (this.options.user !== "" && this.options.password === "") {
+      throw new ChunkConnectionError(
+        `the connection names user ${this.options.user} without a password; use chunk://${this.options.user}:PASSWORD@host:4242/ or the password option`,
+        { phase: "connect" },
+      );
     }
     if (this.connectPromise !== null) {
       return this.connectPromise;
@@ -1454,7 +1461,7 @@ export class ChunkClient {
     return this.withLayout(table, true, async (layout) => {
       const parameters = names.map((name) => {
         const column = layout.schema.chunkColumns?.find((column) => column.name === name);
-        if (column === undefined) throw new StaleSchemaError(`table ${table} has no chunk column ${name}`, { phase: "request", command: "SET CHUNK" });
+        if (column === undefined) throw new StaleSchemaError(`table ${table} has no chunk column ${name}; DESCRIBE ${table} lists its columns`, { phase: "request", command: "SET CHUNK" });
         return encodeParameter(column, values[name]);
       });
       const assignments = names.map((name, i) => `${name} = $${i + 1}`).join(", ");
@@ -1869,6 +1876,10 @@ export class ChunkClient {
       return await operation(fresh);
     } catch (error) {
       this.forgetAfter(table, error, write);
+      // The fresh schema has no such column: a request error, not a stale cache.
+      if (error instanceof StaleSchemaError && error.phase === "request") {
+        throw requestError(error.message, error.command);
+      }
       throw error;
     }
   }
@@ -2388,9 +2399,11 @@ export class ChunkClient {
     const code = typeof error === "object" && error !== null && "code" in error && typeof error.code === "string" ? error.code : undefined;
     const message = code === "ECONNREFUSED"
       ? `connection refused at ${this.options.host}:${this.options.port}; start the server and check its listen address and port (${original})`
-      : phase === "tls"
-        ? `TLS connection failed; use chunks:// with a TLS-enabled server and check the CA certificate and server name (${original})`
-        : `${original}; check the server address, network and server log`;
+      : code === "ECONNRESET" && phase === "connect"
+        ? `connection reset by ${this.options.host}:${this.options.port}; check that chunk:// uses plaintext and chunks:// uses TLS, and the server log (${original})`
+        : phase === "tls"
+          ? `TLS connection failed; use chunks:// with a TLS-enabled server and check the CA certificate and server name (${original})`
+          : `${original}; check the server address, network and server log`;
     if (phase === "tls") {
       return new ChunkTlsError(message, { phase, command, code, cause: error });
     }
@@ -2405,5 +2418,11 @@ export async function connect(options: ChunkClientOptions = {}): Promise<ChunkCl
 }
 
 export async function connectUri(uri: string, overrides: Partial<ChunkClientOptions> = {}): Promise<ChunkClient> {
+  if (typeof uri !== "string" || uri === "") {
+    throw new ChunkConnectionError(
+      `connectUri needs a chunk URI, got ${uri === "" ? "an empty string" : String(uri)}; check the variable or setting that holds it, for example chunk://user:password@host:4242/table`,
+      { phase: "connect" },
+    );
+  }
   return await connect({ ...overrides, uri });
 }
