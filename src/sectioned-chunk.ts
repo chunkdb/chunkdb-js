@@ -8,6 +8,18 @@ import type { SectionedForm } from "./chunk-sections";
 const MAX_VARIABLE_BYTES = 64 * 1024 * 1024;
 const MAX_DECODED_CELLS = 4 * 1024 * 1024;
 
+/** A local materialization refusal after a completely framed response. */
+export class AreaDecodeLimitError extends ChunkProtocolError {}
+
+/** Admit a complete typed area before any per-chunk dense arrays are built. */
+export function checkAreaDecodedCells(layout: TableLayout, indexes: readonly number[], chunks: number): void {
+  const blocks = sectionedBlockCount(layout);
+  const cells = blocks * indexes.length + (layout.schema.chunkColumns?.length ?? 0);
+  if (!Number.isSafeInteger(chunks) || chunks < 0 || (cells !== 0 && chunks > Math.floor(MAX_DECODED_CELLS / cells))) {
+    throw new AreaDecodeLimitError("decoded area exceeds 4194304 column values; select fewer columns, request smaller pages, or read raw forms", { phase: "protocol", command: "GET AREA" });
+  }
+}
+
 export function sectionedBlockCount(layout: TableLayout): number {
   const { schema } = layout;
   const dims = schema.dims ?? 2;
