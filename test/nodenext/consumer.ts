@@ -1,4 +1,5 @@
 // Compiled with NodeNext resolution against the built package declarations.
+// Run npm run build before npm run test:types; the package exports point at dist/.
 import { ChunkError, connectUri, type ChunkClient, type ChunkReply } from "@chunkdb/client";
 
 export async function ping(uri: string): Promise<ChunkReply> {
