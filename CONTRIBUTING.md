@@ -10,10 +10,11 @@ Run these checks from the repository root:
 ```bash
 npm ci
 npm run build
+npm run test:types
 npm run test:unit
 ```
 
-The unit test command also checks the types of source and test files; run `npm run test:types` for that check alone.
+`test:types` checks the published declarations under NodeNext after a build. The unit test command also checks the types of source and test files; run `npm run test:check-tests` for that check alone.
 
 For the full suite, including integration tests, keep a chunkdb checkout beside this repository or set `CHUNKDB_REPO_ROOT` to its absolute path:
 

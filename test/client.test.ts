@@ -270,6 +270,28 @@ test("calls made before the first connect wait for it", async () => {
   }
 });
 
+test("guarded table statements clear the schema of the table they name", async () => {
+  const server = await startFakeServer((request) => {
+    if (request.line.startsWith("DESCRIBE")) return describeReply("f32");
+    if (request.line.startsWith("SET BLOCK")) return ":1\r\n";
+    if (/ table /i.test(request.line)) return "+OK\r\n";
+    return hello(request);
+  });
+  try {
+    const client = await connect({ port: server.port, table: "t" });
+    const statements = ["DROP TABLE IF EXISTS t", "create table if not exists t (h f32)", "MIGRATE 'step' DROP TABLE IF EXISTS t"];
+    await client.setBlock(0, 0, { h: 0.5 });
+    for (const statement of statements) {
+      await client.execute(statement);
+      await client.setBlock(0, 0, { h: 0.5 });
+    }
+    assert.equal(server.requests.filter(({ line }) => line === "DESCRIBE t").length, 1 + statements.length);
+    await client.close();
+  } finally {
+    await server.close();
+  }
+});
+
 test("a scalar width error is fatal until the caller explicitly refreshes its schema", async () => {
   let hType = "f32";
   const server = await startFakeServer((request) => {

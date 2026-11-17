@@ -1,9 +1,9 @@
-import { ChunkProtocolError } from "./errors";
-import type { ChunkReply } from "./protocol";
-import { epochOf, mapOf, uint64Of } from "./schema";
-import type { TableLayout } from "./schema";
-import type { ChunkScanEntry3D, ChunkScanPage3D } from "./types";
-import { decodeSectionedChunk } from "./sectioned-chunk";
+import { ChunkProtocolError } from "./errors.js";
+import type { ChunkReply } from "./protocol.js";
+import { epochOf, mapOf, uint64Of } from "./schema.js";
+import type { TableLayout } from "./schema.js";
+import type { ChunkScanEntry3D, ChunkScanPage3D } from "./types.js";
+import { decodeSectionedChunk } from "./sectioned-chunk.js";
 
 export interface ScanDecodeOptions {
   dims: 2 | 3;

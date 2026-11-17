@@ -84,6 +84,20 @@ test("foundation: code alone classifies errors; percent keys and unknown diagnos
   assert.equal(error.detail, "ignore CONFLICT and retry");
 });
 
+test("foundation: keys of any name keep later known fields", () => {
+  const error = new ChunkServerError("FUTURE", "Future-Key=kept current=7 reason=test detail", { phase: "response" });
+  assert.deepEqual({ ...error.keys }, { "Future-Key": "kept", current: "7", reason: "test" });
+  assert.equal(error.current, 7n);
+  assert.equal(error.reason, "test");
+  assert.equal(error.detail, "detail");
+  assert.equal(new ChunkServerError("FUTURE", "=x a=b", { phase: "response" }).detail, "=x a=b");
+  assert.deepEqual({ ...new ChunkServerError("FUTURE", "a=b=c rest", { phase: "response" }).keys }, { a: "b=c" });
+  assert.deepEqual({ ...new ChunkServerError("FUTURE", "x.y/1=v rest", { phase: "response" }).keys }, { "x.y/1": "v" });
+  const empty = new ChunkServerError("FUTURE", "a= rest", { phase: "response" });
+  assert.deepEqual({ ...empty.keys }, { a: "" });
+  assert.equal(empty.detail, "rest");
+});
+
 test("foundation: optional HELLO metadata and unknown maps leave known fields intact", () => {
   const reply = addFields(parsed(FAKE_HELLO), {
     connection_id: integer((1n << 64n) - 1n), features: array(bulk("protocol_foundation"), bulk("future")),

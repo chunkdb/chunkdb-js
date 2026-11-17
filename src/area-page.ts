@@ -1,8 +1,8 @@
-import { ChunkProtocolError } from "./errors";
-import type { ChunkReply } from "./protocol";
-import type { ReplyLimits } from "./protocol";
-import type { ChunkArea2D, ChunkArea3D, ChunkAreaPageOptions, ChunkAreaPageOptions3D } from "./types";
-import { requestError } from "./values";
+import { ChunkProtocolError } from "./errors.js";
+import type { ChunkReply } from "./protocol.js";
+import type { ReplyLimits } from "./protocol.js";
+import type { ChunkArea2D, ChunkArea3D, ChunkAreaPageOptions, ChunkAreaPageOptions3D } from "./types.js";
+import { requestError } from "./values.js";
 
 const MIN = -(1n << 63n), MAX = (1n << 63n) - 1n;
 type Point = bigint[];

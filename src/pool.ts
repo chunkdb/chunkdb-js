@@ -2,11 +2,11 @@ import {
   ChunkConnectionError,
   ChunkTimeoutError,
   ChunkTlsError,
-} from "./errors";
-import { ChunkClient, tableOfStatement } from "./client";
-import { copyAreaPageArguments } from "./area-page";
-import type { ChunkWatch } from "./watch";
-import type { ChunkParameter, ChunkReply } from "./protocol";
+} from "./errors.js";
+import { ChunkClient, tableOfStatement } from "./client.js";
+import { copyAreaPageArguments } from "./area-page.js";
+import type { ChunkWatch } from "./watch.js";
+import type { ChunkParameter, ChunkReply } from "./protocol.js";
 import type {
   ChunkAxis,
   ChunkArea3D,
@@ -52,7 +52,7 @@ import type {
   ChunkValue,
   ChunkWriteOptions,
   ChunkWatchOptions,
-} from "./types";
+} from "./types.js";
 
 interface ResolvedPoolOptions {
   maxConnections: number;
