@@ -2,7 +2,42 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { ChunkProtocolError, encodeStatement, parseReply, type ChunkReply } from "../src/index";
-import { ReplyReader } from "../src/protocol";
+import { ReplyReader, type ReplyLimits } from "../src/protocol";
+
+test("area reply budgets refuse declared bodies and aggregate counts before waiting", () => {
+  const cases: Array<[string, ReplyLimits]> = [
+    ["*1\r\n*3\r\n:0\r\n:0\r\n$33554432\r\n", { maxBytes: 80, maxAreaChunks: 2, shape: "rows" }],
+    ["*123", { maxBytes: 4, maxAreaChunks: 2, shape: "rows" }],
+    ["*3\r\n", { maxBytes: 100, maxAreaChunks: 2, shape: "rows" }],
+    ["%3\r\n+chunks\r\n*3\r\n", { maxBytes: 100, maxAreaChunks: 2, shape: "page" }],
+    ["*2\r\n:1\r\n%3\r\n+chunks\r\n*3\r\n", { maxBytes: 100, maxAreaChunks: 2, shape: "schemaPage" }],
+    ["%4\r\n+extra\r\n*10000000\r\n", { maxBytes: 64 * 1024 * 1024, maxAreaChunks: 2, shape: "page" }],
+  ];
+  for (const [wire, limits] of cases) {
+    const reader = new ReplyReader();
+    reader.push(Buffer.from(wire));
+    assert.throws(() => reader.next(limits), /negotiated limit/);
+  }
+});
+
+test("area budget preserves exact-fitting pages, pushes, errors and pipelined tails", () => {
+  const page = "%3\r\n+chunks\r\n*0\r\n+more\r\n#f\r\n+after\r\n_\r\n";
+  for (const [wire, shape] of [[page, "page"], [`*2\r\n:1\r\n${page}`, "schemaPage"], ["*0\r\n", "rows"]] as const) {
+    const limits = { maxBytes: Buffer.byteLength(wire), maxAreaChunks: 2, shape };
+    const reader = new ReplyReader();
+    reader.push(Buffer.from(`>1\r\n+unknown\r\n${wire}+PONG\r\n`));
+    assert.equal(reader.next(limits)?.type, "push");
+    assert.deepEqual(reader.next(limits), parse(wire));
+    assert.deepEqual(reader.next(), { type: "simple", value: "PONG" });
+    const tooSmall = new ReplyReader();
+    tooSmall.push(Buffer.from(wire));
+    assert.throws(() => tooSmall.next({ ...limits, maxBytes: limits.maxBytes - 1 }), /negotiated limit/);
+  }
+  const reader = new ReplyReader();
+  reader.push(Buffer.from("-ERR OUT_OF_RANGE details\r\n+PONG\r\n"));
+  assert.equal(reader.next({ maxBytes: 1, maxAreaChunks: 1 })?.type, "error");
+  assert.deepEqual(reader.next(), { type: "simple", value: "PONG" });
+});
 
 function parse(text: string | Buffer): ChunkReply {
   const parsed = parseReply(typeof text === "string" ? Buffer.from(text, "latin1") : text);
