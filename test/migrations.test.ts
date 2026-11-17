@@ -88,6 +88,7 @@ test("migration table statements participate in schema cache invalidation", () =
   assert.equal(tableOfStatement("MIGRATE 'step' CREATE TABLE IF NOT EXISTS world (v u8)"), "world");
   assert.equal(tableOfStatement("drop table if exists world"), "world");
   assert.equal(tableOfStatement("DROP\tTABLE  IF  EXISTS world"), "world");
+  assert.equal(tableOfStatement("CREATE\tTABLE  IF\tNOT  EXISTS world (v u8)"), "world");
 });
 
 test("migration transport failures retain their cause and do not retry or send later steps", async () => {

@@ -170,15 +170,24 @@ test("the schema cache follows changes another client makes", async () => {
 test("guarded drop and create clear the cached schema of the named table", async () => {
   const server = await startServer();
   try {
+    const admin = await connectUri(`${server.uri}t`);
     const client = await connectUri(`${server.uri}t`);
     await client.execute("CREATE TABLE IF NOT EXISTS t (v u8) CHUNK 2 x 2");
     await client.setBlock(0, 0, { v: 7 });
     assert.deepEqual(await client.getBlock(0, 0), { v: 7 });
+
+    // Another client re-creates the table, so only the guarded drop clears the cached u8 layout.
     await client.execute("DROP TABLE IF EXISTS t");
-    await client.execute("CREATE TABLE IF NOT EXISTS t (v u64) CHUNK 2 x 2");
-    await client.setBlock(0, 0, { v: 7n });
-    assert.deepEqual(await client.getBlock(0, 0), { v: 7n });
-    await client.close();
+    await admin.execute("CREATE TABLE t (v u64) CHUNK 2 x 2");
+    await admin.setBlock(0, 0, { v: 9n });
+    assert.deepEqual(await client.getBlock(0, 0), { v: 9n });
+
+    // Another client drops the table, so only the guarded create clears the cached u64 layout.
+    await admin.execute("DROP TABLE t");
+    await client.execute("CREATE TABLE IF NOT EXISTS t (v u8) CHUNK 2 x 2");
+    await client.setBlock(0, 0, { v: 7 });
+    assert.deepEqual(await client.getBlock(0, 0), { v: 7 });
+    await Promise.all([admin.close(), client.close()]);
   } finally {
     await server.stop();
   }
