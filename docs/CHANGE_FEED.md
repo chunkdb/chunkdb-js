@@ -46,7 +46,7 @@ Resync events identify the position from which you must rebuild state, with null
 Unknown push kinds are fully decoded and ignored without consuming an ordinary reply or advancing ACK eligibility.
 Use `area` for inclusive chunk coordinates, `columns` for projection, `noBefore` to omit before rows, or `chunks` for raw forms.
 For three-axis tables, use `area3D: { cx0, cy0, cz0, cx1, cy1, cz1 }` instead of `area`.
-Rows follow the schema event's projected column order.
+Rows follow the requested block-column order, including the first change before a schema event; chunk metadata remains complete.
 Coordinates can include a third axis when `dims` is 3; entry extensions are ignored after the known prefix.
 Close watches separately from their originating client or pool.
 

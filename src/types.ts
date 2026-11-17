@@ -180,6 +180,7 @@ export interface ChunkWatchOptions {
   area?: { cx0: number; cy0: number; cx1: number; cy1: number };
   area3D?: ChunkBox3D;
   after?: ChunkPosition;
+  /** Block columns in the requested order; chunk metadata remains complete. */
   columns?: readonly string[];
   noBefore?: boolean;
   chunks?: boolean;

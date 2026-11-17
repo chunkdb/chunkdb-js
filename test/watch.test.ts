@@ -143,6 +143,32 @@ test("WATCH fetches an uncached event schema on another socket", async () => {
   } finally { await client.close(); await server.close(); }
 });
 
+test("WATCH fallback keeps projected column IDs and order after a rename", async () => {
+  let descriptions = 0;
+  const server = await startFakeServer(({ line }) => {
+    if (line === "HELLO 3") return FAKE_HELLO;
+    if (line === "DESCRIBE t") {
+      return ++descriptions === 1 ? describeReply("u8") : describeReply("u64")
+        .replace(`${bulk("version")}:1`, `${bulk("version")}:2`).replace(bulk("h"), bulk("renamed"));
+    }
+    if (line === "WATCH t COLUMNS h, id") return `+OK ${EPOCH} 1\r\n` +
+      `>7\r\n${bulk("change")}${bulk(EPOCH)}:2\r\n:1234\r\n_\r\n:2\r\n*1\r\n*4\r\n:-1\r\n:2\r\n_\r\n*2\r\n:9007199254740993\r\n:3\r\n`;
+    if (line === "UNWATCH") return "+OK\r\n";
+    throw new Error(line);
+  });
+  const client = new ChunkClient({ port: server.port });
+  try {
+    const watch = await client.watch("t", { columns: ["h", "id"] });
+    try {
+      const event = (await watch.next()).value;
+      assert.equal(event.kind, "change");
+      assert.deepEqual(event.blocks[0].after, { renamed: 9007199254740993n, id: 3 });
+      assert.deepEqual(Object.keys(event.blocks[0].after!), ["renamed", "id"]);
+      assert.equal(descriptions, 2);
+    } finally { await watch.close(); }
+  } finally { await client.close(); await server.close(); }
+});
+
 test("WATCH refuses to decode an unavailable historical schema", async () => {
   const server = await startFakeServer(({ line }) => {
     if (line === "HELLO 3") return FAKE_HELLO;
