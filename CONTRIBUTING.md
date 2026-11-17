@@ -13,6 +13,8 @@ npm run build
 npm run test:unit
 ```
 
+The unit test command also checks the types of source and test files; run `npm run test:types` for that check alone.
+
 For the full suite, including integration tests, keep a chunkdb checkout beside this repository or set `CHUNKDB_REPO_ROOT` to its absolute path:
 
 ```bash

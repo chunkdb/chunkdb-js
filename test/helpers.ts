@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import net from "node:net";
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, type ChildProcessByStdio } from "node:child_process";
+import type { Readable } from "node:stream";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -10,7 +11,7 @@ import { startScramLogin } from "../src/scram";
 import { testTlsFiles, type TestCertificateKind } from "./tls-cert";
 
 export interface StartedServer {
-  process: ChildProcessWithoutNullStreams;
+  process: ChildProcessByStdio<null, Readable, Readable>;
   host: string;
   port: number;
   /** "users": the administrator below logs in; "none": `--auth none`. */

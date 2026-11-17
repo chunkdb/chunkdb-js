@@ -415,7 +415,7 @@ test("foundation: raw AREA metadata uses described 3D coordinate prefixes and ig
       const description = addFields(parsed(describeReply("u8")), { dims: integer(3n) });
       assert.equal(description.type, "map");
       for (const name of ["chunk", "large"]) {
-        const entry = description.entries.find(([key]) => key.type === "bulk" && key.value.toString() === name)!;
+        const entry: [ChunkReply, ChunkReply] = description.entries.find(([key]) => key.type === "bulk" && key.value.toString() === name)!;
         assert.equal(entry[1].type, "array");
         entry[1].items.push(integer(2n));
       }

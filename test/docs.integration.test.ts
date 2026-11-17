@@ -50,7 +50,7 @@ ${snippets}
       fs.writeFileSync(filename, code.replaceAll('from "@chunkdb/client"', `from ${JSON.stringify(packageUrl)}`));
       // The README promises repeatable startup; execute its exact program twice.
       for (let attempt = 0; attempt < (page === "README.md" ? 2 : 1); attempt++) {
-        const { stdout, stderr } = await run(path.join(root, "node_modules/.bin/tsx"), [filename], {
+        const { stdout, stderr }: { stdout: string; stderr: string } = await run(path.join(root, "node_modules/.bin/tsx"), [filename], {
           cwd: root, env: { ...process.env, CHUNKDB_URI: `${server.uri}world` }, timeout: 12000,
         });
         assert.equal(stderr, "", `${page}: unexpected standard error`);
