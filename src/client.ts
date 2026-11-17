@@ -198,7 +198,9 @@ const DEFAULT_TIMEOUT_MS = 5000;
 const DEFAULT_TABLE = "";
 const DEFAULT_TRANSACTION_RETRIES = 5;
 
-const TABLE_STATEMENT = /^\s*(?:migrate\s+'[a-z_][a-z0-9_]{0,62}'\s+)?(?:create|alter|drop)\s+table\s+([a-z_][a-z0-9_]*)/i;
+// The name follows the guard in `CREATE TABLE IF NOT EXISTS` and `DROP TABLE IF EXISTS`.
+const TABLE_STATEMENT =
+  /^\s*(?:migrate\s+'[a-z_][a-z0-9_]{0,62}'\s+)?(?:create\s+table\s+(?:if\s+not\s+exists\s+)?|alter\s+table\s+|drop\s+table\s+(?:if\s+exists\s+)?)([a-z_][a-z0-9_]*)/i;
 const RIGHTS: readonly ChunkRight[] = ["READ", "WRITE", "ADMIN"];
 const CHANNEL_BINDINGS: readonly ChunkChannelBinding[] = ["auto", "off", "require"];
 // The statements of the login, sent while connecting.
