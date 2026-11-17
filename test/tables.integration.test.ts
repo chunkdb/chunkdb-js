@@ -166,3 +166,20 @@ test("the schema cache follows changes another client makes", async () => {
     await server.stop();
   }
 });
+
+test("guarded drop and create clear the cached schema of the named table", async () => {
+  const server = await startServer();
+  try {
+    const client = await connectUri(`${server.uri}t`);
+    await client.execute("CREATE TABLE IF NOT EXISTS t (v u8) CHUNK 2 x 2");
+    await client.setBlock(0, 0, { v: 7 });
+    assert.deepEqual(await client.getBlock(0, 0), { v: 7 });
+    await client.execute("DROP TABLE IF EXISTS t");
+    await client.execute("CREATE TABLE IF NOT EXISTS t (v u64) CHUNK 2 x 2");
+    await client.setBlock(0, 0, { v: 7n });
+    assert.deepEqual(await client.getBlock(0, 0), { v: 7n });
+    await client.close();
+  } finally {
+    await server.stop();
+  }
+});
