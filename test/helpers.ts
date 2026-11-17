@@ -170,6 +170,7 @@ function removeServerFiles(dataDir: string): void {
  */
 export async function startServer(options: {
   tls?: boolean; auth?: "users" | "none"; slotMaxBytes?: number; feedLingerMs?: number; backupDir?: string;
+  maxAreaChunks?: number; maxAreaResponseBytes?: number; txnMaxWrittenChunks?: number; txnMaxReadChunks?: number;
   /** The key and signature algorithm of the TLS certificate; RSA with SHA-256 by default. */
   tlsCertificate?: TestCertificateKind;
   /** `--auth-channel-binding`. */
@@ -203,6 +204,9 @@ export async function startServer(options: {
   if (options.slotMaxBytes !== undefined) args.push("--slot-max-bytes", String(options.slotMaxBytes));
   if (options.feedLingerMs !== undefined) args.push("--feed-linger-ms", String(options.feedLingerMs));
   if (options.backupDir !== undefined) args.push("--backup-dir", options.backupDir);
+  for (const [flag, value] of [["--max-area-chunks", options.maxAreaChunks], ["--max-area-response-bytes", options.maxAreaResponseBytes], ["--txn-max-written-chunks", options.txnMaxWrittenChunks], ["--txn-max-read-chunks", options.txnMaxReadChunks]] as const) {
+    if (value !== undefined) args.push(flag, String(value));
+  }
   if (options.authChannelBinding !== undefined) args.push("--auth-channel-binding", options.authChannelBinding);
 
   if (auth === "users") {
