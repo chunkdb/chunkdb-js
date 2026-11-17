@@ -91,6 +91,11 @@ test("foundation: keys of any name keep later known fields", () => {
   assert.equal(error.reason, "test");
   assert.equal(error.detail, "detail");
   assert.equal(new ChunkServerError("FUTURE", "=x a=b", { phase: "response" }).detail, "=x a=b");
+  assert.deepEqual({ ...new ChunkServerError("FUTURE", "a=b=c rest", { phase: "response" }).keys }, { a: "b=c" });
+  assert.deepEqual({ ...new ChunkServerError("FUTURE", "x.y/1=v rest", { phase: "response" }).keys }, { "x.y/1": "v" });
+  const empty = new ChunkServerError("FUTURE", "a= rest", { phase: "response" });
+  assert.deepEqual({ ...empty.keys }, { a: "" });
+  assert.equal(empty.detail, "rest");
 });
 
 test("foundation: optional HELLO metadata and unknown maps leave known fields intact", () => {
