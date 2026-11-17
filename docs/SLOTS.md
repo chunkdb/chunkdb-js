@@ -4,11 +4,11 @@ A durable slot retains change history across disconnects and checkpoints.
 Create one before producing changes and store each applied position with your consumer output.
 Read the [change feed](CHANGE_FEED.md) first for positions and event types.
 
-Run this inside the [first write and read](../README.md#first-write-and-read) example's `try` block, after creating `world`:
+Run this inside the [first write and read](../README.md#first-write-and-read) example's `try` block, after creating `world_js`:
 
 ```ts docs-check
-await client.createSlot("world", "consumer");
-const watch = await client.watch("world", { slot: "consumer" });
+await client.createSlot("world_js", "consumer");
+const watch = await client.watch("world_js", { slot: "consumer" });
 try {
   await client.setBlock(1, 0, { id: 8, light: 10 });
   while (true) {
@@ -24,8 +24,8 @@ try {
 } finally {
   await watch.close();
 }
-console.log((await client.listSlots("world"))[0].lost);
-await client.dropSlot("world", "consumer");
+console.log((await client.listSlots("world_js"))[0].lost);
+await client.dropSlot("world_js", "consumer");
 ```
 
 ```output

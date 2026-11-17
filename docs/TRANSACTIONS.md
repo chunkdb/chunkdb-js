@@ -2,7 +2,7 @@
 
 A transaction reads one snapshot and publishes all its writes together at commit.
 Use it when two block updates must succeed together.
-Run this inside the [first write and read](../README.md#first-write-and-read) example's `try` block, after creating `world`:
+Run this inside the [first write and read](../README.md#first-write-and-read) example's `try` block, after creating `world_js`:
 
 ```ts docs-check
 await client.setBlock(10, 4, { id: 23, light: 15 });

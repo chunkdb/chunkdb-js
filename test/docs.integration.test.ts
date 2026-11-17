@@ -34,32 +34,41 @@ for (const page of pages) {
     try {
       server = await startServer({ backupDir });
       const boundary = "--chunkdb-doc-example-end--\n";
-      const snippets = blocks.map((block) => `${block[1]}\nprocess.stdout.write(${JSON.stringify(boundary)});`).join("\n");
-      const code = (page === "README.md" || page === "docs/CONNECTIONS.md") ? snippets : `
+      // Each README example is a complete program and runs on its own; the
+      // snippets of a guide run together in one program.
+      const groups = page === "README.md" ? blocks.map((block) => [block]) : [blocks];
+      const programs = groups.map((group, number) => {
+        const snippets = group.map((block) => `${block[1]}\nprocess.stdout.write(${JSON.stringify(boundary)});`).join("\n");
+        const code = (page === "README.md" || page === "docs/CONNECTIONS.md") ? snippets : `
 import { connectUri, connectPool, emptyChunk, ChunkMigrationError } from "@chunkdb/client";
 const client = await connectUri(process.env.CHUNKDB_URI!);
 try {
   await client.migrate([{
-    name: "world_table",
-    statement: "CREATE TABLE world (id u16, light u4 DEFAULT 15) CHUNK 16 x 16",
+    name: "world_js_table",
+    statement: "CREATE TABLE world_js (id u16, light u4 DEFAULT 15) CHUNK 16 x 16",
   }]);
 ${snippets}
 } finally { await client.close(); }
 `;
-      const filename = path.join(temporary, "example.mts");
-      fs.writeFileSync(filename, code.replaceAll('from "@chunkdb/client"', `from ${JSON.stringify(packageUrl)}`));
-      // The README promises repeatable startup; execute its exact program twice.
+        const filename = path.join(temporary, `example-${number + 1}.mts`);
+        fs.writeFileSync(filename, code.replaceAll('from "@chunkdb/client"', `from ${JSON.stringify(packageUrl)}`));
+        return { filename, group };
+      });
+      // The README promises repeatable startup; execute its exact programs twice.
       for (let attempt = 0; attempt < (page === "README.md" ? 2 : 1); attempt++) {
-        const { stdout, stderr } = await run(path.join(root, "node_modules/.bin/tsx"), [filename], {
-          cwd: root, env: { ...process.env, CHUNKDB_URI: `${server.uri}world` }, timeout: 12000,
-        });
-        assert.equal(stderr, "", `${page}: unexpected standard error`);
-        const outputs = stdout.replaceAll("\r\n", "\n").split(boundary);
-        assert.equal(outputs.length, blocks.length + 1, `${page}: missing example boundary`);
-        for (let index = 0; index < blocks.length; index++) {
-          assert.equal(outputs[index], blocks[index][2].replaceAll("\r\n", "\n"), `${page}: example ${index + 1}`);
+        for (const { filename, group } of programs) {
+          const { stdout, stderr } = await run(path.join(root, "node_modules/.bin/tsx"), [filename], {
+            cwd: root, env: { ...process.env, CHUNKDB_URI: `${server.uri}world_js` }, timeout: 12000,
+          });
+          assert.equal(stderr, "", `${page}: unexpected standard error`);
+          const outputs = stdout.replaceAll("\r\n", "\n").split(boundary);
+          assert.equal(outputs.length, group.length + 1, `${page}: missing example boundary`);
+          for (let index = 0; index < group.length; index++) {
+            const number = blocks.indexOf(group[index]) + 1;
+            assert.equal(outputs[index], group[index][2].replaceAll("\r\n", "\n"), `${page}: example ${number}`);
+          }
+          assert.equal(outputs.at(-1), "", `${page}: unexpected output after examples`);
         }
-        assert.equal(outputs.at(-1), "", `${page}: unexpected output after examples`);
       }
     } finally {
       try { await server?.stop(); }

@@ -7,6 +7,7 @@ This client uses CQL protocol 3 with chunkdb 2.x; see the server's [compatibilit
 ## Unreleased
 
 ### Added
+- The README has a checked "World in five minutes" program that fills an area, reads it and watches a change; `examples/world.ts` is the same program and imports `@chunkdb/client`. The README examples use the `world_js` table, so they do not clash with the server quick start's `world`. ([chunkdb#152](https://github.com/chunkdb/chunkdb/issues/152))
 - Add explicit bounded area pages with exact coordinate cursors and enforce negotiated area reply budgets before decoding. ([chunkdb#136](https://github.com/chunkdb/chunkdb/issues/136)).
 - Add three-axis data methods, chunk metadata and selected-column writes, checked sectioned forms, and revision-aware scans with retained tombstones. ([chunkdb#133](https://github.com/chunkdb/chunkdb/issues/133)).
 - Logins over TLS are bound to their connection (SCRAM channel binding: `tls-exporter` on TLS 1.3, `tls-server-end-point` on TLS 1.2), so a relay that ends TLS fails the login; the `channelBinding` option (`"auto"`, `"off"`, `"require"`) turns it off or requires TLS. `createUser` accepts `requiresChannelBinding`, `setRequiresChannelBinding` changes it and `listUsers` returns it. (chunkdb/chunkdb#162)
@@ -17,6 +18,7 @@ This client uses CQL protocol 3 with chunkdb 2.x; see the server's [compatibilit
 - Generic `BACKUP TO` integration coverage checks summaries and copied data over plain TCP and TLS
 
 ### Fixed
+- Errors on a first connection name the next step: URI errors show the expected form and schemes, `chunk://` against a TLS server points to `chunk://` versus `chunks://`, a user without a password fails before connecting, `connectUri` refuses a missing URI instead of connecting to 127.0.0.1:4242, and an unknown column fails as a request error with a `DESCRIBE` hint. ([chunkdb#152](https://github.com/chunkdb/chunkdb/issues/152))
 - Server error `keys` keep diagnostic keys of any name, such as `Future-Key`, and the known fields after them, instead of stopping at the first key that is not lowercase snake_case.
 - The package type declarations resolve under TypeScript `--module NodeNext`; relative imports in them now carry `.js` extensions.
 - `execute` with `CREATE TABLE IF NOT EXISTS` or `DROP TABLE IF EXISTS` clears the cached schema of the named table, so typed reads and writes after a guarded re-creation use the new column types.
