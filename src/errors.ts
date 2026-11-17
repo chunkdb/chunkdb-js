@@ -1,4 +1,4 @@
-import type { ChunkErrorPhase, ChunkMigration, ChunkMigrationResult } from "./types";
+import type { ChunkErrorPhase, ChunkMigration, ChunkMigrationResult } from "./types.js";
 
 export type ChunkRetryClass = "reread" | "rerun" | "backoff" | "unknown_outcome" | "fatal";
 

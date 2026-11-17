@@ -1,5 +1,5 @@
-import type { ChunkReply } from "./protocol";
-import type { ChunkBits } from "./values";
+import type { ChunkReply } from "./protocol.js";
+import type { ChunkBits } from "./values.js";
 
 export type ChunkScheme = "chunk" | "chunks";
 

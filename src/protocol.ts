@@ -1,4 +1,4 @@
-import { ChunkProtocolError } from "./errors";
+import { ChunkProtocolError } from "./errors.js";
 
 // RESP3 replies (docs/PROTOCOL.md "Replies"). Integers are bigints: a `uN`
 // value may be above the i64 range, and nothing is lost on the way.
