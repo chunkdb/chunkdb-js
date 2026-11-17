@@ -172,11 +172,6 @@ export class ChunkWatch implements AsyncIterableIterator<ChunkWatchEvent> {
     try {
       const layout = parseDescribe(await descriptions.execute(`DESCRIBE ${checkName(table, "a table name")}`));
       const schema = layout.schema;
-      const columnIds = columnNames?.map((name) => {
-        const index = schema.columns.findIndex((column) => column.name === name);
-        if (index === -1) throw requestError(`unknown column ${name}`, "WATCH");
-        return layout.ids[index];
-      });
       // Ordinary connections occupy statement workers; release this one before WATCH.
       await descriptions.close();
       const reply = await stream[kWatchStream](statement, (push) => {
@@ -205,6 +200,12 @@ export class ChunkWatch implements AsyncIterableIterator<ChunkWatchEvent> {
         if (match === null || BigInt(match[2]) > MAX_UINT64) throw malformed("invalid WATCH start position");
         start = { epoch: match[1].toLowerCase(), revision: BigInt(match[2]) };
       }
+      // The server has accepted the names; a name DESCRIBE did not list was added after it.
+      const columnIds = columnNames?.map((name) => {
+        const index = schema.columns.findIndex((column) => column.name === name);
+        if (index === -1) throw malformed(`projected column ${name} is unavailable; re-read state before resuming`);
+        return layout.ids[index];
+      });
       watch = new ChunkWatch(stream, createClient, table, start, schema.version, projectedColumns(layout, columnIds),
         options.slot !== undefined, reply.type === "map", schema.dims ?? 2, schema.chunkColumns ?? [], schema.epoch ?? start.epoch,
         columnIds === undefined ? undefined : { epoch: schema.epoch ?? start.epoch, names: columnNames!, ids: columnIds });

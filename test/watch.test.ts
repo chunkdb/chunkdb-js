@@ -169,6 +169,35 @@ test("WATCH fallback keeps projected column IDs and order after a rename", async
   } finally { await client.close(); await server.close(); }
 });
 
+test("WATCH returns the server error for an unknown projected column", async () => {
+  const server = await startFakeServer(({ line }) => {
+    if (line === "HELLO 3") return FAKE_HELLO;
+    if (line === "DESCRIBE t") return describeReply("u8");
+    if (line === "WATCH t COLUMNS missing") return "-ERR INVALID_ARGUMENT unknown feed column: missing\r\n";
+    throw new Error(line);
+  });
+  const client = new ChunkClient({ port: server.port });
+  try {
+    await assert.rejects(client.watch("t", { columns: ["missing"] }), (error: unknown) =>
+      error instanceof ChunkServerError && error.serverCode === "INVALID_ARGUMENT" && error.serverMessage === "unknown feed column: missing");
+  } finally { await client.close(); await server.close(); }
+});
+
+test("WATCH refuses a projected column added after its description", async () => {
+  const server = await startFakeServer(({ line }) => {
+    if (line === "HELLO 3") return FAKE_HELLO;
+    if (line === "DESCRIBE t") return describeReply("u8");
+    if (line === "WATCH t COLUMNS added, id") return `+OK ${EPOCH} 1\r\n`;
+    if (line === "UNWATCH") return "+OK\r\n";
+    throw new Error(line);
+  });
+  const client = new ChunkClient({ port: server.port });
+  try {
+    await assert.rejects(client.watch("t", { columns: ["added", "id"] }), (error: unknown) =>
+      error instanceof ChunkProtocolError && /projected column added is unavailable/.test(error.message));
+  } finally { await client.close(); await server.close(); }
+});
+
 test("WATCH refuses to decode an unavailable historical schema", async () => {
   const server = await startFakeServer(({ line }) => {
     if (line === "HELLO 3") return FAKE_HELLO;
