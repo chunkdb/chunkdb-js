@@ -19,6 +19,7 @@ This client uses CQL protocol 3 with chunkdb 2.x; see the server's [compatibilit
 
 ### Fixed
 - Errors on a first connection name the next step: URI errors show the expected form and schemes, `chunk://` against a TLS server points to `chunk://` versus `chunks://`, a user without a password fails before connecting, `connectUri` refuses a missing URI instead of connecting to 127.0.0.1:4242, and an unknown column fails as a request error with a `DESCRIBE` hint. ([chunkdb#152](https://github.com/chunkdb/chunkdb/issues/152))
+- Decode projected WATCH rows in the requested order from the first change and retain the projection through column renames, while keeping complete chunk metadata.
 - Server error `keys` keep diagnostic keys of any name, such as `Future-Key`, and the known fields after them, instead of stopping at the first key that is not lowercase snake_case.
 - The package type declarations resolve under TypeScript `--module NodeNext`; relative imports in them now carry `.js` extensions.
 - `execute` with `CREATE TABLE IF NOT EXISTS` or `DROP TABLE IF EXISTS` clears the cached schema of the named table, so typed reads and writes after a guarded re-creation use the new column types.

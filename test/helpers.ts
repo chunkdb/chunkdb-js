@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import net from "node:net";
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, type ChildProcessByStdio } from "node:child_process";
+import type { Readable } from "node:stream";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -10,7 +11,7 @@ import { startScramLogin } from "../src/scram";
 import { testTlsFiles, type TestCertificateKind } from "./tls-cert";
 
 export interface StartedServer {
-  process: ChildProcessWithoutNullStreams;
+  process: ChildProcessByStdio<null, Readable, Readable>;
   host: string;
   port: number;
   /** "users": the administrator below logs in; "none": `--auth none`. */
@@ -175,19 +176,18 @@ export async function startServer(options: {
   /** `--auth-channel-binding`. */
   authChannelBinding?: "allow" | "require";
 } = {}): Promise<StartedServer> {
+  const tlsEnabled = options.tls ?? false;
+  const binary = path.resolve(resolveServerBinary(tlsEnabled));
+  assert.ok(fs.existsSync(binary), `server binary not found: ${binary}`);
   const host = "127.0.0.1";
   const port = await pickFreePort();
   const auth = options.auth ?? "users";
   const user = auth === "users" ? "admin" : "";
   const password = auth === "users" ? "admin p@ss:word/1" : "";
-  const tlsEnabled = options.tls ?? false;
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "chunkdb-node-sdk-"));
   const scheme = tlsEnabled ? "chunks" : "chunk";
   const credentials = user === "" ? "" : `${user}:${encodeURIComponent(password)}@`;
   const uri = `${scheme}://${credentials}${host}:${port}/`;
-  const binary = resolveServerBinary(tlsEnabled);
-
-  assert.ok(fs.existsSync(binary), `server binary not found: ${binary}`);
 
   const args = [
     "--listen-uri",
@@ -224,24 +224,24 @@ export async function startServer(options: {
   }
 
   const child = spawn(binary, args, {
-    cwd: chunkdbRepoRoot(),
     stdio: ["ignore", "pipe", "pipe"],
   });
 
   child.stderr.on("data", () => {});
   child.stdout.on("data", () => {});
 
-  await waitForServer(host, port);
-  // The plaintext probe cannot speak TLS; the non-TLS suites already exercise
-  // the same binary, so a TLS-only mismatch still surfaces there.
-  if (!tlsEnabled) {
-    try {
+  try {
+    await once(child, "spawn");
+    await waitForServer(host, port);
+    // The plaintext probe cannot speak TLS; the non-TLS suites already exercise
+    // the same binary, so a TLS-only mismatch still surfaces there.
+    if (!tlsEnabled) {
       await assertServerSpeaksProtocol3(host, port, user);
-    } catch (error) {
-      child.kill("SIGKILL");
-      removeServerFiles(dataDir);
-      throw error;
     }
+  } catch (error) {
+    child.kill("SIGKILL");
+    removeServerFiles(dataDir);
+    throw new Error(`failed to start chunkdb test server ${binary}`, { cause: error });
   }
 
   return {
