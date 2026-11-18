@@ -150,7 +150,13 @@ test("typed values round-trip through blocks", async () => {
     await assert.rejects(client.setBlock(2, 2, { id: 1024 }), ChunkProtocolError);
     await assert.rejects(client.setBlock(2, 2, { name: "x".repeat(17) }), /at most 16 bytes/);
     await assert.rejects(client.setBlock(2, 2, { id: 1, solid: null }), /cannot be NULL/);
-    await assert.rejects(client.setBlock(2, 2, { nope: 1 }), /no column nope/);
+    await assert.rejects(client.setBlock(2, 2, { nope: 1 }), (error: unknown) => {
+      assert.ok(error instanceof ChunkProtocolError);
+      assert.equal(error.name, "ChunkProtocolError");
+      assert.equal(error.phase, "request");
+      assert.match(error.message, /has no column nope; DESCRIBE \w+ lists its columns/);
+      return true;
+    });
     assert.equal(await client.ping(), "PONG");
     await client.close();
   } finally {

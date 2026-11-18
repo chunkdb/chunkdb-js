@@ -2,19 +2,28 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import fs from "node:fs";
+import path from "node:path";
 import { repoRoot, startServer } from "./helpers";
 
 const run = promisify(execFile);
-test("world example runs as one command and can be run again", { timeout: 20000 }, async () => {
+const root = repoRoot();
+// The README's "World in five minutes" program and its output.
+const section = /^## World in five minutes\n[\s\S]*?^```ts docs-check\n([\s\S]*?)^```\n\s*^```output\n([\s\S]*?)^```/m
+  .exec(fs.readFileSync(path.join(root, "README.md"), "utf8"));
+
+test("world example is the README program and prints its output on every run", { timeout: 20000 }, async () => {
+  assert.ok(section, "README.md: missing the World in five minutes program and output");
+  assert.equal(fs.readFileSync(path.join(root, "examples/world.ts"), "utf8"), section[1], "examples/world.ts differs from README.md");
   const server = await startServer();
   try {
     for (let attempt = 0; attempt < 2; attempt++) {
-      const { stdout } = await run("npm", ["run", "example:world"], {
-        cwd: repoRoot(), env: { ...process.env, CHUNKDB_URI: server.uri }, timeout: 8000,
+      // `@chunkdb/client` resolves to this package's build (npm run build).
+      const { stdout, stderr } = await run(path.join(root, "node_modules/.bin/tsx"), ["examples/world.ts"], {
+        cwd: root, env: { ...process.env, CHUNKDB_URI: `${server.uri}world_js` }, timeout: 8000,
       });
-      assert.match(stdout, /block \{ kind: 1, height: 0 \}/);
-      assert.match(stdout, /area chunks 1/);
-      assert.match(stdout, /watch change \{ kind: 2, height: 42 \}/);
+      assert.equal(stderr, "");
+      assert.equal(stdout, section[2], `run ${attempt + 1}`);
     }
   } finally { await server.stop(); }
 });

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { ChunkBits, ChunkTlsError, connectUri } from "../src/index";
+import { ChunkBits, ChunkConnectionError, ChunkTlsError, connectUri } from "../src/index";
 import { startServer } from "./helpers";
 
 test("TLS: login, typed blocks and a chunk round trip", async () => {
@@ -30,6 +30,13 @@ test("TLS: login, typed blocks and a chunk round trip", async () => {
 
     // Without tlsInsecure the self-signed certificate is refused.
     await assert.rejects(connectUri(server.uri), ChunkTlsError);
+
+    // A plaintext chunk:// login against the TLS listener names the scheme.
+    await assert.rejects(connectUri(server.uri.replace(/^chunks:/, "chunk:")), (error: unknown) => {
+      assert.ok(error instanceof ChunkConnectionError);
+      assert.match(error.message, /chunk:\/\/ uses plaintext and chunks:\/\/ uses TLS/);
+      return true;
+    });
   } finally {
     await server.stop();
   }

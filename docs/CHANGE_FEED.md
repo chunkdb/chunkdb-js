@@ -4,10 +4,10 @@ A change feed reports committed block updates as an asynchronous stream.
 A revision orders commits; an epoch identifies a table across dropping and recreating it.
 Save both as a position when you need to resume.
 
-Run this inside the [first write and read](../README.md#first-write-and-read) example's `try` block, after creating `world`:
+Run this inside the [first write and read](../README.md#first-write-and-read) example's `try` block, after creating `world_js`:
 
 ```ts docs-check
-const watch = await client.watch("world");
+const watch = await client.watch("world_js");
 try {
   await client.setBlock(0, 0, { id: 7, light: 9 });
   for await (const event of watch) {

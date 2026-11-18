@@ -37,10 +37,11 @@ Mark executable TypeScript blocks in `README.md` and `docs/*.md` with `ts docs-c
 Follow each block with an `output` fence containing its exact standard output.
 Every TypeScript block in these pages must be marked, and every marked block must have output.
 
-README and connections blocks run as complete programs against fresh servers.
+README and connections blocks run as complete programs against fresh servers; each README block runs on its own, twice, on one server.
+`examples/world.ts` must equal the README's World in five minutes program.
 Guide blocks run in page order inside a connected client's `try` block.
-The runner creates the README's `world` table and imports the helpers named by the guides.
-It supplies an authenticated URI with `/world` as its path.
+The runner creates the README's `world_js` table and imports the helpers named by the guides.
+It supplies an authenticated URI with `/world_js` as its path.
 Backup examples get an empty server backup directory.
 
 The runner resolves `@chunkdb/client` to the local built package, so it checks packaged exports.

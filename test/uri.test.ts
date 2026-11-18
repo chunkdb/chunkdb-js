@@ -35,6 +35,16 @@ test("URI credentials are percent-decoded", () => {
   assert.throws(() => parseChunkUri("chunk://:secret@127.0.0.1/"), /password without a user/);
 });
 
+test("URI errors show the expected form", () => {
+  const form = /chunk:\/\/user:password@host:4242\/table/;
+  assert.throws(() => parseChunkUri("127.0.0.1:47421"), (error: Error) => /invalid chunk URI/.test(error.message) && form.test(error.message));
+  assert.throws(() => parseChunkUri("localhost:4242"), /unsupported chunk URI scheme: localhost; use chunk:\/\/ or chunks:\/\/ \(TLS\)/);
+  assert.throws(() => parseChunkUri("http://127.0.0.1:4242/"), /scheme: http; use chunk:\/\/ or chunks:\/\//);
+  assert.throws(() => parseChunkUri("chunk://127.0.0.1:0/"), /port: 0; use a port from 1 to 65535/);
+  assert.throws(() => parseChunkUri("chunk://bot:50%@127.0.0.1/"), /percent-encode reserved characters, for example % as %25/);
+  assert.throws(() => tableFromUriPath("/a/b"), form);
+});
+
 test("format chunk URI", () => {
   const text = formatChunkUri({
     scheme: "chunk",

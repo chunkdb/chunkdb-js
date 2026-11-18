@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import net from "node:net";
 import { once } from "node:events";
-import { ChunkClient, ChunkConnectionError, ChunkTimeoutError, ChunkTlsError } from "../src/index";
+import { ChunkClient, ChunkConnectionError, ChunkTimeoutError, ChunkTlsError, connectUri } from "../src/index";
 import { FAKE_HELLO, startFakeServer } from "./fake-server";
 
 test("connection refused names the endpoint and preserves native code and cause", async () => {
@@ -96,4 +96,59 @@ test("command timeout identifies the command and its timeout setting", async () 
       return true;
     });
   } finally { await client.close(); await server.close(); }
+});
+
+test("a reset during connect points to chunk:// versus chunks://", async () => {
+  const sockets = new Set<net.Socket>();
+  const listener = net.createServer((socket) => {
+    sockets.add(socket);
+    socket.on("error", () => {});
+    socket.once("data", () => socket.resetAndDestroy());
+  });
+  await new Promise<void>((resolve) => listener.listen(0, "127.0.0.1", resolve));
+  const address = listener.address();
+  assert.ok(address && typeof address !== "string");
+  const client = new ChunkClient({ host: "127.0.0.1", port: address.port });
+  try {
+    await assert.rejects(client.connect(), (error: unknown) => {
+      assert.ok(error instanceof ChunkConnectionError);
+      assert.equal(error.code, "ECONNRESET");
+      assert.match(error.message, new RegExp(`connection reset by 127\\.0\\.0\\.1:${address.port}; check that chunk:// uses plaintext and chunks:// uses TLS`));
+      return true;
+    });
+  } finally {
+    await client.close();
+    for (const socket of sockets) socket.destroy();
+    await new Promise<void>((resolve) => listener.close(() => resolve()));
+  }
+});
+
+test("a user without a password fails before connecting", async () => {
+  let connections = 0;
+  const listener = net.createServer((socket) => { connections++; socket.destroy(); });
+  await new Promise<void>((resolve) => listener.listen(0, "127.0.0.1", resolve));
+  const address = listener.address();
+  assert.ok(address && typeof address !== "string");
+  const client = new ChunkClient({ uri: `chunk://admin@127.0.0.1:${address.port}/` });
+  try {
+    await assert.rejects(client.connect(), (error: unknown) => {
+      assert.ok(error instanceof ChunkConnectionError);
+      assert.equal(error.phase, "connect");
+      assert.match(error.message, /names user admin without a password; use chunk:\/\/admin:PASSWORD@host:4242\/ or the password option/);
+      return true;
+    });
+    assert.equal(connections, 0);
+  } finally {
+    await client.close();
+    await new Promise<void>((resolve) => listener.close(() => resolve()));
+  }
+});
+
+test("connectUri refuses a missing URI instead of using the defaults", async () => {
+  await assert.rejects(connectUri(undefined as unknown as string), (error: unknown) => {
+    assert.ok(error instanceof ChunkConnectionError);
+    assert.match(error.message, /connectUri needs a chunk URI, got undefined; .*chunk:\/\/user:password@host:4242\/table/);
+    return true;
+  });
+  await assert.rejects(connectUri(""), /got an empty string/);
 });

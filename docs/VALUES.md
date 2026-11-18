@@ -2,7 +2,7 @@
 
 A block is one grid cell with named, typed columns.
 A chunk groups a fixed box of blocks; an area selects chunks by box or radius.
-Run these snippets inside the [first write and read](../README.md#first-write-and-read) example's `try` block, after creating `world`.
+Run these snippets inside the [first write and read](../README.md#first-write-and-read) example's `try` block, after creating `world_js`.
 
 ## Values
 
