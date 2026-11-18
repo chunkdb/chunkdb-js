@@ -113,7 +113,8 @@ On TLS 1.2 a server certificate signed with Ed25519 or Ed448 defines no binding,
 | `ChunkCheckFailedError`, `ChunkCancelledError`, `ChunkStatementTimeoutError`, `ChunkKilledError` | Handle the failure explicitly; these are fatal retry classes. |
 | `ChunkSyntaxError`, `ChunkInvalidArgumentError`, `ChunkOutOfRangeError` | Correct the statement, its values or its size; `reason` names the cause. |
 | `ChunkNoTableError`, `ChunkTableExistsError` | Check the table name and rights; a table without rights is reported as missing. |
-| `ChunkSlotLostError`, `ChunkResyncRequiredError` | Rebuild state and recreate or resume the slot; retained history no longer covers it. |
+| `ChunkSlotLostError` | The slot's retained history or a projected column is gone; rebuild state and recreate the slot. `reason` names the cause. |
+| `ChunkResyncRequiredError` | The `since` revision is below the retained deletion floor; rescan without `since`. `reason` and `floor` describe it. |
 | `ChunkBadRequestError`, `ChunkServerProtocolError`, `ChunkInternalError` | The server refused the framing, the protocol negotiation, or failed; fatal retry classes. |
 | `ChunkUnknownCommandError` | Check command spelling and server capabilities. |
 | `ChunkMigrationError` | Inspect the failed step, earlier results and cause. |
