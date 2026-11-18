@@ -1,8 +1,8 @@
-import type { ChunkClient } from "./client";
-import { ChunkConnectionError, ChunkProtocolError } from "./errors";
-import type { ChunkReply, PushReply } from "./protocol";
-import { integerOf, mapOf, parseColumns, schemaVersionOf, textOf } from "./schema";
-import { slotName } from "./slots";
+import type { ChunkClient } from "./client.js";
+import { ChunkConnectionError, ChunkProtocolError } from "./errors.js";
+import type { ChunkReply, PushReply } from "./protocol.js";
+import { integerOf, mapOf, parseColumns, parseDescribe, schemaVersionOf, textOf, type TableLayout } from "./schema.js";
+import { slotName } from "./slots.js";
 import type {
   ChunkColumn,
   ChunkPosition,
@@ -10,10 +10,9 @@ import type {
   ChunkWatchCoordinate,
   ChunkWatchEvent,
   ChunkWatchOptions,
-  ChunkTableSchema,
   ChunkSchemaVersion,
-} from "./types";
-import { ChunkBits, checkCoordinate, checkInt64Coordinate, checkName, requestError, valueFromReply } from "./values";
+} from "./types.js";
+import { ChunkBits, checkCoordinate, checkInt64Coordinate, checkName, requestError, valueFromReply } from "./values.js";
 
 // Internal stream access; ordinary operations never switch their connection to WATCH.
 export const kWatchStream = Symbol("watchStream");
@@ -50,6 +49,15 @@ function copyColumns(columns: readonly ChunkColumn[]): ChunkColumn[] {
     default: column.default instanceof ChunkBits ? new ChunkBits(column.default.length, column.default.toBytes()) :
       column.default instanceof Uint8Array ? Buffer.from(column.default) : column.default,
   }));
+}
+
+function projectedColumns(layout: TableLayout, ids: readonly number[] | undefined): ChunkColumn[] {
+  if (ids === undefined) return layout.schema.columns;
+  return ids.map((id) => {
+    const index = layout.ids.indexOf(id);
+    if (index === -1) throw malformed(`projected column ${id} is unavailable; re-read state before resuming`);
+    return layout.schema.columns[index];
+  });
 }
 
 function coordinate(reply: ChunkReply): ChunkWatchCoordinate {
@@ -145,6 +153,7 @@ export class ChunkWatch implements AsyncIterableIterator<ChunkWatchEvent> {
     dims = 2,
     chunkColumns: ChunkColumn[] = [],
     schemaEpoch = start.epoch,
+    private projection?: { epoch: string; names: readonly string[]; ids: readonly number[] },
   ) {
     this.start = start;
     this.available = start.revision;
@@ -154,13 +163,15 @@ export class ChunkWatch implements AsyncIterableIterator<ChunkWatchEvent> {
 
   static async open(createClient: () => ChunkClient, table: string, options: ChunkWatchOptions): Promise<ChunkWatch> {
     const statement = statementOf(table, options);
+    const columnNames = options.columns === undefined ? undefined : [...options.columns];
     const stream = createClient();
     const descriptions = createClient();
     let watch: ChunkWatch | null = null;
     const early: Array<PushReply | Error> = [];
     let earlyFailure: Error | null = null;
     try {
-      const schema = await descriptions.describe(table);
+      const layout = parseDescribe(await descriptions.execute(`DESCRIBE ${checkName(table, "a table name")}`));
+      const schema = layout.schema;
       // Ordinary connections occupy statement workers; release this one before WATCH.
       await descriptions.close();
       const reply = await stream[kWatchStream](statement, (push) => {
@@ -189,8 +200,15 @@ export class ChunkWatch implements AsyncIterableIterator<ChunkWatchEvent> {
         if (match === null || BigInt(match[2]) > MAX_UINT64) throw malformed("invalid WATCH start position");
         start = { epoch: match[1].toLowerCase(), revision: BigInt(match[2]) };
       }
-      watch = new ChunkWatch(stream, createClient, table, start, schema.version, schema.columns,
-        options.slot !== undefined, reply.type === "map", schema.dims ?? 2, schema.chunkColumns ?? [], schema.epoch ?? start.epoch);
+      // The server has accepted the names; a name DESCRIBE did not list was added after it.
+      const columnIds = columnNames?.map((name) => {
+        const index = schema.columns.findIndex((column) => column.name === name);
+        if (index === -1) throw malformed(`projected column ${name} is unavailable; re-read state before resuming`);
+        return layout.ids[index];
+      });
+      watch = new ChunkWatch(stream, createClient, table, start, schema.version, projectedColumns(layout, columnIds),
+        options.slot !== undefined, reply.type === "map", schema.dims ?? 2, schema.chunkColumns ?? [], schema.epoch ?? start.epoch,
+        columnIds === undefined ? undefined : { epoch: schema.epoch ?? start.epoch, names: columnNames!, ids: columnIds });
       for (const push of early) watch.receive(push);
       if (earlyFailure !== null) watch.fail(earlyFailure);
       return watch;
@@ -328,6 +346,7 @@ export class ChunkWatch implements AsyncIterableIterator<ChunkWatchEvent> {
       if (version < 0 || (dims !== 2 && dims !== 3)) throw malformed("invalid schema version or dimensions");
       const columns = parseColumns(field("columns"), "WATCH");
       const chunkColumns = parseColumns(field("chunk_columns"), "WATCH", true);
+      this.bindProjectionSchema(position.epoch, field("columns"));
       this.schemas.set(this.schemaKey(position.epoch, version), { columns: copyColumns(columns), chunkColumns: copyColumns(chunkColumns), dims });
       return { kind, position, version, dims, columns, chunkColumns };
     }
@@ -351,6 +370,7 @@ export class ChunkWatch implements AsyncIterableIterator<ChunkWatchEvent> {
       const version = schemaVersionOf(items[3], "WATCH");
       if (version < 0) throw malformed("negative schema version");
       const columns = parseColumns(items[4], "WATCH");
+      this.bindProjectionSchema(position.epoch, items[4]);
       this.schemas.set(this.schemaKey(position.epoch, version), { columns: copyColumns(columns), chunkColumns: [], dims: 2 });
       return { kind, position, version, columns };
     }
@@ -380,10 +400,19 @@ export class ChunkWatch implements AsyncIterableIterator<ChunkWatchEvent> {
     if (schemaVersion < 0) throw malformed("negative schema version");
     let schema = this.schemas.get(this.schemaKey(position.epoch, schemaVersion));
     if (schema === undefined) {
-      const described = await this.describe();
+      const layout = await this.describe();
+      const described = layout.schema;
       if (described.epoch !== undefined && described.epoch !== position.epoch) throw malformed("described schema changed its epoch");
       if (described.version !== schemaVersion) throw malformed(`schema version ${schemaVersion} is unavailable; re-read state before resuming`);
-      schema = { columns: described.columns, chunkColumns: described.chunkColumns ?? [], dims: described.dims ?? 2 };
+      if (this.projection !== undefined && this.projection.epoch !== position.epoch) {
+        const ids = this.projection.names.map((name) => {
+          const index = described.columns.findIndex((column) => column.name === name);
+          if (index === -1) throw malformed(`projected column ${name} is unavailable in the new epoch`);
+          return layout.ids[index];
+        });
+        this.projection = { ...this.projection, epoch: position.epoch, ids };
+      }
+      schema = { columns: projectedColumns(layout, this.projection?.ids), chunkColumns: described.chunkColumns ?? [], dims: described.dims ?? 2 };
       this.schemas.set(this.schemaKey(position.epoch, schemaVersion), schema);
     }
     if (schema.dims !== 2 && schema.dims !== 3) throw malformed("unsupported dimensions");
@@ -426,11 +455,19 @@ export class ChunkWatch implements AsyncIterableIterator<ChunkWatchEvent> {
     return epoch + ":" + version;
   }
 
-  private async describe(): Promise<ChunkTableSchema> {
+  private bindProjectionSchema(epoch: string, columns: ChunkReply): void {
+    if (this.projection === undefined || this.projection.epoch === epoch) return;
+    if (columns.type !== "array") throw malformed("schema columns are not an array");
+    // parseColumns has validated each ID; a new epoch owns its own projection.
+    const ids = columns.items.map((column) => integerOf(mapOf(column, "WATCH").get("id")!, "column id", "WATCH"));
+    this.projection = { ...this.projection, epoch, ids };
+  }
+
+  private async describe(): Promise<TableLayout> {
     const client = this.createClient();
     this.description = client;
     try {
-      return await client.describe(this.table);
+      return parseDescribe(await client.execute(`DESCRIBE ${checkName(this.table, "a table name")}`));
     } finally {
       await client.close();
       if (this.description === client) this.description = null;

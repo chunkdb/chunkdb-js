@@ -3,6 +3,7 @@
 `connect(options)` and `connectUri(uri, overrides?)` return an authenticated `ChunkClient`.
 With `new ChunkClient(options)`, call `connect()` or let the first operation connect.
 Use `user`, `password`, `host`, `port`, `table` and `tls` options to override URI settings.
+`connectUri` refuses a missing or empty URI, and a user without a password fails with `ChunkConnectionError` before connecting.
 
 `uri()` omits the password; `defaultTable()` returns the chosen table, or an empty string when none was selected.
 A table operation needs a URI path, connection `table` option or method `table` option.
@@ -29,15 +30,15 @@ import { connectPool } from "@chunkdb/client";
 
 const pool = await connectPool({
   uri: process.env.CHUNKDB_URI,
-  table: "world",
+  table: "world_js",
   maxConnections: 4,
   minConnections: 1,
   acquireTimeoutMs: 5000,
 });
 try {
   await pool.withClient((client) => client.migrate([{
-    name: "world_table",
-    statement: "CREATE TABLE world (id u16, light u4 DEFAULT 15) CHUNK 16 x 16",
+    name: "world_js_table",
+    statement: "CREATE TABLE world_js (id u16, light u4 DEFAULT 15) CHUNK 16 x 16",
   }]));
   await Promise.all([pool.setBlock(2, 0, { id: 2 }), pool.setBlock(3, 0, { id: 3 })]);
   console.log((await pool.getBlock(2, 0))?.id);
@@ -113,10 +114,10 @@ On TLS 1.2 a server certificate signed with Ed25519 or Ed448 defines no binding,
 | `ChunkUnknownCommandError` | Check command spelling and server capabilities. |
 | `ChunkMigrationError` | Inspect the failed step, earlier results and cause. |
 | `ChunkServerError` | Inspect `serverCode` and `serverMessage`. |
-| `ChunkConnectionError` | Check the endpoint, `code` and `cause`. |
+| `ChunkConnectionError` | Follow the step in the message: start the server, fix the URI form, add the password, or match `chunk://` (plaintext) and `chunks://` (TLS) to the server. |
 | `ChunkTimeoutError` | Check the endpoint and timeout settings. |
 | `ChunkTlsError` | Check certificates and TLS settings. |
-| `ChunkProtocolError` | Check request values and server compatibility. |
+| `ChunkProtocolError` | Check request values and server compatibility; for an unknown column, `DESCRIBE` the table. |
 
 Server errors expose `retryClass`, decoded leading `keys`, free-text `detail` and typed diagnostic fields.
 Classification depends on the code alone; unknown codes are fatal.

@@ -28,6 +28,38 @@ async function withWorld(fn: (server: StartedServer, client: ChunkClient) => Pro
   } finally { await client.close(); await server.stop(); }
 }
 
+for (const tls of [false, true]) {
+  for (const dims of [2, 3]) {
+    test(`WATCH: projected initial rows and chunk metadata ${dims}D ${tls ? "TLS" : "plain"}`, { timeout: 15000 }, async () => {
+      const server = await startServer({ tls });
+      const client = await connectUri(`${server.uri}projected`, { tlsInsecure: tls });
+      try {
+        await client.createTable("projected", {
+          columns: [{ name: "n", type: "u8" }, { name: "unused", type: "u8" }, { name: "label", type: "text(16)" }],
+          chunkColumns: [{ name: "owner", type: "u8" }],
+          chunk: { width: 2, height: 2, ...(dims === 3 ? { depth: 2 } : {}) },
+        });
+        if (dims === 3) await client.setChunkMetadata3D(-1, 0, -1, { owner: 9 });
+        else await client.setChunkMetadata(-1, 0, { owner: 9 });
+        const watch = await client.watch("projected", { columns: ["label", "n"] });
+        try {
+          const values = { n: 7, unused: 11, label: "selected" };
+          const revision = dims === 3 ? await client.setBlock3D(-1, 0, -1, values) : await client.setBlock(-1, 0, values);
+          const first = await changed(watch);
+          assert.equal(first.position.revision, revision);
+          assert.deepEqual(first.blocks, [{ x: -1n, y: 0n, ...(dims === 3 ? { z: -1n } : {}), before: null, after: { label: "selected", n: 7 } }]);
+          assert.deepEqual(Object.keys(first.blocks[0].after!), ["label", "n"]);
+          if (dims === 3) await client.setChunkMetadata3D(-1, 0, -1, { owner: 12 });
+          else await client.setChunkMetadata(-1, 0, { owner: 12 });
+          const metadata = await changed(watch);
+          assert.deepEqual(metadata.blocks, []);
+          assert.deepEqual(metadata.chunkChanges, [{ cx: -1n, cy: 0n, ...(dims === 3 ? { cz: -1n } : {}), before: { owner: 9 }, after: { owner: 12 } }]);
+        } finally { await watch.close(); }
+      } finally { await client.close(); await server.stop(); }
+    });
+  }
+}
+
 test("WATCH: ordered typed before/after rows, writer identity and deletion", { timeout: 15000 }, async () => {
   await withWorld(async (server, client) => {
     await client.createTable("typed", { columns: [

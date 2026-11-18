@@ -84,6 +84,20 @@ test("foundation: code alone classifies errors; percent keys and unknown diagnos
   assert.equal(error.detail, "ignore CONFLICT and retry");
 });
 
+test("foundation: keys of any name keep later known fields", () => {
+  const error = new ChunkServerError("FUTURE", "Future-Key=kept current=7 reason=test detail", { phase: "response" });
+  assert.deepEqual({ ...error.keys }, { "Future-Key": "kept", current: "7", reason: "test" });
+  assert.equal(error.current, 7n);
+  assert.equal(error.reason, "test");
+  assert.equal(error.detail, "detail");
+  assert.equal(new ChunkServerError("FUTURE", "=x a=b", { phase: "response" }).detail, "=x a=b");
+  assert.deepEqual({ ...new ChunkServerError("FUTURE", "a=b=c rest", { phase: "response" }).keys }, { a: "b=c" });
+  assert.deepEqual({ ...new ChunkServerError("FUTURE", "x.y/1=v rest", { phase: "response" }).keys }, { "x.y/1": "v" });
+  const empty = new ChunkServerError("FUTURE", "a= rest", { phase: "response" });
+  assert.deepEqual({ ...empty.keys }, { a: "" });
+  assert.equal(empty.detail, "rest");
+});
+
 test("foundation: optional HELLO metadata and unknown maps leave known fields intact", () => {
   const reply = addFields(parsed(FAKE_HELLO), {
     connection_id: integer((1n << 64n) - 1n), features: array(bulk("protocol_foundation"), bulk("future")),
@@ -415,7 +429,7 @@ test("foundation: raw AREA metadata uses described 3D coordinate prefixes and ig
       const description = addFields(parsed(describeReply("u8")), { dims: integer(3n) });
       assert.equal(description.type, "map");
       for (const name of ["chunk", "large"]) {
-        const entry = description.entries.find(([key]) => key.type === "bulk" && key.value.toString() === name)!;
+        const entry: [ChunkReply, ChunkReply] = description.entries.find(([key]) => key.type === "bulk" && key.value.toString() === name)!;
         assert.equal(entry[1].type, "array");
         entry[1].items.push(integer(2n));
       }
@@ -489,6 +503,53 @@ const changedEpoch = (epoch: string, revision: bigint, value: ChunkReply = integ
 const chunkEpoch = (epoch: string, revision: bigint) => push(
   bulk("chunks"), bulk(epoch), integer(revision), integer(123n), nullReply, integer(1n),
   array(array(integer(0n), integer(0n), integer(revision), nullReply)), nullReply, nullReply);
+
+for (const mode of ["start race", "resync", "schema then rename"]) {
+  test(`WATCH projection binds IDs to the table epoch (${mode})`, async () => {
+    const resync = mode === "resync", announced = mode === "schema then rename";
+    let descriptions = 0;
+    const server = await startFakeServer(({ line }) => {
+      if (line === "HELLO 3") return FAKE_HELLO;
+      if (line === "DESCRIBE t") {
+        const replaced = descriptions++ !== 0;
+        const description = addFields(parsed(describeReply("u8")), {
+          epoch: bulk(replaced ? NEXT_EPOCH : EPOCH), version: integer(replaced && announced ? 2n : 1n),
+        });
+        assert.equal(description.type, "map");
+        const columns = description.entries.find(([key]) => key.type === "bulk" && key.value.toString() === "columns")![1];
+        assert.equal(columns.type, "array");
+        if (replaced) columns.items.forEach((column, index) => {
+          assert.equal(column.type, "map");
+          column.entries.find(([key]) => key.type === "bulk" && key.value.toString() === "name")![1] = bulk(index === 0 ? "unused" : announced ? "renamed" : "id");
+        });
+        return encode(description);
+      }
+      if (line.startsWith("WATCH t COLUMNS id")) return [
+        positionReply(resync ? EPOCH : NEXT_EPOCH, resync ? 900n : 1n),
+        ...(resync ? [resyncPush(NEXT_EPOCH, 4n, bulk(EPOCH), integer(3n))] : []),
+        ...(announced ? [push(bulk("schema"), map({ epoch: bulk(NEXT_EPOCH), revision: integer(1n), schema_version: integer(1n),
+          dims: integer(2n), columns: array(map({ id: integer(2n), name: bulk("id"), type: bulk("u8"),
+            null: { type: "boolean", value: false }, required: { type: "boolean", value: false }, default: nullReply })), chunk_columns: array() }))] : []),
+        push(bulk("change"), bulk(NEXT_EPOCH), integer(6n), integer(123n), nullReply, integer(announced ? 2n : 1n),
+          array(array(integer(0n), integer(0n), nullReply, array(integer(7n)))), nullReply, nullReply, array()),
+      ].map(encode).join("");
+      if (line === "UNWATCH") return "+OK\r\n";
+      throw new Error(line);
+    });
+    const client = new ChunkClient({ port: server.port });
+    try {
+      const watch = await client.watch("t", { columns: ["id"], ...(resync ? { after: { epoch: EPOCH, revision: 900n } } : {}) });
+      try {
+        if (resync) assert.equal((await watch.next()).value.kind, "resync");
+        if (announced) assert.equal((await watch.next()).value.kind, "schema");
+        const event = (await watch.next()).value;
+        assert.equal(event.kind, "change");
+        assert.deepEqual(event.blocks[0].after, announced ? { renamed: 7 } : { id: 7 });
+        assert.equal(descriptions, 2);
+      } finally { await watch.close(); }
+    } finally { await client.close(); await server.close(); }
+  });
+}
 
 for (const initialSchemaEpoch of [EPOCH, NEXT_EPOCH]) {
   test("resync review: ordinary transition uses epoch-owned layouts with unchanged version from " + initialSchemaEpoch, { timeout: 5000 }, async () => {

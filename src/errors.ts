@@ -1,4 +1,4 @@
-import type { ChunkErrorPhase, ChunkMigration, ChunkMigrationResult } from "./types";
+import type { ChunkErrorPhase, ChunkMigration, ChunkMigrationResult } from "./types.js";
 
 export type ChunkRetryClass = "reread" | "rerun" | "backoff" | "unknown_outcome" | "fatal";
 
@@ -9,12 +9,12 @@ export function retryClassOf(code: string): ChunkRetryClass {
   return code === "OUTCOME_UNKNOWN" ? "unknown_outcome" : "fatal";
 }
 
-/** Leading structured keys; malformed percent escapes remain opaque diagnostics. */
+/** Leading `key=value` tokens of any key name; malformed percent escapes remain opaque diagnostics. */
 export function parseErrorFields(message: string): { keys: Record<string, string>; message: string } {
   const entries: Array<[string, string]> = [];
   let remaining = message;
   while (true) {
-    const match = /^([a-z_][a-z0-9_]*)=([^\s]*)(?:\s+|$)/.exec(remaining);
+    const match = /^([^\s=]+)=([^\s]*)(?:\s+|$)/.exec(remaining);
     if (match === null) break;
     let value = match[2];
     try { value = decodeURIComponent(value); }

@@ -3,8 +3,8 @@
 import { createHash, createHmac, pbkdf2, pbkdf2Sync, randomBytes, timingSafeEqual } from "node:crypto";
 import { promisify } from "node:util";
 
-import type { ScramChannelBinding } from "./channel-binding";
-import type { ChunkVerifierOptions } from "./types";
+import type { ScramChannelBinding } from "./channel-binding.js";
+import type { ChunkVerifierOptions } from "./types.js";
 
 const pbkdf2Async = promisify(pbkdf2);
 

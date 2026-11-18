@@ -1,8 +1,8 @@
 import { isUtf8 } from "node:buffer";
-import { ChunkProtocolError } from "./errors";
-import type { ChunkReply } from "./protocol";
-import { mapOf, uint64Of } from "./schema";
-import type { ChunkConnectionInfo } from "./types";
+import { ChunkProtocolError } from "./errors.js";
+import type { ChunkReply } from "./protocol.js";
+import { mapOf, uint64Of } from "./schema.js";
+import type { ChunkConnectionInfo } from "./types.js";
 
 export function connectionId(value: bigint): string {
   if (typeof value !== "bigint" || value <= 0n || value > (1n << 64n) - 1n) {

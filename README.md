@@ -10,21 +10,21 @@ Requires Node.js 20 or newer.
 
 ## First write and read
 
-Start a fresh server with step 1 of the [server quick start](https://github.com/chunkdb/chunkdb/blob/main/docs/QUICK_START.md#1-start-the-server).
-Install the client and a TypeScript runner:
+Start a fresh server with step 1 of the [server quick start](https://github.com/chunkdb/chunkdb/blob/main/docs/QUICK_START.md#1-start-the-server), then install the client and a TypeScript runner:
 
 ```sh
 npm install @chunkdb/client
 npm install --save-dev tsx
 ```
 
-Set `CHUNKDB_URI` to your authenticated connection URI, including the `world` table path.
-Percent-encode reserved characters in its password.
+Set `CHUNKDB_URI` to the administrator login with the `world_js` table path; the Docker server prints its generated password in its log:
 ```sh
-export CHUNKDB_URI='chunk://admin:YOUR_PASSWORD@127.0.0.1:4242/world'
+export CHUNKDB_PASSWORD=$(docker logs chunkdb-quickstart 2>/dev/null | sed -n 's/^Generated password: //p')
+export CHUNKDB_URI="chunk://admin:$CHUNKDB_PASSWORD@127.0.0.1:4242/world_js"
 ```
 
-Save this as `world.mts` and run `npx tsx world.mts`:
+Percent-encode reserved characters in a password you chose yourself.
+Save this as `first.mts` and run `npx tsx first.mts`:
 
 ```ts docs-check
 import { connectUri } from "@chunkdb/client";
@@ -32,8 +32,8 @@ import { connectUri } from "@chunkdb/client";
 const client = await connectUri(process.env.CHUNKDB_URI!);
 try {
   await client.migrate([{
-    name: "world_table",
-    statement: "CREATE TABLE world (id u16, light u4 DEFAULT 15) CHUNK 16 x 16",
+    name: "world_js_table",
+    statement: "CREATE TABLE world_js (id u16, light u4 DEFAULT 15) CHUNK 16 x 16",
   }]);
   await client.setBlock(10, 4, { id: 23 });
   console.log(await client.getBlock(10, 4));
@@ -49,8 +49,45 @@ null
 ```
 
 Run it again: the named migration skips the existing table.
-A fresh server has no tables.
 The URI path selects the default table; a method's `table` option overrides it.
+
+## World in five minutes
+
+This program fills a 4 x 4 area, reads it back and watches one change; save it as `world.mts` and run `npx tsx world.mts`:
+
+```ts docs-check
+import { connectUri } from "@chunkdb/client";
+
+const client = await connectUri(process.env.CHUNKDB_URI!);
+try {
+  await client.migrate([{
+    name: "world_js_table",
+    statement: "CREATE TABLE world_js (id u16, light u4 DEFAULT 15) CHUNK 16 x 16",
+  }]);
+  for (let y = 0; y < 4; y++) for (let x = 0; x < 4; x++) await client.setBlock(x, y, { id: 1, light: x + y });
+  const area = await client.getArea({ cx0: 0, cy0: 0, cx1: 0, cy1: 0 });
+  console.log("area chunks", area.length, "block 3 3", await client.getBlock(3, 3));
+  const watch = await client.watch("world_js");
+  try {
+    await client.setBlock(0, 0, { id: 2, light: 9 });
+    for await (const event of watch) {
+      if (event.kind === "resync") throw new Error("rebuild state before continuing");
+      if (event.kind === "change") { console.log("change", event.blocks[0].after); break; }
+    }
+  } finally {
+    await watch.close();
+  }
+} finally {
+  await client.close();
+}
+```
+
+```output
+area chunks 1 block 3 3 { id: 1, light: 6 }
+change { id: 2, light: 9 }
+```
+
+A rerun skips the migration and prints the same lines; the program is also in [examples/world.ts](https://github.com/chunkdb/chunkdb-js/blob/main/examples/world.ts).
 
 ## Guides and reference
 
@@ -60,4 +97,3 @@ The URI path selects the default table; a method's `table` option overrides it.
 - [Transactions](https://github.com/chunkdb/chunkdb-js/blob/main/docs/TRANSACTIONS.md) and [users](https://github.com/chunkdb/chunkdb-js/blob/main/docs/USERS.md).
 - [Change feed](https://github.com/chunkdb/chunkdb-js/blob/main/docs/CHANGE_FEED.md) and [backup](https://github.com/chunkdb/chunkdb-js/blob/main/docs/BACKUP.md).
 - [API reference](https://github.com/chunkdb/chunkdb-js/blob/main/docs/API.md) and [server compatibility](https://github.com/chunkdb/chunkdb/blob/main/docs/COMPATIBILITY.md).
-- [World example](https://github.com/chunkdb/chunkdb-js/blob/main/examples/world.ts): fill an area, read it and watch an update.

@@ -1,7 +1,7 @@
 // Checked chunk forms carry both column domains and the producing identity.
-import type { TableLayout } from "./schema";
-import type { ChunkRow, ChunkState, ChunkStateInput, ChunkTableSchema, ChunkValue } from "./types";
-import { decodeSectionedChunk, encodeSectionedChunk, sectionedBlockCount, sectionedChunkFormLimit } from "./sectioned-chunk";
+import type { TableLayout } from "./schema.js";
+import type { ChunkRow, ChunkState, ChunkStateInput, ChunkTableSchema, ChunkValue } from "./types.js";
+import { decodeSectionedChunk, encodeSectionedChunk, sectionedBlockCount, sectionedChunkFormLimit } from "./sectioned-chunk.js";
 
 export function blockCount(layout: TableLayout): number { return sectionedBlockCount(layout); }
 

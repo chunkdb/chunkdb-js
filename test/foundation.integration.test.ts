@@ -24,7 +24,8 @@ for (const tls of [false, true]) {
       if (info.features!.includes("statement_timeout")) assert.equal(info.options!.statement_timeout_ms, 500);
       else assert.equal(info.notApplied!.statement_timeout_ms.reason, "implementation_pending");
       assert.equal(info.notApplied!.default_tag.reason, "implementation_pending");
-      assert.equal(info.limits!.txn_max_written_chunks, 64);
+      assert.equal(info.limits!.txn_max_written_chunks, 1024);
+      assert.equal(info.limits!.txn_max_read_chunks, 8192);
       await client.createTable("foundation", { columns: [{ name: "n", type: "u64" }], chunk: { width: 4, height: 4 } });
       const schema = await client.describe();
       assert.match(schema.epoch!, /^[0-9a-f]{32}$/); assert.equal(schema.dims, 2); assert.deepEqual(schema.chunkColumns, []);

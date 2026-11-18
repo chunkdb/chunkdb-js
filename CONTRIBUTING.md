@@ -10,8 +10,11 @@ Run these checks from the repository root:
 ```bash
 npm ci
 npm run build
+npm run test:types
 npm run test:unit
 ```
+
+`test:types` checks the published declarations under NodeNext after a build. The unit test command also checks the types of source and test files; run `npm run test:check-tests` for that check alone.
 
 For the full suite, including integration tests, keep a chunkdb checkout beside this repository or set `CHUNKDB_REPO_ROOT` to its absolute path:
 
@@ -22,7 +25,7 @@ CHUNKDB_REPO_ROOT=/path/to/chunkdb npm test
 The test script builds a server with TLS support using CMake and OpenSSL.
 To use an existing server build instead, set both `CHUNKDB_SERVER_BIN` and `CHUNKDB_SERVER_BIN_TLS` to the corresponding absolute executable paths.
 Both may point to one TLS-enabled executable.
-Keep `CHUNKDB_REPO_ROOT` set to the source checkout when supplying binaries from another directory.
+Prebuilt server binaries do not require a source checkout or `CHUNKDB_REPO_ROOT`.
 Keep `README.md` focused on package users; put contributor and release instructions in their dedicated documents.
 ## Check documentation examples
 
@@ -34,10 +37,11 @@ Mark executable TypeScript blocks in `README.md` and `docs/*.md` with `ts docs-c
 Follow each block with an `output` fence containing its exact standard output.
 Every TypeScript block in these pages must be marked, and every marked block must have output.
 
-README and connections blocks run as complete programs against fresh servers.
+README and connections blocks run as complete programs against fresh servers; each README block runs on its own, twice, on one server.
+`examples/world.ts` must equal the README's World in five minutes program.
 Guide blocks run in page order inside a connected client's `try` block.
-The runner creates the README's `world` table and imports the helpers named by the guides.
-It supplies an authenticated URI with `/world` as its path.
+The runner creates the README's `world_js` table and imports the helpers named by the guides.
+It supplies an authenticated URI with `/world_js` as its path.
 Backup examples get an empty server backup directory.
 
 The runner resolves `@chunkdb/client` to the local built package, so it checks packaged exports.

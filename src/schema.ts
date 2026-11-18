@@ -1,7 +1,7 @@
-import { ChunkProtocolError } from "./errors";
-import type { ChunkReply } from "./protocol";
-import type { ChunkColumn, ChunkServerInfo, ChunkSize, ChunkTableSchema, ChunkValue, ChunkSchemaVersion, ChunkFeatureStatus, ChunkStatus } from "./types";
-import { formatColumnType, parseColumnType, valueFromReply } from "./values";
+import { ChunkProtocolError } from "./errors.js";
+import type { ChunkReply } from "./protocol.js";
+import type { ChunkColumn, ChunkServerInfo, ChunkSize, ChunkTableSchema, ChunkValue, ChunkSchemaVersion, ChunkFeatureStatus, ChunkStatus } from "./types.js";
+import { formatColumnType, parseColumnType, valueFromReply } from "./values.js";
 
 /** A table schema and what the chunk form needs beyond `DESCRIBE`'s public fields. */
 export interface TableLayout {

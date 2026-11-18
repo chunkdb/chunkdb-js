@@ -10,16 +10,16 @@ Run this inside the [first write and read](../README.md#first-write-and-read) ex
 
 ```ts docs-check
 await client.createUser("bot", "hunter2");
-await client.grant("READ", "world", "bot");
+await client.grant("READ", "world_js", "bot");
 console.log((await client.listUsers()).find(({ name }) => name === "bot")?.grants);
-await client.revoke("READ", "world", "bot");
+await client.revoke("READ", "world_js", "bot");
 await client.setPassword("bot", "new-password");
 await client.setManagesUsers("bot", false);
 await client.dropUser("bot");
 ```
 
 ```output
-{ world: 'READ' }
+{ world_js: 'READ' }
 ```
 
 ## Rights

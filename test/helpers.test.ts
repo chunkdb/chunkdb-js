@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { helloProbeFailure, resolveServerBinary, workspaceServerBinary } from "./helpers";
+import { helloProbeFailure, resolveServerBinary, startServer, workspaceServerBinary } from "./helpers";
 
 // Resolution without CHUNKDB_SERVER_BIN / CHUNKDB_SERVER_BIN_TLS, which win
 // when set.
@@ -53,4 +53,23 @@ test("the compatibility probe accepts only a HELLO 3 map or a SCRAM login", () =
   assert.match(helloProbeFailure("-ERR AUTH_REQUIRED use HELLO 3 USER") ?? "", /does not speak protocol 3/);
   assert.match(helloProbeFailure("-ERR PROTOCOL expected HELLO 2") ?? "", /does not speak protocol 3/);
   assert.match(helloProbeFailure("$120") ?? "", /does not speak protocol 3/);
+});
+
+test("test server spawn errors reject with the binary and original cause", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "chunkdb-helper-unlaunchable-"));
+  const saved = process.env.CHUNKDB_SERVER_BIN;
+  process.env.CHUNKDB_SERVER_BIN = directory;
+  try {
+    await assert.rejects(startServer({ auth: "none" }), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /failed to start chunkdb test server/);
+      assert.ok(error.message.includes(directory));
+      assert.ok(error.cause instanceof Error && "code" in error.cause);
+      return true;
+    });
+  } finally {
+    if (saved === undefined) delete process.env.CHUNKDB_SERVER_BIN;
+    else process.env.CHUNKDB_SERVER_BIN = saved;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });

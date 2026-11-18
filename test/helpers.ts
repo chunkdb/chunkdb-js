@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import net from "node:net";
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, type ChildProcessByStdio } from "node:child_process";
+import type { Readable } from "node:stream";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -10,7 +11,7 @@ import { startScramLogin } from "../src/scram";
 import { testTlsFiles, type TestCertificateKind } from "./tls-cert";
 
 export interface StartedServer {
-  process: ChildProcessWithoutNullStreams;
+  process: ChildProcessByStdio<null, Readable, Readable>;
   host: string;
   port: number;
   /** "users": the administrator below logs in; "none": `--auth none`. */
@@ -169,24 +170,24 @@ function removeServerFiles(dataDir: string): void {
  */
 export async function startServer(options: {
   tls?: boolean; auth?: "users" | "none"; slotMaxBytes?: number; feedLingerMs?: number; backupDir?: string;
+  maxAreaChunks?: number; maxAreaResponseBytes?: number; txnMaxWrittenChunks?: number; txnMaxReadChunks?: number;
   /** The key and signature algorithm of the TLS certificate; RSA with SHA-256 by default. */
   tlsCertificate?: TestCertificateKind;
   /** `--auth-channel-binding`. */
   authChannelBinding?: "allow" | "require";
 } = {}): Promise<StartedServer> {
+  const tlsEnabled = options.tls ?? false;
+  const binary = path.resolve(resolveServerBinary(tlsEnabled));
+  assert.ok(fs.existsSync(binary), `server binary not found: ${binary}`);
   const host = "127.0.0.1";
   const port = await pickFreePort();
   const auth = options.auth ?? "users";
   const user = auth === "users" ? "admin" : "";
   const password = auth === "users" ? "admin p@ss:word/1" : "";
-  const tlsEnabled = options.tls ?? false;
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "chunkdb-node-sdk-"));
   const scheme = tlsEnabled ? "chunks" : "chunk";
   const credentials = user === "" ? "" : `${user}:${encodeURIComponent(password)}@`;
   const uri = `${scheme}://${credentials}${host}:${port}/`;
-  const binary = resolveServerBinary(tlsEnabled);
-
-  assert.ok(fs.existsSync(binary), `server binary not found: ${binary}`);
 
   const args = [
     "--listen-uri",
@@ -203,6 +204,9 @@ export async function startServer(options: {
   if (options.slotMaxBytes !== undefined) args.push("--slot-max-bytes", String(options.slotMaxBytes));
   if (options.feedLingerMs !== undefined) args.push("--feed-linger-ms", String(options.feedLingerMs));
   if (options.backupDir !== undefined) args.push("--backup-dir", options.backupDir);
+  for (const [flag, value] of [["--max-area-chunks", options.maxAreaChunks], ["--max-area-response-bytes", options.maxAreaResponseBytes], ["--txn-max-written-chunks", options.txnMaxWrittenChunks], ["--txn-max-read-chunks", options.txnMaxReadChunks]] as const) {
+    if (value !== undefined) args.push(flag, String(value));
+  }
   if (options.authChannelBinding !== undefined) args.push("--auth-channel-binding", options.authChannelBinding);
 
   if (auth === "users") {
@@ -220,24 +224,24 @@ export async function startServer(options: {
   }
 
   const child = spawn(binary, args, {
-    cwd: chunkdbRepoRoot(),
     stdio: ["ignore", "pipe", "pipe"],
   });
 
   child.stderr.on("data", () => {});
   child.stdout.on("data", () => {});
 
-  await waitForServer(host, port);
-  // The plaintext probe cannot speak TLS; the non-TLS suites already exercise
-  // the same binary, so a TLS-only mismatch still surfaces there.
-  if (!tlsEnabled) {
-    try {
+  try {
+    await once(child, "spawn");
+    await waitForServer(host, port);
+    // The plaintext probe cannot speak TLS; the non-TLS suites already exercise
+    // the same binary, so a TLS-only mismatch still surfaces there.
+    if (!tlsEnabled) {
       await assertServerSpeaksProtocol3(host, port, user);
-    } catch (error) {
-      child.kill("SIGKILL");
-      removeServerFiles(dataDir);
-      throw error;
     }
+  } catch (error) {
+    child.kill("SIGKILL");
+    removeServerFiles(dataDir);
+    throw new Error(`failed to start chunkdb test server ${binary}`, { cause: error });
   }
 
   return {

@@ -22,6 +22,8 @@ A chunk version identifies committed state and orders writes within the same tab
 | `getArea(area, readOptions?)` | `ChunkAreaEntry[]` |
 | `getAreaRaw(area, readOptions?)` | `ChunkAreaRawEntry[]` |
 | `getAreaWithSchema(area, readOptions?)`, `getAreaRawWithSchema(area, readOptions?)` | `{ schemaVersion: bigint, entries }` |
+| `getAreaPage(area, pageOptions?)`, `getAreaRawPage(area, pageOptions?)` | `{ schemaVersion: bigint, chunks, more, after }` with exact bigint coordinates |
+| `getAreaPage3D(area, pageOptions?)`, `getAreaRawPage3D(area, pageOptions?)` | The same page with a three-axis cursor |
 | `scanChunks({ table?, after?, limit? }?)` | `ChunkScanPage`: `{ chunks, more }` |
 | `scanAllChunks({ table?, limit? }?)` | async generator of `{ cx, cy }` |
 | `scanChunksWithOptions(scanOptions?)` | retained versions, optional data and snapshot frontier |
