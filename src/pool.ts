@@ -8,6 +8,7 @@ import { copyAreaPageArguments } from "./area-page.js";
 import type { ChunkWatch } from "./watch.js";
 import type { ChunkParameter, ChunkReply } from "./protocol.js";
 import type {
+  ChunkConnectionInfo,
   ChunkAxis,
   ChunkArea3D,
   ChunkArea2D,
@@ -112,6 +113,7 @@ function toClientOptions(options: ChunkPoolOptions): ChunkClientOptions {
     key: options.key,
     channelBinding: options.channelBinding,
     table: options.table,
+    helloOptions: options.helloOptions,
   };
 }
 
@@ -449,6 +451,18 @@ export class ChunkPool {
 
   ping(): Promise<"PONG"> {
     return this.withClient(async (client) => await client.ping());
+  }
+
+  showConnections(): Promise<ChunkConnectionInfo[]> {
+    return this.withClient(async (client) => await client.showConnections());
+  }
+
+  cancel(id: bigint): Promise<boolean> {
+    return this.withClient(async (client) => await client.cancel(id));
+  }
+
+  killConnection(id: bigint): Promise<boolean> {
+    return this.withClient(async (client) => await client.killConnection(id));
   }
 
   flushWal(): Promise<void> {

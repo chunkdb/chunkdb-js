@@ -51,6 +51,7 @@ export { ChunkBits, encodeParameter, formatColumnType, parseColumnType } from ".
 export { formatChunkUri, parseChunkUri, tableFromUriPath } from "./uri.js";
 export { scramVerifier } from "./scram.js";
 export type {
+  ChunkConnectionInfo,
   ChunkAxis,
   ChunkPoint3D,
   ChunkBox3D,

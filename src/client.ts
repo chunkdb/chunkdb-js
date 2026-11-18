@@ -31,6 +31,7 @@ import {
 } from "./errors.js";
 import { tlsChannelBinding, type ScramChannelBinding } from "./channel-binding.js";
 import { chunkFormLimit, decodeChunkForm, encodeChunkForm } from "./chunk-form.js";
+import { connectionId, controlAcknowledgment, parseConnections } from "./connection-controls.js";
 import { AreaDecodeLimitError, checkAreaDecodedCells, decodeSectionedChunk, encodeSectionedChunk } from "./sectioned-chunk.js";
 import { captureAreaPage, decodeAreaPage, rawAreaReplyOptions, type AreaPageRequest } from "./area-page.js";
 import { parseSectionedForm } from "./chunk-sections.js";
@@ -50,6 +51,7 @@ import {
 import { integerOf, mapOf, parseDescribe, parseServerInfo, parseStatus, uint64Of, textOf, type TableLayout } from "./schema.js";
 import { formatChunkUri, parseChunkUri, tableFromUriPath } from "./uri.js";
 import type {
+  ChunkConnectionInfo,
   ChunkAxis,
   ChunkArea3D,
   ChunkArea2D,
@@ -282,6 +284,17 @@ function resolveOptions(options: ChunkClientOptions = {}): ResolvedOptions {
   }
   const named =
     options.table !== undefined && options.table !== "" ? options.table : tableFromUriPath(parsed?.path ?? "/");
+  const helloOptions: Record<string, ChunkValue> = Object.create(null);
+  for (const [key, value] of Object.entries(options.helloOptions ?? {})) {
+    const name = checkName(key.toLowerCase(), "a HELLO option");
+    if (Object.hasOwn(helloOptions, name)) throw new TypeError(`duplicate HELLO option ${name}`);
+    if (name === "statement_timeout_ms" &&
+        ((typeof value !== "number" && typeof value !== "bigint") ||
+         (typeof value === "number" && !Number.isSafeInteger(value)) || value < 0 || value > 86400000)) {
+      throw new TypeError("statement_timeout_ms requires milliseconds from 0 through 86400000");
+    }
+    helloOptions[name] = value;
+  }
   return {
     host,
     port,
@@ -299,7 +312,7 @@ function resolveOptions(options: ChunkClientOptions = {}): ResolvedOptions {
     channelBinding,
     pipelineDepth: Math.max(1, options.pipelineDepth ?? 1),
     table: named ?? DEFAULT_TABLE,
-    helloOptions: options.helloOptions,
+    helloOptions,
     uri: {
       scheme: secure ? "chunks" : "chunk",
       secure,
@@ -1216,6 +1229,21 @@ export class ChunkClient {
     });
   }
 
+  /** Connections owned by this user incarnation, or all connections with ADMIN on *. */
+  showConnections(): Promise<ChunkConnectionInfo[]> {
+    return this.enqueue(async () => parseConnections(await this.run("SHOW CONNECTIONS", [], "SHOW CONNECTIONS")));
+  }
+
+  /** False means the target has no statement that can still be cancelled. */
+  cancel(id: bigint): Promise<boolean> {
+    return this.enqueue(async () => controlAcknowledgment(await this.run(`CANCEL ${connectionId(id)}`, [], "CANCEL"), "cancelled", "CANCEL"));
+  }
+
+  /** A self-kill is acknowledged before the server closes the connection. */
+  killConnection(id: bigint): Promise<boolean> {
+    return this.enqueue(async () => controlAcknowledgment(await this.run(`KILL CONNECTION ${connectionId(id)}`, [], "KILL CONNECTION"), "killed", "KILL CONNECTION"));
+  }
+
   /** Resolves once every write acknowledged before it is durable (`FLUSH WAL`). */
   flushWal(): Promise<void> {
     return this.enqueue(async () => {
@@ -1975,8 +2003,10 @@ export class ChunkClient {
 
     socket.on("close", () => {
       if (this.socket === socket) {
-        this.clearConnectionState(new ChunkConnectionError(
-          "connection closed; check the server log and that chunk:// uses plaintext and chunks:// uses TLS", { phase: "connect" }));
+        // After a completed login the scheme matched; KILL CONNECTION, the
+        // idle timeout or a shutdown closes the connection instead.
+        const hint = this.info === null ? " and that chunk:// uses plaintext and chunks:// uses TLS" : "";
+        this.clearConnectionState(new ChunkConnectionError(`connection closed; check the server log${hint}`, { phase: "connect" }));
       }
     });
 
