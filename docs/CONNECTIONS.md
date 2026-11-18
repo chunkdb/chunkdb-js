@@ -111,9 +111,13 @@ On TLS 1.2 a server certificate signed with Ed25519 or Ed448 defines no binding,
 | `ChunkMigrationMismatchError` | Keep the recorded migration name and statement unchanged. |
 | `ChunkSlotBusyError` | Release the slot's owner or request an authorized takeover. |
 | `ChunkCheckFailedError`, `ChunkCancelledError`, `ChunkStatementTimeoutError`, `ChunkKilledError` | Handle the failure explicitly; these are fatal retry classes. |
+| `ChunkSyntaxError`, `ChunkInvalidArgumentError`, `ChunkOutOfRangeError` | Correct the statement, its values or its size; `reason` names the cause. |
+| `ChunkNoTableError`, `ChunkTableExistsError` | Check the table name and rights; a table without rights is reported as missing. |
+| `ChunkSlotLostError`, `ChunkResyncRequiredError` | Rebuild state and recreate or resume the slot; retained history no longer covers it. |
+| `ChunkBadRequestError`, `ChunkServerProtocolError`, `ChunkInternalError` | The server refused the framing, the protocol negotiation, or failed; fatal retry classes. |
 | `ChunkUnknownCommandError` | Check command spelling and server capabilities. |
 | `ChunkMigrationError` | Inspect the failed step, earlier results and cause. |
-| `ChunkServerError` | Inspect `serverCode` and `serverMessage`. |
+| `ChunkServerError` | Any other or future code: inspect `serverCode` and `serverMessage`. Every class above extends it. |
 | `ChunkConnectionError` | Follow the step in the message: start the server, fix the URI form, add the password, or match `chunk://` (plaintext) and `chunks://` (TLS) to the server. |
 | `ChunkTimeoutError` | Check the endpoint and timeout settings. |
 | `ChunkTlsError` | Check certificates and TLS settings. |
