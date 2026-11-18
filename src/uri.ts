@@ -59,8 +59,8 @@ function decodeUserinfo(text: string, what: string): string {
 }
 
 /**
- * The table a URI path names: `/terrain` -> `"terrain"`, `/` -> `null` (the
- * server's `default` table). Throws for a path with more than one segment.
+ * The table a URI path names: `/terrain` -> `"terrain"`, `/` -> `null` (no table
+ * selected). Throws for a path with more than one segment.
  */
 export function tableFromUriPath(path: string): string | null {
   const name = path.startsWith("/") ? path.slice(1) : path;
