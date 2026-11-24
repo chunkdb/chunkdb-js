@@ -57,6 +57,9 @@ See [server tables reference](https://github.com/chunkdb/chunkdb/blob/main/docs/
 Omitted options use the server's configured defaults.
 
 `listTables()` lists tables visible to you.
+`swapTables(first, second)` exchanges two table names; `recoverTable(name)` serves a fenced table again.
+`tableStats(name)` returns the epoch, completed revision, dimensions, retained tombstones and retained-deletion floor.
+`compactTombstones(name, before)` forgets retained deletions below a revision and returns the new floor.
 `describe(table?)` returns their schema, geometry and options.
 Schema changes require `ADMIN`; [users](USERS.md) explains table rights.
 For repeatable application startup, use [named migrations](MIGRATIONS.md) rather than swallowing `TABLE_EXISTS`.

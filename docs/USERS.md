@@ -37,6 +37,8 @@ Insufficient rights on a visible table raise `ChunkPermissionError`, naming the 
 `SHOW MIGRATIONS` requires `MANAGES USERS`.
 Migrations require their inner statement's rights, even when an identical step would skip.
 
+`setUserLimits(name, { maxConnections?, statementsPerSec? })` sets connection and statement-rate limits; zero disables a limit.
+
 You can change your own password.
 Other user operations require `MANAGES USERS`.
 The client sends only a computed verifier for password changes, using `verifierIterations` (at least 4096, the default).

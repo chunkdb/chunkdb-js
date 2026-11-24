@@ -25,6 +25,8 @@ try {
 { id: 7, light: 9 }
 ```
 
+Pass `areas` (or `areas3D`) with up to 64 inclusive chunk boxes to keep changes inside any of them; a watch without a slot accepts several areas.
+
 ## Guarantees
 
 - `watch` opens a dedicated connection with the same login and TLS settings.

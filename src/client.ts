@@ -50,6 +50,19 @@ import { encodeStatement, ReplyReader, type ChunkParameter, type ChunkReply, typ
 import { filterClause, ChunkWatch, kWatchAck, kWatchPause, kWatchStream } from "./watch.js";
 import { parseSlots, slotName, slotOwner } from "./slots.js";
 import {
+  aggregateFunctions,
+  aggregateSelector,
+  backupPath,
+  parseAggregate,
+  parseAggregateRows,
+  parseBackup,
+  parseMigrations,
+  parseRestore,
+  parseTableStats,
+  revisionOf,
+  userLimitsClause,
+} from "./statements.js";
+import {
   MIN_SCRAM_ITERATIONS,
   finishScramLogin,
   scramSignatureMatches,
@@ -61,6 +74,15 @@ import {
 import { integerOf, mapOf, parseDescribe, parseServerInfo, parseStatus, uint64Of, textOf, type TableLayout } from "./schema.js";
 import { formatChunkUri, parseChunkUri, tableFromUriPath } from "./uri.js";
 import type {
+  ChunkAggregateFunction,
+  ChunkAggregateResult,
+  ChunkAggregateRow,
+  ChunkAggregateSelector,
+  ChunkBackupResult,
+  ChunkMigrationRecord,
+  ChunkRestoreResult,
+  ChunkTableStats,
+  ChunkUserLimits,
   ChunkConnectionInfo,
   ChunkAxis,
   ChunkArea3D,
@@ -923,6 +945,44 @@ export class ChunkClient {
     });
   }
 
+  /** `RECOVER TABLE`: serves a fenced table again once its state is checked. */
+  recoverTable(name: string): Promise<void> {
+    return this.enqueue(async () => {
+      checkName(name, "a table name");
+      await this.tableStatement(name, `RECOVER TABLE ${name}`, "RECOVER TABLE");
+    });
+  }
+
+  /** `SWAP TABLES`: each name serves the other table from then on. */
+  swapTables(first: string, second: string): Promise<void> {
+    return this.enqueue(async () => {
+      checkName(first, "a table name");
+      checkName(second, "a table name");
+      try {
+        await this.tableStatement(first, `SWAP TABLES ${first}, ${second}`, "SWAP TABLES");
+      } finally {
+        this.forget(second);
+      }
+    });
+  }
+
+  /** `SHOW TABLE STATS`: the table's epoch, completed revision, retained tombstones and deletion floor. */
+  tableStats(name: string): Promise<ChunkTableStats> {
+    return this.enqueue(async () => {
+      const command = "SHOW TABLE STATS";
+      return parseTableStats(await this.run(`${command} ${checkName(name, "a table name")}`, [], command));
+    });
+  }
+
+  /** `COMPACT TOMBSTONES`: forgets deletions below `before` and resolves the retained-deletion floor. */
+  compactTombstones(name: string, before: bigint): Promise<bigint> {
+    return this.enqueue(async () => {
+      const command = "COMPACT TOMBSTONES";
+      const statement = `${command} ${checkName(name, "a table name")} BEFORE ${revisionOf(before, "before", command)}`;
+      return uint64Of(await this.run(statement, [], command), "retained deletion floor", command);
+    });
+  }
+
   /** A block's values by column name, or null when the block is absent. */
   getBlock(x: number, y: number, options: ChunkReadOptions = {}): Promise<ChunkRow | null> {
     return this.enqueue(() => this.getBlockOp([x, y], options));
@@ -1083,6 +1143,20 @@ export class ChunkClient {
   /** `getArea` with each chunk as the server sends its form. */
   getAreaRaw(area: ChunkArea, options: ChunkReadOptions = {}): Promise<ChunkAreaRawEntry[]> {
     return this.enqueue(() => this.getAreaRawOp(area, options));
+  }
+
+  /**
+   * `AGGREGATE`: one result per function over the present blocks of a chunk,
+   * box or ball, keyed by the function's lowercase name such as `sum(height)`.
+   * Integer results are exact bigints, also beyond the int64 range.
+   */
+  aggregate(selector: ChunkAggregateSelector, functions: readonly ChunkAggregateFunction[], options: ChunkTableOption = {}): Promise<ChunkAggregateResult> {
+    return this.enqueue(() => this.aggregateOp(selector, functions, options, false) as Promise<ChunkAggregateResult>);
+  }
+
+  /** `AGGREGATE ... BY CHUNK`: one row per chunk with a present block, in coordinate order. */
+  aggregateByChunk(selector: ChunkAggregateSelector, functions: readonly ChunkAggregateFunction[], options: ChunkTableOption = {}): Promise<ChunkAggregateRow[]> {
+    return this.enqueue(() => this.aggregateOp(selector, functions, options, true) as Promise<ChunkAggregateRow[]>);
   }
 
   /**
@@ -1261,6 +1335,30 @@ export class ChunkClient {
     });
   }
 
+  /** `BACKUP TO`: copies every table to `destination`, a path below the server's `--backup-dir`. */
+  backup(destination: string): Promise<ChunkBackupResult> {
+    return this.enqueue(async () => parseBackup(await this.run(`BACKUP TO ${backupPath(destination, "BACKUP")}`, [], "BACKUP")));
+  }
+
+  /** `RESTORE TABLE`: restores `table` from a backup as a new table, named `options.as` or `table`. */
+  restoreTable(table: string, backup: string, options: { as?: string } = {}): Promise<ChunkRestoreResult> {
+    return this.enqueue(async () => {
+      const command = "RESTORE TABLE";
+      const as = options.as === undefined ? "" : ` AS ${checkName(options.as, "a table name")}`;
+      const statement = `${command} ${checkName(table, "a table name")} FROM ${backupPath(backup, command)}${as}`;
+      const result = parseRestore(await this.run(statement, [], command));
+      this.forget(result.table);
+      return result;
+    });
+  }
+
+  /** `RELOAD TLS`: new connections use the certificate and key read again from the server's files. */
+  reloadTls(): Promise<void> {
+    return this.enqueue(async () => {
+      expectOk(await this.run("RELOAD TLS", [], "RELOAD TLS"), "RELOAD TLS");
+    });
+  }
+
   /** The server's metrics in Prometheus text format (`SHOW METRICS`). */
   metrics(): Promise<string> {
     return this.enqueue(async () => bulkOf(await this.run("SHOW METRICS", [], "SHOW METRICS"), "SHOW METRICS").toString("utf8"));
@@ -1311,6 +1409,14 @@ export class ChunkClient {
     });
   }
 
+  /** `ALTER USER ... LIMIT`: connection and statement-rate limits; zero disables a limit. Needs `MANAGES USERS`. */
+  setUserLimits(name: string, limits: ChunkUserLimits): Promise<void> {
+    return this.enqueue(async () => {
+      checkName(name, "a user name");
+      expectOk(await this.run(`ALTER USER ${name} ${userLimitsClause(limits)}`, [], "ALTER USER"), "ALTER USER");
+    });
+  }
+
   /** `DROP USER`. */
   dropUser(name: string): Promise<void> {
     return this.enqueue(async () => {
@@ -1333,6 +1439,11 @@ export class ChunkClient {
       const statement = `REVOKE ${rightOf(right, "REVOKE")} ON ${grantTable(table, "REVOKE")} FROM ${checkName(user, "a user name")}`;
       expectOk(await this.run(statement, [], "REVOKE"), "REVOKE");
     });
+  }
+
+  /** Applied migrations within your rights, in applied order (`SHOW MIGRATIONS`). */
+  listMigrations(): Promise<ChunkMigrationRecord[]> {
+    return this.enqueue(async () => parseMigrations(await this.run("SHOW MIGRATIONS", [], "SHOW MIGRATIONS")));
   }
 
   /** Users with their rights (`SHOW USERS`). Needs `MANAGES USERS`. */
@@ -1608,6 +1719,17 @@ export class ChunkClient {
     });
   }
 
+  private async aggregateOp(
+    selector: ChunkAggregateSelector,
+    functions: readonly ChunkAggregateFunction[],
+    options: ChunkTableOption,
+    byChunk: boolean,
+  ): Promise<ChunkAggregateResult | ChunkAggregateRow[]> {
+    const statement = `AGGREGATE ${aggregateSelector(selector)} FROM ${this.tableOf(options)} ${aggregateFunctions(functions)}${byChunk ? " BY CHUNK" : ""}`;
+    const reply = await this.run(statement, [], "AGGREGATE");
+    return byChunk ? parseAggregateRows(reply, functions.length) : parseAggregate(reply, functions.length);
+  }
+
   private async getAreaOp(area: ChunkArea, options: ChunkReadOptions): Promise<ChunkAreaEntry[]> {
     const table = this.tableOf(options);
     const clause = areaClause(area);
@@ -1747,6 +1869,8 @@ export class ChunkClient {
       getAreaPage3D: (area, options = {}) => this.areaPageCall(area, options, 3, false, call),
       getAreaRawPage3D: (area, options = {}) => this.areaPageCall(area, options, 3, true, call),
       getArea: (area, options = {}) => call(() => this.getAreaOp(area, options)),
+      aggregate: (selector, functions, options = {}) => call(() => this.aggregateOp(selector, functions, options, false) as Promise<ChunkAggregateResult>),
+      aggregateByChunk: (selector, functions, options = {}) => call(() => this.aggregateOp(selector, functions, options, true) as Promise<ChunkAggregateRow[]>),
       getAreaRaw: (area, options = {}) => call(() => this.getAreaRawOp(area, options)),
       getAreaWithSchema: (area, options = {}) => call(() => this.getAreaWithSchemaOp(area, options, false)),
       getAreaRawWithSchema: (area, options = {}) => call(() => this.getAreaWithSchemaOp(area, options, true)),

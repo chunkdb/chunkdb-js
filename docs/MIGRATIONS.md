@@ -56,6 +56,7 @@ array
 
 Earlier steps stay applied; the list is not one transaction and cannot run inside a transaction.
 Every retry needs the inner statement's rights, even when the step would skip.
+`listMigrations()` returns applied steps as `{ name, appliedMs, user, statement }`, in applied order.
 `SHOW MIGRATIONS` requires `MANAGES USERS` with authentication enabled.
 
 The pool has no `migrate` method.

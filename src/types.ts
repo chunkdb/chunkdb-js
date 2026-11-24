@@ -188,6 +188,9 @@ export interface ChunkWatchOptions {
   /** Inclusive chunk coordinates. */
   area?: { cx0: number; cy0: number; cx1: number; cy1: number };
   area3D?: ChunkBox3D;
+  /** Several inclusive areas (`AREA ..., AREA ...`, at most 64) without a slot; a chunk inside any of them is kept. */
+  areas?: ReadonlyArray<{ cx0: number; cy0: number; cx1: number; cy1: number }>;
+  areas3D?: readonly ChunkBox3D[];
   after?: ChunkPosition;
   /** Block columns in the requested order; chunk metadata remains complete. */
   columns?: readonly string[];
@@ -571,6 +574,8 @@ export interface ChunkTransaction {
   setChunk(cx: number, cy: number, state: ChunkStateInput, options?: ChunkTableOption): Promise<void>;
   setChunkRaw(cx: number, cy: number, form: Uint8Array, options?: ChunkTableOption): Promise<void>;
   getArea(area: ChunkArea, options?: ChunkReadOptions): Promise<ChunkAreaEntry[]>;
+  aggregate(selector: ChunkAggregateSelector, functions: readonly ChunkAggregateFunction[], options?: ChunkTableOption): Promise<ChunkAggregateResult>;
+  aggregateByChunk(selector: ChunkAggregateSelector, functions: readonly ChunkAggregateFunction[], options?: ChunkTableOption): Promise<ChunkAggregateRow[]>;
   getAreaRaw(area: ChunkArea, options?: ChunkReadOptions): Promise<ChunkAreaRawEntry[]>;
   getAreaWithSchema(area: ChunkArea, options?: ChunkReadOptions): Promise<ChunkAreaMetadata<ChunkAreaEntry>>;
   getAreaRawWithSchema(area: ChunkArea, options?: ChunkReadOptions): Promise<ChunkAreaMetadata<ChunkAreaRawEntry>>;
@@ -600,3 +605,69 @@ export type ChunkErrorPhase =
   | "timeout"
   | "protocol"
   | "tls";
+
+/** One AGGREGATE function: `COUNT(*)`, or SUM, MIN, MAX or AVG of an integer or float block column. */
+export type ChunkAggregateFunction =
+  | { fn: "count" }
+  | { fn: "sum" | "min" | "max" | "avg"; column: string };
+
+/** The chunks AGGREGATE reads: one chunk, a two- or three-dimensional box, or a ball. */
+export type ChunkAggregateSelector =
+  | { chunk: readonly [ChunkAxis, ChunkAxis] | readonly [ChunkAxis, ChunkAxis, ChunkAxis] }
+  | ChunkArea2D
+  | ChunkArea3D;
+
+/**
+ * An AGGREGATE result: integers (COUNT, integer SUM, MIN and MAX) as exact
+ * bigints, doubles as numbers, and null when no present block has a value.
+ */
+export type ChunkAggregateValue = bigint | number | null;
+
+/** AGGREGATE without BY CHUNK: each function's lowercase name, such as `count(*)` or `sum(height)`, to its result, in request order. */
+export type ChunkAggregateResult = Record<string, ChunkAggregateValue>;
+
+/** One AGGREGATE ... BY CHUNK row: a chunk with a present block and its results in request order. */
+export interface ChunkAggregateRow { cx: bigint; cy: bigint; cz?: bigint; values: ChunkAggregateValue[] }
+
+/** `SHOW TABLE STATS`. */
+export interface ChunkTableStats {
+  epoch: string;
+  /** The completed revision; null on a read-only server or a fenced table. */
+  revision: bigint | null;
+  dims: 2 | 3;
+  tombstones: bigint;
+  retainedDeletionFloor: bigint;
+}
+
+/** One applied migration as `SHOW MIGRATIONS` lists it. */
+export interface ChunkMigrationRecord {
+  name: string;
+  appliedMs: bigint;
+  /** Null without MANAGES USERS. */
+  user: string | null;
+  statement: string;
+}
+
+/** `BACKUP TO`: the copied tables and each table's epoch and revision cut. */
+export interface ChunkBackupResult {
+  tables: bigint;
+  files: bigint;
+  bytes: bigint;
+  cuts: Array<{ table: string; epoch: string; revision: bigint }>;
+}
+
+/** `RESTORE TABLE`: the new table and the backed-up epoch and revision it forks from. */
+export interface ChunkRestoreResult {
+  table: string;
+  epoch: string;
+  parentEpoch: string;
+  forkRevision: bigint;
+  files: bigint;
+  bytes: bigint;
+}
+
+/** `ALTER USER ... LIMIT`: zero disables a limit; an omitted limit stays as it is. */
+export interface ChunkUserLimits {
+  maxConnections?: number;
+  statementsPerSec?: number;
+}
