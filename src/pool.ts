@@ -7,6 +7,7 @@ import { ChunkClient, tableOfStatement } from "./client.js";
 import { copyAreaPageArguments } from "./area-page.js";
 import type { ChunkWatch } from "./watch.js";
 import type { ChunkParameter, ChunkReply } from "./protocol.js";
+import type { ChunkExpr } from "./conditions.js";
 import type {
   ChunkAggregateFunction,
   ChunkAggregateResult,
@@ -17,6 +18,7 @@ import type {
   ChunkRestoreResult,
   ChunkTableStats,
   ChunkUserLimits,
+  ChunkAggregateOptions,
   ChunkTableOption,
   ChunkConnectionInfo,
   ChunkAxis,
@@ -318,11 +320,11 @@ export class ChunkPool {
     return this.withClient(async (client) => await client.compactTombstones(name, before));
   }
 
-  aggregate(selector: ChunkAggregateSelector, functions: readonly ChunkAggregateFunction[], options: ChunkTableOption = {}): Promise<ChunkAggregateResult> {
+  aggregate(selector: ChunkAggregateSelector, functions: readonly ChunkAggregateFunction[], options: ChunkAggregateOptions = {}): Promise<ChunkAggregateResult> {
     return this.withClient(async (client) => await client.aggregate(selector, functions, options));
   }
 
-  aggregateByChunk(selector: ChunkAggregateSelector, functions: readonly ChunkAggregateFunction[], options: ChunkTableOption = {}): Promise<ChunkAggregateRow[]> {
+  aggregateByChunk(selector: ChunkAggregateSelector, functions: readonly ChunkAggregateFunction[], options: ChunkAggregateOptions = {}): Promise<ChunkAggregateRow[]> {
     return this.withClient(async (client) => await client.aggregateByChunk(selector, functions, options));
   }
 
@@ -330,7 +332,7 @@ export class ChunkPool {
     return this.withClient(async (client) => await client.getBlock(x, y, options));
   }
 
-  setBlock(x: number, y: number, values: Readonly<Record<string, ChunkValue>>, options: ChunkWriteOptions = {}): Promise<bigint> {
+  setBlock(x: number, y: number, values: Readonly<Record<string, ChunkValue | ChunkExpr>>, options: ChunkWriteOptions = {}): Promise<bigint> {
     return this.withClient(async (client) => await client.setBlock(x, y, values, options));
   }
 
@@ -358,7 +360,7 @@ export class ChunkPool {
     return this.withClient(async (client) => client.getBlock3DWithMetadata(x, y, z, options));
   }
 
-  setBlock3D(x: ChunkAxis, y: ChunkAxis, z: ChunkAxis, values: Readonly<Record<string, ChunkValue>>, options: ChunkWriteOptions = {}): Promise<bigint> {
+  setBlock3D(x: ChunkAxis, y: ChunkAxis, z: ChunkAxis, values: Readonly<Record<string, ChunkValue | ChunkExpr>>, options: ChunkWriteOptions = {}): Promise<bigint> {
     return this.withClient(async (client) => client.setBlock3D(x, y, z, values, options));
   }
 
@@ -466,7 +468,7 @@ export class ChunkPool {
     return this.withClient(async (client) => client.scanChunks3D(options));
   }
 
-  async *scanAllChunks3D(options: Omit<ChunkScanOptions3D, "after" | "since" | "withData" | "columns"> = {}): AsyncGenerator<ChunkCoord3D, void, undefined> {
+  async *scanAllChunks3D(options: Omit<ChunkScanOptions3D, "after" | "since" | "withData" | "columns" | "where"> = {}): AsyncGenerator<ChunkCoord3D, void, undefined> {
     let after: ChunkCoord3D | undefined;
     let epoch = options.epoch;
     while (true) {

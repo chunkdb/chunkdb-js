@@ -89,6 +89,38 @@ Raw mutations reject unknown sections or flags before sending.
 Read decoding uses the structural hard limit, so lowering the table's variable-value quota does not make retained data unreadable.
 Chunk write requests use the hard format limit and leave growth-aware quota admission to the server, which can accept non-growing replacements of older data above that quota.
 
+## Conditions and computed values
+
+Import `expr` and `ChunkConditionFailedError` alongside `connectUri`:
+
+```ts docs-check
+await client.setBlock(5, 5, { id: 1, light: 14 });
+for (let i = 0; i < 2; i++) {
+  try {
+    await client.setBlock(5, 5, { light: expr("light + $1") }, {
+      condition: "light < $2",
+      args: [{ column: "light", value: 1 }, { column: "light", value: 15 }],
+    });
+    console.log("light raised");
+  } catch (error) {
+    if (!(error instanceof ChunkConditionFailedError)) throw error;
+    console.log("light is already at the maximum");
+  }
+}
+```
+
+```output
+light raised
+light is already at the maximum
+```
+
+- `expr` values and `condition` are evaluated by the server against the block as it is when the write applies; see the [server expressions reference](https://github.com/chunkdb/chunkdb/blob/main/docs/reference/EXPRESSIONS.md).
+- `args` are the `$n` parameters: `args[0]` is `$1`, and plain values are numbered after them; each `$n` appears once.
+- Each argument is encoded with the type of its `column`, the column it meets on the server; name a chunk column as `chunk.name`.
+- A false or NULL condition writes nothing and rejects with `ChunkConditionFailedError`, whose `current` is the chunk version.
+- A computed value outside its column rejects with `ChunkOutOfRangeError`; `condition` excludes `ifVersion`.
+- `deleteBlock`, the 3D block writes and transaction block writes take `condition` and `args` too.
+
 ## Three dimensions
 
 Use the explicit `getBlock3D`, `getBlock3DWithMetadata`, `setBlock3D`, `deleteBlock3D`, `getChunk3D`, `setChunk3D`, `getChunkRaw3D` and `setChunkRaw3D` methods for three-axis tables.
@@ -131,7 +163,9 @@ for await (const { cx, cy } of client.scanAllChunks()) console.log(cx, cy);
 
 `scanChunks({ after, limit })` returns `{ chunks, more }`.
 Pass the last returned coordinate as `after` for the next page.
-`scanChunksWithOptions({ after, limit, since, withData, columns, epoch })` includes retained versions and optional decoded forms.
+`scanChunksWithOptions({ after, limit, since, withData, columns, epoch, where })` includes retained versions and optional decoded forms.
+`where: { text, args }` keeps only matching blocks; a page can hold fewer chunks than `limit`, or none, so continue from the page's `after` while `more` is true.
+With `since`, `where` needs `withData`, and a changed chunk without a matching block is reported as deleted.
 `scanChunks3D` provides the same options with three-axis coordinates; `scanAllChunks3D` iterates populated coordinates.
 These pages include `epoch`, nullable `position` and `retainedDeletionFloor`.
 `since` selects revisions strictly greater than its value and includes retained tombstones; their decoded `chunk` is null and `deleted` is true.

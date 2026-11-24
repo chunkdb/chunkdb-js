@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { connectPool, connectUri, type ChunkChangeEvent, type ChunkWatch } from "../src/index";
+import { ChunkConditionFailedError, ChunkOutOfRangeError, connectPool, connectUri, expr, type ChunkChangeEvent, type ChunkWatch } from "../src/index";
 import { startServer } from "./helpers";
 
 async function changed(watch: ChunkWatch): Promise<ChunkChangeEvent> {
@@ -136,4 +136,42 @@ test("statements: BACKUP TO, RESTORE TABLE and RELOAD TLS", { timeout: 20000 }, 
     await client.reloadTls();
     await pool.reloadTls();
   } finally { await pool.close(); await client.close(); await server.stop(); fs.rmSync(backupDir, { recursive: true, force: true }); }
+});
+
+test("statements: IF conditions, computed values and WHERE filters", { timeout: 20000 }, async () => {
+  const server = await startServer();
+  const client = await connectUri(`${server.uri}wallet`);
+  const pool = await connectPool({ uri: `${server.uri}wallet`, maxConnections: 1 });
+  try {
+    await client.createTable("wallet", { columns: [{ name: "coins", type: "u16" }, { name: "kind", type: "u8" }], chunk: { width: 2, height: 2 } });
+    await client.setBlock(0, 0, { coins: 5, kind: 1 });
+    const version = await client.setBlock(0, 0, { coins: expr("coins + $1") }, { args: [{ column: "coins", value: 3 }] });
+    assert.deepEqual(await client.getBlock(0, 0), { coins: 8, kind: 1 });
+    await assert.rejects(
+      client.setBlock(0, 0, { coins: expr("coins - $1") }, { condition: "coins >= $2", args: [{ column: "coins", value: 10 }, { column: "coins", value: 10 }] }),
+      (error: unknown) => error instanceof ChunkConditionFailedError && error.current === version,
+    );
+    await client.setBlock(0, 0, { kind: 2 }, { condition: "coins = $1", args: [{ column: "coins", value: 8 }] });
+    assert.deepEqual(await client.getBlock(0, 0), { coins: 8, kind: 2 });
+    await client.setBlock(6, 0, { coins: 1, kind: 4 });
+    await assert.rejects(client.setBlock(0, 0, { coins: expr("coins - $1") }, { args: [{ column: "coins", value: 9 }] }), ChunkOutOfRangeError);
+
+    const where = { text: "kind > $1", args: [{ column: "kind", value: 2 }] };
+    for (const c of [client, pool]) {
+      assert.deepEqual(await c.aggregate({ cx0: 0, cy0: 0, cx1: 3, cy1: 0 }, [{ fn: "count" }, { fn: "sum", column: "coins" }], { where }), { "count(*)": 1n, "sum(coins)": 1n });
+      assert.deepEqual(await c.aggregateByChunk({ cx0: 0, cy0: 0, cx1: 3, cy1: 0 }, [{ fn: "count" }], { where }), [{ cx: 3n, cy: 0n, values: [1n] }]);
+      const first = await c.scanChunksWithOptions({ limit: 1, where });
+      assert.deepEqual([first.chunks, first.more, first.after], [[], true, { cx: 0, cy: 0 }]);
+      const next = await c.scanChunksWithOptions({ after: first.after, where, withData: true });
+      assert.deepEqual([next.chunks.map(({ cx, cy }) => [cx, cy]), next.more, next.after], [[[3, 0]], false, undefined]);
+    }
+
+    await client.transaction(async (tx) => {
+      await tx.setBlock(0, 0, { coins: expr("coins + $1") }, { condition: "kind = $2", args: [{ column: "coins", value: 1 }, { column: "kind", value: 2 }] });
+    });
+    assert.deepEqual(await client.getBlock(0, 0), { coins: 9, kind: 2 });
+    await assert.rejects(client.deleteBlock(6, 0, { condition: "kind = $1", args: [{ column: "kind", value: 9 }] }), ChunkConditionFailedError);
+    await client.deleteBlock(6, 0, { condition: "kind = $1", args: [{ column: "kind", value: 4 }] });
+    assert.equal(await client.getBlock(6, 0), null);
+  } finally { await pool.close(); await client.close(); await server.stop(); }
 });

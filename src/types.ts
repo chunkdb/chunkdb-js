@@ -1,5 +1,6 @@
 import type { ChunkReply } from "./protocol.js";
 import type { ChunkBits } from "./values.js";
+import type { ChunkExpr } from "./conditions.js";
 
 export type ChunkScheme = "chunk" | "chunks";
 
@@ -498,7 +499,34 @@ export interface ChunkReadOptions extends ChunkTableOption {
   columns?: readonly string[];
 }
 
-export interface ChunkWriteOptions extends ChunkTableOption {
+/** A `$n` parameter, encoded with the type of `column`: the block column it meets, or a chunk column written as `chunk.name`. */
+export interface ChunkArg {
+  column: string;
+  value: ChunkValue;
+}
+
+/** A CQL condition, such as `"height > $1"`, and its parameters: `args[0]` is `$1`. */
+export interface ChunkCondition {
+  text: string;
+  args?: readonly ChunkArg[];
+}
+
+export interface ChunkConditionOptions extends ChunkTableOption {
+  /**
+   * Block writes only: write only when this condition holds for the block as it
+   * is when the write applies; otherwise reject with
+   * `ChunkConditionFailedError`, whose `current` is the chunk version.
+   * Excludes `ifVersion`.
+   */
+  condition?: string;
+  /**
+   * The `$n` parameters of `condition` and of `expr` values: `args[0]` is
+   * `$1`, and plain values are numbered after them. Each `$n` appears once.
+   */
+  args?: readonly ChunkArg[];
+}
+
+export interface ChunkWriteOptions extends ChunkConditionOptions {
   /**
    * Write only while the chunk is at this version; otherwise the write
    * changes nothing and rejects with `ChunkVersionMismatchError`.
@@ -517,6 +545,13 @@ export interface ChunkScanOptions extends ChunkTableOption {
 
 export interface ChunkScanDataOptions extends ChunkScanOptions {
   since?: bigint;
+  /**
+   * Keep only the blocks for which the condition is true. A page can hold
+   * fewer chunks than `limit`, or none: continue after the page's `after`.
+   * With `since`, it needs `withData`, and a changed chunk without a
+   * matching block is reported as deleted.
+   */
+  where?: ChunkCondition;
   /** Bind a resumed scan to the table lifetime returned by its previous page. */
   epoch?: string;
   withData?: boolean;
@@ -541,12 +576,19 @@ export interface ChunkScanEntry3D extends ChunkCoord3D {
 export interface ChunkScanDataPage {
   chunks: ChunkScanEntry[];
   more: boolean;
+  /** With `where` and `more`: the last chunk the page visited, kept or not; pass it as the next `after`. */
+  after?: ChunkCoord;
   epoch: string;
   position: bigint | null;
   retainedDeletionFloor: bigint;
 }
 
-export interface ChunkScanPage3D extends Omit<ChunkScanDataPage, "chunks"> { chunks: ChunkScanEntry3D[] }
+export interface ChunkScanPage3D extends Omit<ChunkScanDataPage, "chunks" | "after"> { chunks: ChunkScanEntry3D[]; after?: ChunkCoord3D }
+
+export interface ChunkAggregateOptions extends ChunkTableOption {
+  /** Aggregate only the present blocks for which the condition is true. */
+  where?: ChunkCondition;
+}
 
 export interface ChunkTransactionOptions {
   /** How many times a transaction that ends with `CONFLICT` runs again; 5 by default. */
@@ -567,22 +609,22 @@ export interface ChunkTransaction {
   getAreaRawPage3D(area: ChunkArea3D, options?: ChunkAreaPageOptions3D): Promise<ChunkAreaRawPage3D>;
   getBlock(x: number, y: number, options?: ChunkReadOptions): Promise<ChunkRow | null>;
   getBlockWithMetadata(x: number, y: number, options?: ChunkReadOptions): Promise<ChunkBlockMetadata>;
-  setBlock(x: number, y: number, values: Readonly<Record<string, ChunkValue>>, options?: ChunkTableOption): Promise<void>;
-  deleteBlock(x: number, y: number, options?: ChunkTableOption): Promise<void>;
+  setBlock(x: number, y: number, values: Readonly<Record<string, ChunkValue | ChunkExpr>>, options?: ChunkConditionOptions): Promise<void>;
+  deleteBlock(x: number, y: number, options?: ChunkConditionOptions): Promise<void>;
   getChunk(cx: number, cy: number, options?: ChunkReadOptions): Promise<ChunkState | null>;
   getChunkRaw(cx: number, cy: number, options?: ChunkReadOptions): Promise<Buffer | null>;
   setChunk(cx: number, cy: number, state: ChunkStateInput, options?: ChunkTableOption): Promise<void>;
   setChunkRaw(cx: number, cy: number, form: Uint8Array, options?: ChunkTableOption): Promise<void>;
   getArea(area: ChunkArea, options?: ChunkReadOptions): Promise<ChunkAreaEntry[]>;
-  aggregate(selector: ChunkAggregateSelector, functions: readonly ChunkAggregateFunction[], options?: ChunkTableOption): Promise<ChunkAggregateResult>;
-  aggregateByChunk(selector: ChunkAggregateSelector, functions: readonly ChunkAggregateFunction[], options?: ChunkTableOption): Promise<ChunkAggregateRow[]>;
+  aggregate(selector: ChunkAggregateSelector, functions: readonly ChunkAggregateFunction[], options?: ChunkAggregateOptions): Promise<ChunkAggregateResult>;
+  aggregateByChunk(selector: ChunkAggregateSelector, functions: readonly ChunkAggregateFunction[], options?: ChunkAggregateOptions): Promise<ChunkAggregateRow[]>;
   getAreaRaw(area: ChunkArea, options?: ChunkReadOptions): Promise<ChunkAreaRawEntry[]>;
   getAreaWithSchema(area: ChunkArea, options?: ChunkReadOptions): Promise<ChunkAreaMetadata<ChunkAreaEntry>>;
   getAreaRawWithSchema(area: ChunkArea, options?: ChunkReadOptions): Promise<ChunkAreaMetadata<ChunkAreaRawEntry>>;
   getBlock3D(x: ChunkAxis, y: ChunkAxis, z: ChunkAxis, options?: ChunkReadOptions): Promise<ChunkRow | null>;
   getBlock3DWithMetadata(x: ChunkAxis, y: ChunkAxis, z: ChunkAxis, options?: ChunkReadOptions): Promise<ChunkBlockMetadata>;
-  setBlock3D(x: ChunkAxis, y: ChunkAxis, z: ChunkAxis, values: Readonly<Record<string, ChunkValue>>, options?: ChunkTableOption): Promise<void>;
-  deleteBlock3D(x: ChunkAxis, y: ChunkAxis, z: ChunkAxis, options?: ChunkTableOption): Promise<void>;
+  setBlock3D(x: ChunkAxis, y: ChunkAxis, z: ChunkAxis, values: Readonly<Record<string, ChunkValue | ChunkExpr>>, options?: ChunkConditionOptions): Promise<void>;
+  deleteBlock3D(x: ChunkAxis, y: ChunkAxis, z: ChunkAxis, options?: ChunkConditionOptions): Promise<void>;
   getChunk3D(cx: ChunkAxis, cy: ChunkAxis, cz: ChunkAxis, options?: ChunkReadOptions): Promise<ChunkState | null>;
   getChunkRaw3D(cx: ChunkAxis, cy: ChunkAxis, cz: ChunkAxis, options?: ChunkReadOptions): Promise<Buffer | null>;
   setChunk3D(cx: ChunkAxis, cy: ChunkAxis, cz: ChunkAxis, state: ChunkStateInput, options?: ChunkTableOption): Promise<void>;

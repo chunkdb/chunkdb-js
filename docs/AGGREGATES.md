@@ -24,7 +24,7 @@ console.log(await client.aggregateByChunk(area, [{ fn: "max", column: "id" }]));
 
 A selector is `{ chunk: [cx, cy] }` or `{ chunk: [cx, cy, cz] }`, a box `{ cx0, cy0, cx1, cy1 }` with optional `cz0` and `cz1`, or a ball `{ cx, cy, cz?, radius }`.
 A function is `{ fn: "count" }` or `{ fn: "sum" | "min" | "max" | "avg", column }` over an integer or float block column; each function appears at most once.
-Pass `{ table }` as the third argument to name another table.
+Pass `{ table }` as the third argument to name another table, and `{ where: { text, args } }` to count only the blocks for which a condition is true, such as `{ text: "light > $1", args: [{ column: "light", value: 2 }] }`; a chunk without a matching block has no row.
 
 ## Results
 
