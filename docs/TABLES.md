@@ -40,7 +40,7 @@ Columns support `nullable`, `required` and typed `default` values.
 Use the `addChunkColumn`, `dropChunkColumn` and `renameChunkColumn` alteration kinds for that domain.
 A type change without `using` refuses narrowing that loses existing values.
 Use `clamp`, `default` or `truncate` where the server permits them.
-`setDefault`, `dropDefault`, `setNullable` and `setRequired` change a column's attributes; `addCheck` and `dropCheck` add and drop CHECK constraints, which `describe()` lists in `checks`, and a write that breaks one rejects with `ChunkCheckFailedError`; `renameTable` renames the table and moves its specific grants.
+`setDefault`, `dropDefault`, `setNullable` and `setRequired` change a column's attributes; `addCheck` and `dropCheck` add and drop CHECK constraints (the condition is CQL text: never build it from untrusted input), which `describe()` lists in `checks`, and a write that breaks one rejects with `ChunkCheckFailedError`; `renameTable` renames the table and moves its specific grants.
 See [server tables reference](https://github.com/chunkdb/chunkdb/blob/main/docs/reference/TABLES.md) for conversions and schema constraints.
 
 | Option | Values |

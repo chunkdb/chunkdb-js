@@ -163,3 +163,24 @@ test("users rotate a password with two verifiers and hold server rights and pref
     } finally { await rot.close(); }
   } finally { await admin.close(); await server.stop(); }
 });
+
+test("rotatePassword adds a password with the login's salt and logs in with it", async () => {
+  const server = await startServer();
+  const admin = await connectUri(server.uri);
+  const options = { host: server.host, port: server.port };
+  try {
+    await admin.createUser("rot", "old-password");
+    const rot = await connect({ ...options, user: "rot", password: "old-password" });
+    try {
+      await rot.rotatePassword("new-password");
+      for (const password of ["old-password", "new-password"]) await (await connect({ ...options, user: "rot", password })).close();
+      await rot.dropOldVerifier("rot");
+      await assert.rejects(connect({ ...options, user: "rot", password: "old-password" }), ChunkAuthError);
+      assert.equal(await rot.ping(), "PONG");
+    } finally { await rot.close(); }
+    const anonymous = await connect(options).catch(() => null);
+    if (anonymous !== null) {
+      try { await assert.rejects(anonymous.rotatePassword("x"), /logged in as a user/); } finally { await anonymous.close(); }
+    }
+  } finally { await admin.close(); await server.stop(); }
+});

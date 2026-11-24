@@ -68,3 +68,4 @@ await admin.dropOldVerifier("bot");
 ```
 
 `listUsers()` reports `verifiers: 2` between the two calls; `setPassword` picks a new salt, so its verifiers fit VERIFIER but not ADD VERIFIER.
+A client logged in as the user can run `await client.rotatePassword("new-password")` instead: it computes the verifier with the salt and iterations its login matched, runs ADD VERIFIER, and logs in with the new password from then on; run `dropOldVerifier` once every other client has moved.
