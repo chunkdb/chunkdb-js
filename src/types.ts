@@ -275,8 +275,6 @@ export interface ChunkSchemaEvent {
   columns: ChunkColumn[];
   dims?: number;
   chunkColumns?: ChunkColumn[];
-  /** CHECK constraints: a name and a condition no present block may make false; absent without any. */
-  checks?: Array<{ name: string; expression: string }>;
 }
 
 export interface ChunkResyncEvent {
@@ -381,6 +379,8 @@ export interface ChunkTableSchema {
   revision?: bigint | null;
   dims?: number;
   chunkColumns?: ChunkColumn[];
+  /** CHECK constraints: a name and a condition no present block may make false; absent without any. */
+  checks?: Array<{ name: string; expression: string }>;
 }
 
 export interface ChunkColumnDefinition {
