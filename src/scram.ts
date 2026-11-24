@@ -10,6 +10,8 @@ const pbkdf2Async = promisify(pbkdf2);
 
 /** The fewest PBKDF2 iterations a chunkdb server takes in a verifier. */
 export const MIN_SCRAM_ITERATIONS = 4096;
+// The most PBKDF2 iterations a chunkdb server issues in a login.
+const MAX_SERVER_ITERATIONS = 1_000_000;
 const SALT_BYTES = 16;
 const MAX_SALT_BYTES = 256;
 const NONCE_BYTES = 18;
@@ -120,8 +122,13 @@ export async function finishScramLogin(login: ScramLogin, password: string, serv
     throw new TypeError("the server nonce does not continue the client nonce");
   }
   const iterations = Number(iterationsText);
-  if (!BASE64.test(saltText) || !Number.isSafeInteger(iterations) || iterations < 1 || iterations > 0xffffffff) {
+  if (!BASE64.test(saltText) || !Number.isSafeInteger(iterations)) {
     throw new TypeError("not a SCRAM server-first message");
+  }
+  // The range a chunkdb server issues: fewer is too weak, more would hold
+  // the client in PBKDF2 for as long as the server chose.
+  if (iterations < MIN_SCRAM_ITERATIONS || iterations > MAX_SERVER_ITERATIONS) {
+    throw new TypeError(`the server asked for ${iterationsText} SCRAM iterations; a chunkdb server issues ${MIN_SCRAM_ITERATIONS} to ${MAX_SERVER_ITERATIONS}`);
   }
   const salted = await pbkdf2Async(password, Buffer.from(saltText, "base64"), iterations, 32, "sha256");
   const clientKey = hmac(salted, "Client Key");

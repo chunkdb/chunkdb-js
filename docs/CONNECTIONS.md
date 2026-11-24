@@ -5,6 +5,7 @@ With `new ChunkClient(options)`, call `connect()` or let the first operation con
 Use `user`, `password`, `host`, `port`, `table` and `tls` options to override URI settings.
 `connectUri` refuses a missing or empty URI, and a user without a password fails with `ChunkConnectionError` before connecting.
 
+A URI host can be an IPv6 address in brackets, such as `chunk://[::1]:4242/`.
 `uri()` omits the password; `defaultTable()` returns the chosen table, or an empty string when none was selected.
 A table operation needs a URI path, connection `table` option or method `table` option.
 Without one it fails locally; the client does not select an implicit table.
@@ -57,7 +58,7 @@ Closing a client or pool is final; create a new instance afterward.
 
 ## Timeouts and TLS
 
-`connectTimeoutMs` bounds connection establishment; `commandTimeoutMs` bounds each reply, including login.
+`connectTimeoutMs` bounds connection establishment and the login (HELLO and AUTH); `commandTimeoutMs` bounds each later reply.
 Both default to 5000 milliseconds.
 A timeout closes the connection; a later ordinary call reconnects.
 A watch ends and requires explicit resumption.

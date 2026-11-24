@@ -33,10 +33,19 @@ test("a server-first message must continue the client nonce", async () => {
   for (const serverFirst of [
     "r=rOprNGfwEbeRWgbNEkqOx,s=W22ZaJ0SNY7soEsUEjb6gQ==",
     "r=rOprNGfwEbeRWgbNEkqOx,s=not base64!,i=4096",
-    "r=rOprNGfwEbeRWgbNEkqOx,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=0",
     "s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096",
   ]) {
     await assert.rejects(finishScramLogin(login, "pencil", serverFirst), /not a SCRAM server-first message/);
+  }
+});
+
+test("a server-first iteration count is taken only from 4096 to 1000000", async () => {
+  const login = startScramLogin("user", "rOprNGfwEbeRWgbNEkqO");
+  for (const iterations of ["0", "1", "4095", "1000001", "4294967295"]) {
+    await assert.rejects(
+      finishScramLogin(login, "pencil", `r=rOprNGfwEbeRWgbNEkqOx,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=${iterations}`),
+      /a chunkdb server issues 4096 to 1000000/,
+    );
   }
 });
 

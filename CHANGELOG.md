@@ -24,6 +24,10 @@ This client uses CQL protocol 3 with chunkdb 2.x; see the server's [compatibilit
 - Generic `BACKUP TO` integration coverage checks summaries and copied data over plain TCP and TLS
 
 ### Fixed
+- A login no longer waits forever when the connection closes between `+SCRAM` and AUTH: the login fails, and calls waiting for the connection fail with it. HELLO and AUTH go on the login's own socket, no other statement is written before the login ends, and `connectTimeoutMs` covers the whole login. (#47)
+- A login refuses a server-first message whose iteration count is outside 4096 to 1000000, the range a chunkdb server issues. (#47)
+- An IPv6 URI host such as `chunk://[::1]:4242/` connects to the address without brackets and sends no TLS server name for it. (#47)
+- `close()` clears its close timer instead of leaving it running for 200 ms. (#47)
 - Errors on a first connection name the next step: URI errors show the expected form and schemes, `chunk://` against a TLS server points to `chunk://` versus `chunks://`, a user without a password fails before connecting, `connectUri` refuses a missing URI instead of connecting to 127.0.0.1:4242, and an unknown column fails as a request error with a `DESCRIBE` hint. ([chunkdb#152](https://github.com/chunkdb/chunkdb/issues/152))
 - Decode projected WATCH rows in the requested order from the first change and retain the projection through column renames, while keeping complete chunk metadata.
 - Server error `keys` keep diagnostic keys of any name, such as `Future-Key`, and the known fields after them, instead of stopping at the first key that is not lowercase snake_case.
