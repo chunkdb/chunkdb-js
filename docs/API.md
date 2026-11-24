@@ -38,7 +38,7 @@ A chunk version identifies committed state and orders writes within the same tab
 | `compactTombstones(name, before)` | retained-deletion floor (`bigint`) |
 | `clearSchemaCache(table?)` | synchronous cache invalidation |
 | `createUser(name, password, { managesUsers?, requiresChannelBinding? }?)` | create user |
-| `setPassword(name, password)`, `setManagesUsers(name, value)`, `setRequiresChannelBinding(name, value)` | change user |
+| `setPassword(name, password)`, `addVerifier(name, verifier)`, `dropOldVerifier(name)`, `setManagesUsers(name, value)`, `setRequiresChannelBinding(name, value)` | change user; see [rotate a password](USERS.md#rotate-a-password) |
 | `dropUser(name)`, `grant(right, table, user)`, `revoke(right, table, user)` | manage users/rights |
 | `setUserLimits(name, { maxConnections?, statementsPerSec? })` | connection and statement-rate limits; zero disables a limit |
 | `listUsers()` | `ChunkUser[]` |

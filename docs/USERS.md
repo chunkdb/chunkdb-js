@@ -48,3 +48,23 @@ The client sends only a computed verifier for password changes, using `verifierI
 An existing client keeps its original login password.
 Create a new connection with the changed password.
 See the [server users guide](https://github.com/chunkdb/chunkdb/blob/main/docs/USERS.md) for bootstrap and offline recovery.
+
+## Server rights and prefixes
+
+`grant("READ", "tenant1_*", user)` covers every table whose name starts with `tenant1_`, future tables included; prefix and `"*"` grants stay when a table is dropped.
+MONITOR, BACKUP and REPLICATION are server rights, granted on `"*"` only: MONITOR reads metrics, status, every connection and every table's stats and slots, BACKUP takes backups, and REPLICATION follows every table's feed.
+`listUsers()` reports them in `serverRights`.
+`ChunkPermissionError` reports `rights`, the rights of which any one would do, such as `["MONITOR", "ADMIN"]`, and `rightsOn`, the table, prefix or `"*"` they are needed on.
+
+## Rotate a password
+
+A user can hold two verifiers, so clients move to a new password while the old one still logs in.
+Compute the new verifier with the salt and iterations of the current one, which a login as the user receives as `s=` and `i=` in the SCRAM server-first message:
+
+```text
+await admin.addVerifier("bot", scramVerifier("new-password", { salt, iterations }));
+// Move every client to the new password, then:
+await admin.dropOldVerifier("bot");
+```
+
+`listUsers()` reports `verifiers: 2` between the two calls; `setPassword` picks a new salt, so its verifiers fit VERIFIER but not ADD VERIFIER.

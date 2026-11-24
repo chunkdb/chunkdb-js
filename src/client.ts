@@ -240,7 +240,8 @@ const DEFAULT_TRANSACTION_RETRIES = 5;
 // The name follows the guard in `CREATE TABLE IF NOT EXISTS` and `DROP TABLE IF EXISTS`.
 const TABLE_STATEMENT =
   /^\s*(?:migrate\s+'[a-z_][a-z0-9_]{0,62}'\s+)?(?:create\s+table\s+(?:if\s+not\s+exists\s+)?|alter\s+table\s+|drop\s+table\s+(?:if\s+exists\s+)?)([a-z_][a-z0-9_]*)/i;
-const RIGHTS: readonly ChunkRight[] = ["READ", "WRITE", "ADMIN"];
+const RIGHTS: readonly ChunkRight[] = ["READ", "WRITE", "ADMIN", "MONITOR", "BACKUP", "REPLICATION"];
+const SERVER_RIGHTS: readonly ChunkRight[] = ["MONITOR", "BACKUP", "REPLICATION"];
 const CHANNEL_BINDINGS: readonly ChunkChannelBinding[] = ["auto", "off", "require"];
 // The statements of the login, sent while connecting.
 const HANDSHAKE = new Set(["HELLO", "AUTH"]);
@@ -402,13 +403,16 @@ function coordOf(reply: ChunkReply, command: string): ChunkCoord {
 
 function rightOf(right: ChunkRight, command: string): ChunkRight {
   if (!RIGHTS.includes(right)) {
-    throw requestError(`a right is READ, WRITE or ADMIN, got ${JSON.stringify(right)}`, command);
+    throw requestError(`a right is READ, WRITE, ADMIN, MONITOR, BACKUP or REPLICATION, got ${JSON.stringify(right)}`, command);
   }
   return right;
 }
 
-function grantTable(table: string, command: string): string {
-  return table === "*" ? table : checkName(table, `a table name (or "*") in ${command}`);
+function grantTable(table: string, command: string, right: ChunkRight): string {
+  if (SERVER_RIGHTS.includes(right) && table !== "*") throw requestError(`${right} is a server right, granted on "*" only`, command);
+  if (table === "*") return table;
+  if (table.endsWith("*")) return `${checkName(table.slice(0, -1), `a table prefix in ${command}`)}*`;
+  return checkName(table, `a table name, prefix* or "*" in ${command}`);
 }
 
 function userOf(reply: ChunkReply, command: string): ChunkUser {
@@ -432,11 +436,26 @@ function userOf(reply: ChunkReply, command: string): ChunkUser {
       return [table, known];
     }),
   );
+  const serverRightsReply = entries.get("server_rights");
+  const serverRights = serverRightsReply === undefined ? [] : itemsOf(serverRightsReply, command).map((item) => {
+    const text = textOf(item, "a server right", command);
+    const known = SERVER_RIGHTS.find((candidate) => candidate === text);
+    if (known === undefined) throw new ChunkProtocolError(`malformed ${command} reply: unknown server right ${text}`, { phase: "protocol", command });
+    return known;
+  });
+  const verifiersReply = entries.get("verifiers");
+  let verifiers: number | undefined;
+  if (verifiersReply !== undefined) {
+    if (verifiersReply.type !== "integer" || (verifiersReply.value !== 1n && verifiersReply.value !== 2n)) throw new ChunkProtocolError(`malformed ${command} reply: verifiers is not 1 or 2`, { phase: "protocol", command });
+    verifiers = Number(verifiersReply.value);
+  }
   return {
     name: textOf(name, "a user name", command),
     managesUsers: managesUsers.value,
     requiresChannelBinding: requiresChannelBinding.value,
     grants,
+    serverRights,
+    ...(verifiers === undefined ? {} : { verifiers }),
   };
 }
 
@@ -1416,6 +1435,30 @@ export class ChunkClient {
     });
   }
 
+  /**
+   * `ALTER USER ... ADD VERIFIER`: a second verifier, so the old and the new
+   * password both log in while clients move to the new one; then run
+   * `dropOldVerifier`. The verifier must use the salt and iterations of the
+   * user's current one: `scramVerifier(password, { salt, iterations })`.
+   */
+  addVerifier(name: string, verifier: string): Promise<void> {
+    return this.enqueue(async () => {
+      checkName(name, "a user name");
+      if (typeof verifier !== "string" || !/^SCRAM-SHA-256\$[0-9]+:[A-Za-z0-9+\/]+=*\$[A-Za-z0-9+\/]+=*:[A-Za-z0-9+\/]+=*$/.test(verifier)) {
+        throw requestError("addVerifier needs a SCRAM-SHA-256 verifier", "ALTER USER");
+      }
+      expectOk(await this.run(`ALTER USER ${name} ADD VERIFIER $1`, [Buffer.from(verifier)], "ALTER USER"), "ALTER USER");
+    });
+  }
+
+  /** `ALTER USER ... DROP OLD VERIFIER`: only the added verifier's password logs in from then on. */
+  dropOldVerifier(name: string): Promise<void> {
+    return this.enqueue(async () => {
+      checkName(name, "a user name");
+      expectOk(await this.run(`ALTER USER ${name} DROP OLD VERIFIER`, [], "ALTER USER"), "ALTER USER");
+    });
+  }
+
   /** `ALTER USER ... [NO] MANAGES USERS`. */
   setManagesUsers(name: string, managesUsers: boolean): Promise<void> {
     return this.enqueue(async () => {
@@ -1453,7 +1496,7 @@ export class ChunkClient {
   /** `GRANT <right> ON <table> TO <user>`; `"*"` stands for every table, those created later included. */
   grant(right: ChunkRight, table: string, user: string): Promise<void> {
     return this.enqueue(async () => {
-      const statement = `GRANT ${rightOf(right, "GRANT")} ON ${grantTable(table, "GRANT")} TO ${checkName(user, "a user name")}`;
+      const statement = `GRANT ${rightOf(right, "GRANT")} ON ${grantTable(table, "GRANT", right)} TO ${checkName(user, "a user name")}`;
       expectOk(await this.run(statement, [], "GRANT"), "GRANT");
     });
   }
@@ -1461,7 +1504,7 @@ export class ChunkClient {
   /** `REVOKE <right> ON <table> FROM <user>`: takes away the right and those above it. */
   revoke(right: ChunkRight, table: string, user: string): Promise<void> {
     return this.enqueue(async () => {
-      const statement = `REVOKE ${rightOf(right, "REVOKE")} ON ${grantTable(table, "REVOKE")} FROM ${checkName(user, "a user name")}`;
+      const statement = `REVOKE ${rightOf(right, "REVOKE")} ON ${grantTable(table, "REVOKE", right)} FROM ${checkName(user, "a user name")}`;
       expectOk(await this.run(statement, [], "REVOKE"), "REVOKE");
     });
   }

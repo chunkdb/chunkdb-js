@@ -108,7 +108,8 @@ export interface ChunkServerInfo {
 }
 
 /** A right on a table: `ADMIN` includes `WRITE`, which includes `READ`. */
-export type ChunkRight = "READ" | "WRITE" | "ADMIN";
+/** READ, WRITE and ADMIN are table rights; MONITOR, BACKUP and REPLICATION are server rights, granted on `"*"` only. */
+export type ChunkRight = "READ" | "WRITE" | "ADMIN" | "MONITOR" | "BACKUP" | "REPLICATION";
 
 /** One named schema or permissions statement, applied once by the server. */
 export interface ChunkMigration {
@@ -129,8 +130,12 @@ export interface ChunkUser {
   managesUsers: boolean;
   /** The user logs in only with a login bound to its TLS connection. */
   requiresChannelBinding: boolean;
-  /** Rights by table name; `"*"` stands for every table. */
+  /** Rights by table name, prefix such as `"tenant1_*"`, or `"*"` for every table. */
   grants: Record<string, ChunkRight>;
+  /** MONITOR, BACKUP and REPLICATION the user holds; empty from a server that does not show them. */
+  serverRights: ChunkRight[];
+  /** 2 between `addVerifier` and `dropOldVerifier`, else 1; undefined from a server that does not show it. */
+  verifiers?: number;
 }
 
 export interface ChunkCreateUserOptions {
