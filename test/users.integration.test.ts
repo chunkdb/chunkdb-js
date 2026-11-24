@@ -4,10 +4,12 @@ import assert from "node:assert/strict";
 import {
   ChunkAuthError,
   ChunkClient,
+  ChunkInvalidArgumentError,
   ChunkPermissionError,
   ChunkServerError,
   connect,
   connectUri,
+  scramVerifier,
 } from "../src/index";
 import { startServer } from "./helpers";
 
@@ -126,4 +128,38 @@ test("a server with --auth none takes HELLO 3 without a user", async () => {
   } finally {
     await server.stop();
   }
+});
+
+test("users rotate a password with two verifiers and hold server rights and prefix grants", async () => {
+  const server = await startServer();
+  const admin = await connectUri(server.uri);
+  const options = { host: server.host, port: server.port };
+  try {
+    const salt = Buffer.alloc(16, 7);
+    await admin.execute("CREATE USER rot VERIFIER $1", [Buffer.from(scramVerifier("old-password", { salt, iterations: 4096 }))]);
+    await admin.addVerifier("rot", scramVerifier("new-password", { salt, iterations: 4096 }));
+    for (const password of ["old-password", "new-password"]) await (await connect({ ...options, user: "rot", password })).close();
+    const rotUser = async () => (await admin.listUsers()).find(({ name }) => name === "rot")!;
+    assert.equal((await rotUser()).verifiers, 2);
+    await assert.rejects(admin.addVerifier("rot", scramVerifier("other", { salt: Buffer.alloc(16, 9), iterations: 4096 })), ChunkInvalidArgumentError);
+    await admin.dropOldVerifier("rot");
+    assert.equal((await rotUser()).verifiers, 1);
+    await assert.rejects(connect({ ...options, user: "rot", password: "old-password" }), ChunkAuthError);
+    await assert.rejects(admin.addVerifier("rot", "not a verifier"), /SCRAM-SHA-256 verifier/);
+
+    const rot = await connect({ ...options, user: "rot", password: "new-password" });
+    try {
+      await assert.rejects(rot.metrics(), (error: unknown) => error instanceof ChunkPermissionError && error.rights.join() === "MONITOR,ADMIN" && error.rightsOn === "*");
+      await admin.grant("MONITOR", "*", "rot");
+      assert.equal(typeof await rot.metrics(), "string");
+      await assert.rejects(admin.grant("BACKUP", "world", "rot"), /server right/);
+      await admin.grant("READ", "tenant1_*", "rot");
+      await admin.createTable("tenant1_map", { columns: [{ name: "n", type: "u8" }], chunk: { width: 2, height: 2 } });
+      assert.equal(await rot.getBlock(0, 0, { table: "tenant1_map" }), null);
+      const user = await rotUser();
+      assert.deepEqual([user.serverRights, user.grants["tenant1_*"]], [["MONITOR"], "READ"]);
+      await admin.revoke("MONITOR", "*", "rot");
+      assert.deepEqual((await rotUser()).serverRights, []);
+    } finally { await rot.close(); }
+  } finally { await admin.close(); await server.stop(); }
 });

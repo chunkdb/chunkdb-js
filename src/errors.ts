@@ -164,7 +164,20 @@ export class ChunkUnknownColumnTypeError extends ChunkProtocolError {}
 export class ChunkAuthError extends ChunkServerError {}
 
 /** `PERMISSION_DENIED`: the user lacks the right the statement needs; nothing changed. */
-export class ChunkPermissionError extends ChunkServerError {}
+export class ChunkPermissionError extends ChunkServerError {
+  /** The rights of which any one would do, as the server names them: `["WRITE"]`, `["MANAGES USERS"]` or `["MONITOR", "ADMIN"]`. */
+  readonly rights: string[];
+  /** The table, prefix or `"*"` the right is needed on; undefined for MANAGES USERS. */
+  readonly rightsOn?: string;
+
+  constructor(serverCode: string, serverMessage: string, options: Omit<ChunkErrorOptions, "code">) {
+    super(serverCode, serverMessage, options);
+    const [needed] = this.detail.split("; ");
+    const [rights, on] = needed.split(" on ");
+    this.rights = rights === "" ? [] : rights.split(" or ");
+    this.rightsOn = on;
+  }
+}
 
 /**
  * `VERSION_MISMATCH`: an `ifVersion` write found another version, or an

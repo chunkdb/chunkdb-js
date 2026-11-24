@@ -555,6 +555,14 @@ export class ChunkPool {
     return this.withClient(async (client) => await client.dropUser(name));
   }
 
+  addVerifier(name: string, verifier: string): Promise<void> {
+    return this.withClient(async (client) => await client.addVerifier(name, verifier));
+  }
+
+  dropOldVerifier(name: string): Promise<void> {
+    return this.withClient(async (client) => await client.dropOldVerifier(name));
+  }
+
   grant(right: ChunkRight, table: string, user: string): Promise<void> {
     return this.withClient(async (client) => await client.grant(right, table, user));
   }
