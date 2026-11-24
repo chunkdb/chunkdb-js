@@ -64,7 +64,9 @@ A timeout closes the connection; a later ordinary call reconnects.
 A watch ends and requires explicit resumption.
 
 The client does not replay operations after connection loss.
-A sent write can have an unknown outcome.
+A request whose connection is lost or times out after it was written fails with `ChunkConnectionError`, `ChunkTlsError` or `ChunkTimeoutError` whose `retryClass` is `"unknown_outcome"`: it may have applied, so check before you repeat it.
+Inside a transaction only `COMMIT` fails that way; the server rolls back the statements before it when the connection closes.
+A request that was not written yet fails without a `retryClass`.
 
 Set `helloOptions.statement_timeout_ms` to an integer from 0 through 86400000 to bound server statement execution.
 Omission inherits the server default; explicit zero disables that deadline.
@@ -93,7 +95,7 @@ Use `chunks://` or `tls: true` for TLS.
 The default `"auto"` binds every login over `chunks://` (`tls-exporter` on TLS 1.3, `tls-server-end-point` on TLS 1.2) and logs in unbound over `chunk://`.
 `"require"` binds like `"auto"` and refuses `chunk://`, or a client without a user, with a `ChunkConnectionError` before connecting.
 `"off"` never binds: set it when a proxy or load balancer in front of the server ends TLS.
-Through such a proxy a bound login fails with `ChunkAuthError` (`AUTH_FAILED`, `reason` `channel_binding`); the client does not retry it unbound.
+Through a proxy that opens its own TLS connection to the server a bound login fails with `ChunkAuthError` (`AUTH_FAILED`, `reason` `channel_binding`); through one that forwards plain TCP it fails with `ChunkInvalidArgumentError`; the client does not retry it unbound.
 A server started with `--auth-channel-binding require` refuses an unbound login with `ChunkAuthError` (`AUTH_REQUIRED`, `reason` `channel_binding`).
 On TLS 1.2 a server certificate signed with Ed25519 or Ed448 defines no binding, and a login fails with `ChunkTlsError`; use TLS 1.3 or `"off"`.
 
@@ -108,7 +110,7 @@ On TLS 1.2 a server certificate signed with Ed25519 or Ed448 defines no binding,
 | `ChunkConflictError` | The transaction helper reruns its callback; inspect `reason`. |
 | `ChunkConditionFailedError` | Re-read state before deciding on another conditional write. |
 | `ChunkBusyError`, `ChunkDiskFullError`, `ChunkRateLimitedError` | Back off before retrying; inspect `retryAfterMs` when present. |
-| `ChunkOutcomeUnknownError` | Reconcile the write's outcome before deciding whether to retry. |
+| `ChunkOutcomeUnknownError` | Reconcile the write's outcome before deciding whether to retry; a transport error with `retryClass` `"unknown_outcome"` asks the same. |
 | `ChunkMigrationMismatchError` | Keep the recorded migration name and statement unchanged. |
 | `ChunkSlotBusyError` | Release the slot's owner or request an authorized takeover. |
 | `ChunkCheckFailedError`, `ChunkCancelledError`, `ChunkStatementTimeoutError`, `ChunkKilledError` | Handle the failure explicitly; these are fatal retry classes. |

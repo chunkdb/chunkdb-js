@@ -192,6 +192,10 @@ function scanReply(buffer: Buffer, start: number, depth = 0, budget?: ScanBudget
   if (prefix === 0x3e && depth !== 0) {
     throw protocolError("push inside an aggregate reply");
   }
+  // An error answers a whole statement; inside an array or map it is not data.
+  if (prefix === 0x2d && depth !== 0) {
+    throw protocolError("error inside an aggregate reply");
+  }
   const text = buffer.toString("latin1", start + 1, end);
   const next = end + 2;
   checkReplyEnd(next, budget);

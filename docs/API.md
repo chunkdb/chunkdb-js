@@ -120,7 +120,7 @@ Bulk values are Buffers, array/push replies have `items`, and maps have ordered 
 Use `client.uri()` when logging an endpoint.
 
 `scramVerifier(password, options?)` derives a verifier for raw user statements.
-All public error classes derive from `ChunkError`.
+All public error classes derive from `ChunkError`; its `retryClass` is `"unknown_outcome"` for a request whose reply was lost after it was written.
 See [connections and errors](CONNECTIONS.md).
 
 See [protocol compatibility](PROTOCOL.md) for extensible decoding and exact feature masks.

@@ -223,6 +223,11 @@ interface OperationWaiter {
 interface PendingRequest {
   // None for HELLO and AUTH: the login's own timer bounds them.
   timer?: NodeJS.Timeout;
+  command: string;
+  // Whether the request may apply when its reply is lost: false for the
+  // login and for a transaction's statements before COMMIT, which the
+  // server rolls back when the connection closes.
+  mayApply: boolean;
   resolve: (reply: ChunkReply) => void;
   reject: (error: Error) => void;
   replyLimits?: ReplyLimits;
@@ -504,18 +509,27 @@ function transactionLost(command: string): ChunkConnectionError {
   return error;
 }
 
+// A request whose connection failed after it was written may or may not
+// have been applied: the same class, with retryClass "unknown_outcome".
+function outcomeUnknown(error: ChunkError, command: string): ChunkError {
+  if (error.retryClass === "unknown_outcome") {
+    return error;
+  }
+  const message = `the outcome of ${command} is unknown: ${error.message}`;
+  const options = { phase: error.phase, command, code: error.code, cause: error, retryClass: "unknown_outcome" as const };
+  if (error instanceof ChunkTimeoutError) {
+    return new ChunkTimeoutError(message, options);
+  }
+  return error instanceof ChunkTlsError ? new ChunkTlsError(message, options) : new ChunkConnectionError(message, options);
+}
+
 // A COMMIT whose connection failed after it was sent may or may not have
 // been applied.
 function commitError(error: unknown): unknown {
   if (!isTransportError(error) || unsent.has(error)) {
     return error;
   }
-  const message = `the outcome of COMMIT is unknown: ${error.message}`;
-  const options = { phase: error.phase, command: "COMMIT", code: error.code, cause: error };
-  if (error instanceof ChunkTimeoutError) {
-    return new ChunkTimeoutError(message, options);
-  }
-  return error instanceof ChunkTlsError ? new ChunkTlsError(message, options) : new ChunkConnectionError(message, options);
+  return outcomeUnknown(error, "COMMIT");
 }
 
 // A short random pause before a transaction runs again, so that
@@ -2287,14 +2301,12 @@ export class ChunkClient {
       reply = await this.handshake(socket, `HELLO ${PROTOCOL_VERSION} USER ${user} $1${withClause}`, [Buffer.from(login.first, "utf8")], "HELLO");
     }
     if (reply.type === "error") {
-      // An older chunkdb answers `-ERR PROTOCOL expected HELLO 2`; a 1.x
-      // server does not know HELLO.
-      const older = /^expected HELLO ([0-9]+)/.exec(reply.message);
-      if (
-        (reply.code === "PROTOCOL" && older !== null && older[1] !== String(PROTOCOL_VERSION)) ||
-        reply.code === "UNKNOWN_COMMAND"
-      ) {
-        const speaks = older === null ? "an older protocol (chunkdb 1.x)" : `the older protocol ${older[1]}`;
+      // Judged by the code and keys alone: every error of a protocol 3
+      // server carries `reason`, so PROTOCOL without one comes from an older
+      // protocol, and a 1.x server does not know HELLO.
+      const keyless = parseErrorFields(reply.message).keys.reason === undefined;
+      if ((reply.code === "PROTOCOL" && keyless) || reply.code === "UNKNOWN_COMMAND") {
+        const speaks = reply.code === "UNKNOWN_COMMAND" ? "an older protocol (chunkdb 1.x)" : "an older protocol";
         throw new ChunkProtocolError(
           `the server speaks ${speaks}; this client needs a chunkdb server of protocol ${PROTOCOL_VERSION}`,
           { phase: "protocol", command: "HELLO", cause: this.serverError(reply, "HELLO") },
@@ -2354,7 +2366,7 @@ export class ChunkClient {
     } catch (error) {
       return Promise.reject(error instanceof ChunkProtocolError ? new ChunkProtocolError(error.message, { phase: "request", command }) : error);
     }
-    return this.writeRequest(socket, wire, command);
+    return this.writeRequest(socket, wire, command, false);
   }
 
   // The data that binds the login to this connection, read after the TLS
@@ -2495,7 +2507,9 @@ export class ChunkClient {
     }
     const expiresAt = performance.now() + this.options.commandTimeoutMs;
     onConnection?.(socket, expiresAt);
-    const replyPromise = this.writeRequest(socket, wire, command, this.options.commandTimeoutMs, replyLimits);
+    // Before COMMIT a transaction's statements roll back with the connection.
+    const mayApply = tx === undefined || command === "COMMIT";
+    const replyPromise = this.writeRequest(socket, wire, command, mayApply, this.options.commandTimeoutMs, replyLimits);
     if (turn !== undefined && main) {
       turn.release();
     }
@@ -2515,8 +2529,9 @@ export class ChunkClient {
   }
 
   // Writes one framed statement on `socket` and waits for its reply, for at
-  // most `timeoutMs` when given.
-  private writeRequest(socket: TransportSocket, wire: Buffer, command: string, timeoutMs?: number, replyLimits?: ReplyLimits): Promise<ChunkReply> {
+  // most `timeoutMs` when given. A request that `mayApply` fails with an
+  // unknown outcome when its connection is lost before the reply.
+  private writeRequest(socket: TransportSocket, wire: Buffer, command: string, mayApply: boolean, timeoutMs?: number, replyLimits?: ReplyLimits): Promise<ChunkReply> {
     const replyPromise = new Promise<ChunkReply>((resolve, reject) => {
       const timer: NodeJS.Timeout | undefined = timeoutMs === undefined ? undefined : setTimeout(() => {
         const index = this.pendingQueue.findIndex((pending) => pending.timer === timer);
@@ -2530,14 +2545,13 @@ export class ChunkClient {
           );
         }
         socket.destroy();
-        reject(
-          new ChunkTimeoutError(`${command} command timeout after ${timeoutMs}ms; check the server and network, then adjust commandTimeoutMs if needed`, {
-            phase: "timeout",
-            command,
-          }),
-        );
+        const error = new ChunkTimeoutError(`${command} command timeout after ${timeoutMs}ms; check the server and network, then adjust commandTimeoutMs if needed`, {
+          phase: "timeout",
+          command,
+        });
+        reject(mayApply ? outcomeUnknown(error, command) : error);
       }, timeoutMs);
-      this.pendingQueue.push({ timer, resolve, reject, replyLimits });
+      this.pendingQueue.push({ timer, resolve, reject, replyLimits, command, mayApply });
     });
 
     socket.write(wire, (error) => {
@@ -2666,11 +2680,13 @@ export class ChunkClient {
     }
   }
 
+  // Fails the requests waiting for a reply. They were written, so a lost
+  // connection leaves the outcome of each one that may apply unknown.
   private failAllPending(error: Error): void {
     const queue = this.pendingQueue.splice(0);
     for (const pending of queue) {
       clearTimeout(pending.timer);
-      pending.reject(error);
+      pending.reject(pending.mayApply && isTransportError(error) ? outcomeUnknown(error, pending.command) : error);
     }
   }
 

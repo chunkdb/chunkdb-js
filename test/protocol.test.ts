@@ -117,6 +117,13 @@ test("malformed replies are protocol errors", () => {
   assert.throws(() => parseReply(Buffer.from("*x\r\n")), ChunkProtocolError);
 });
 
+test("an error reply inside an array, map or push is a protocol error", () => {
+  for (const reply of ["*2\r\n:1\r\n-ERR INTERNAL boom\r\n", "%1\r\n+k\r\n-ERR INTERNAL boom\r\n", ">2\r\n+change\r\n-ERR INTERNAL boom\r\n"]) {
+    assert.throws(() => parseReply(Buffer.from(reply, "latin1")), /error inside an aggregate reply/, JSON.stringify(reply));
+  }
+  assert.deepEqual(parse("-ERR INTERNAL boom\r\n"), { type: "error", code: "INTERNAL", message: "boom" });
+});
+
 test("the reader keeps reply order across arbitrary chunk boundaries", () => {
   const wire = Buffer.concat([
     Buffer.from("+OK\r\n:1043\r\n$3\r\na\r\n\r\n*1\r\n*3\r\n:0\r\n:0\r\n$2\r\n"),
