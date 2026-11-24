@@ -24,6 +24,8 @@ A chunk version identifies committed state and orders writes within the same tab
 | `getAreaWithSchema(area, readOptions?)`, `getAreaRawWithSchema(area, readOptions?)` | `{ schemaVersion: bigint, entries }` |
 | `getAreaPage(area, pageOptions?)`, `getAreaRawPage(area, pageOptions?)` | `{ schemaVersion: bigint, chunks, more, after }` with exact bigint coordinates |
 | `getAreaPage3D(area, pageOptions?)`, `getAreaRawPage3D(area, pageOptions?)` | The same page with a three-axis cursor |
+| `aggregate(selector, functions, { table? }?)` | results keyed by function name; see [aggregates](AGGREGATES.md) |
+| `aggregateByChunk(selector, functions, { table? }?)` | `ChunkAggregateRow[]`: `{ cx, cy, cz?, values }` per chunk |
 | `scanChunks({ table?, after?, limit? }?)` | `ChunkScanPage`: `{ chunks, more }` |
 | `scanAllChunks({ table?, limit? }?)` | async generator of `{ cx, cy }` |
 | `scanChunksWithOptions(scanOptions?)` | retained versions, optional data and snapshot frontier |
@@ -31,18 +33,25 @@ A chunk version identifies committed state and orders writes within the same tab
 | `createTable(name, definition)` | create schema/geometry/options |
 | `alterTable(name, change)`, `dropTable(name)` | change schema/options or drop table |
 | `listTables()`, `describe(table?)` | visible names / `ChunkTableSchema` |
+| `swapTables(first, second)`, `recoverTable(name)` | exchange two table names / serve a fenced table again |
+| `tableStats(name)` | `{ epoch, revision, dims, tombstones, retainedDeletionFloor }` |
+| `compactTombstones(name, before)` | retained-deletion floor (`bigint`) |
 | `clearSchemaCache(table?)` | synchronous cache invalidation |
 | `createUser(name, password, { managesUsers?, requiresChannelBinding? }?)` | create user |
 | `setPassword(name, password)`, `setManagesUsers(name, value)`, `setRequiresChannelBinding(name, value)` | change user |
 | `dropUser(name)`, `grant(right, table, user)`, `revoke(right, table, user)` | manage users/rights |
+| `setUserLimits(name, { maxConnections?, statementsPerSec? })` | connection and statement-rate limits; zero disables a limit |
 | `listUsers()` | `ChunkUser[]` |
 | `transaction(fn, { retries? }?)` | commit version or null |
 | `migrate(steps)` | ordered `ChunkMigrationResult[]` |
+| `listMigrations()` | `{ name, appliedMs, user, statement }[]` in applied order |
 | `watch(table, watchOptions?)` | `ChunkWatch` async iterator |
 | `createSlot(table, name, slotOptions?)`, `dropSlot(table, name)`, `listSlots(table?)` | slot administration / `ChunkSlot[]` |
 | `enableFeature(name)`, `showStatus()` | explicit feature activation / protected feature masks; requires ADMIN on `*` |
 | `execute(statement, parameters?)` | `ChunkReply` |
 | `ping()`, `flushWal()`, `metrics()` | `"PONG"` / durable prior WAL writes / Prometheus text |
+| `backup(destination)`, `restoreTable(table, backup, { as? }?)` | backup summary / restored table identity; see [backup](BACKUP.md) |
+| `reloadTls()` | new connections use the reloaded certificate and key |
 | `showConnections()` | `ChunkConnectionInfo[]` with exact bigint IDs |
 | `cancel(id)`, `killConnection(id)` | boolean cancellation / termination acknowledgment |
 | `connect()`, `close()` | establish / permanently close client |
@@ -50,7 +59,7 @@ A chunk version identifies committed state and orders writes within the same tab
 
 `readOptions` is `{ table?, columns? }`.
 `writeOptions` is `{ table?, ifVersion?: bigint, ifAbsent?: boolean }`; the two conditions are mutually exclusive and `ifAbsent` applies only to chunk writes.
-`watchOptions` accepts `slot`, `area`, `area3D`, `after`, `columns`, `noBefore`, `chunks`, `ackTimeoutMs` and `takeover`.
+`watchOptions` accepts `slot`, `area`, `area3D`, `areas`, `areas3D`, `after`, `columns`, `noBefore`, `chunks`, `ackTimeoutMs` and `takeover`.
 `slotOptions` accepts `area`, `area3D`, `columns`, `noBefore`, `chunks`, `ifNotExists` and `owner`.
 
 See [slots](SLOTS.md) for persisted filter identity.
@@ -71,14 +80,14 @@ See [values](VALUES.md#three-dimensions) for dimensional methods and scan metada
 
 [Tables](TABLES.md) lists changes and options.
 
-`ChunkTransaction` exposes block, chunk and area operations (including raw forms), with no `ifVersion`.
+`ChunkTransaction` exposes block, chunk, area and aggregate operations (including raw forms), with no `ifVersion`.
 A position identifies a committed change in a table.
 `ChunkPosition` is `{ epoch: string, revision: bigint }`.
 The [change feed](CHANGE_FEED.md) describes events.
 
 [Durable slots](SLOTS.md) explains acknowledgments.
 
-The pool exposes the same data, table, user, transaction, watch, slot, raw execute, ping, flush, metrics and schema methods.
+The pool exposes the same data, aggregate, table, user, transaction, watch, slot, backup, raw execute, ping, flush, metrics and schema methods.
 It also has `withClient(fn)` and `close()`.
 Use a leased client for `migrate`, `serverInfo`, `uri` or `defaultTable`.
 [Connections](CONNECTIONS.md) documents `ChunkClientOptions`.

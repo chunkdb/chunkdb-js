@@ -94,6 +94,7 @@ A rerun skips the migration and prints the same lines; the program is also in [e
 - [Connections and errors](https://github.com/chunkdb/chunkdb-js/blob/main/docs/CONNECTIONS.md): login, pools, TLS and channel binding.
 - [Values, chunks and areas](https://github.com/chunkdb/chunkdb-js/blob/main/docs/VALUES.md): typed data and conditional writes.
 - [Tables](https://github.com/chunkdb/chunkdb-js/blob/main/docs/TABLES.md) and [migrations](https://github.com/chunkdb/chunkdb-js/blob/main/docs/MIGRATIONS.md): schema setup.
+- [Aggregates](https://github.com/chunkdb/chunkdb-js/blob/main/docs/AGGREGATES.md): COUNT, SUM, MIN, MAX and AVG over chunks and areas.
 - [Transactions](https://github.com/chunkdb/chunkdb-js/blob/main/docs/TRANSACTIONS.md) and [users](https://github.com/chunkdb/chunkdb-js/blob/main/docs/USERS.md).
 - [Change feed](https://github.com/chunkdb/chunkdb-js/blob/main/docs/CHANGE_FEED.md) and [backup](https://github.com/chunkdb/chunkdb-js/blob/main/docs/BACKUP.md).
 - [API reference](https://github.com/chunkdb/chunkdb-js/blob/main/docs/API.md) and [server compatibility](https://github.com/chunkdb/chunkdb/blob/main/docs/COMPATIBILITY.md).

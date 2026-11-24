@@ -8,6 +8,16 @@ import { copyAreaPageArguments } from "./area-page.js";
 import type { ChunkWatch } from "./watch.js";
 import type { ChunkParameter, ChunkReply } from "./protocol.js";
 import type {
+  ChunkAggregateFunction,
+  ChunkAggregateResult,
+  ChunkAggregateRow,
+  ChunkAggregateSelector,
+  ChunkBackupResult,
+  ChunkMigrationRecord,
+  ChunkRestoreResult,
+  ChunkTableStats,
+  ChunkUserLimits,
+  ChunkTableOption,
   ChunkConnectionInfo,
   ChunkAxis,
   ChunkArea3D,
@@ -288,6 +298,34 @@ export class ChunkPool {
     return this.tableStatement(name, async (client) => await client.dropTable(name));
   }
 
+  recoverTable(name: string): Promise<void> {
+    return this.tableStatement(name, async (client) => await client.recoverTable(name));
+  }
+
+  async swapTables(first: string, second: string): Promise<void> {
+    try {
+      await this.tableStatement(first, async (client) => await client.swapTables(first, second));
+    } finally {
+      this.clearSchemaCache(second);
+    }
+  }
+
+  tableStats(name: string): Promise<ChunkTableStats> {
+    return this.withClient(async (client) => await client.tableStats(name));
+  }
+
+  compactTombstones(name: string, before: bigint): Promise<bigint> {
+    return this.withClient(async (client) => await client.compactTombstones(name, before));
+  }
+
+  aggregate(selector: ChunkAggregateSelector, functions: readonly ChunkAggregateFunction[], options: ChunkTableOption = {}): Promise<ChunkAggregateResult> {
+    return this.withClient(async (client) => await client.aggregate(selector, functions, options));
+  }
+
+  aggregateByChunk(selector: ChunkAggregateSelector, functions: readonly ChunkAggregateFunction[], options: ChunkTableOption = {}): Promise<ChunkAggregateRow[]> {
+    return this.withClient(async (client) => await client.aggregateByChunk(selector, functions, options));
+  }
+
   getBlock(x: number, y: number, options: ChunkReadOptions = {}): Promise<ChunkRow | null> {
     return this.withClient(async (client) => await client.getBlock(x, y, options));
   }
@@ -471,6 +509,28 @@ export class ChunkPool {
 
   metrics(): Promise<string> {
     return this.withClient(async (client) => await client.metrics());
+  }
+
+  backup(destination: string): Promise<ChunkBackupResult> {
+    return this.withClient(async (client) => await client.backup(destination));
+  }
+
+  async restoreTable(table: string, backup: string, options: { as?: string } = {}): Promise<ChunkRestoreResult> {
+    const result = await this.withClient(async (client) => await client.restoreTable(table, backup, options));
+    this.clearSchemaCache(result.table);
+    return result;
+  }
+
+  reloadTls(): Promise<void> {
+    return this.withClient(async (client) => await client.reloadTls());
+  }
+
+  setUserLimits(name: string, limits: ChunkUserLimits): Promise<void> {
+    return this.withClient(async (client) => await client.setUserLimits(name, limits));
+  }
+
+  listMigrations(): Promise<ChunkMigrationRecord[]> {
+    return this.withClient(async (client) => await client.listMigrations());
   }
 
   createUser(name: string, password: string, options: ChunkCreateUserOptions = {}): Promise<void> {

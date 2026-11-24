@@ -7,6 +7,7 @@ This client uses CQL protocol 3 with chunkdb 2.x; see the server's [compatibilit
 ## Unreleased
 
 ### Added
+- Typed helpers for the statements that had none: `aggregate` and `aggregateByChunk` (AGGREGATE maps and BY CHUNK rows, exact bigint sums), `tableStats`, `compactTombstones`, `swapTables`, `recoverTable`, `backup`, `restoreTable`, `reloadTls`, `setUserLimits` and `listMigrations`, on the client and the pool; transactions get `aggregate` and `aggregateByChunk`; `watch` takes several areas through `areas` and `areas3D`. ([chunkdb#151](https://github.com/chunkdb/chunkdb/issues/151))
 - A class for every server error code: `ChunkSyntaxError`, `ChunkInvalidArgumentError`, `ChunkOutOfRangeError`, `ChunkNoTableError`, `ChunkTableExistsError`, `ChunkSlotLostError`, `ChunkResyncRequiredError`, `ChunkBadRequestError`, `ChunkServerProtocolError` and `ChunkInternalError`, all extending `ChunkServerError`. ([chunkdb#151](https://github.com/chunkdb/chunkdb/issues/151))
 - The README has a checked "World in five minutes" program that fills an area, reads it and watches a change; `examples/world.ts` is the same program and imports `@chunkdb/client`. The README examples use the `world_js` table, so they do not clash with the server quick start's `world`. ([chunkdb#152](https://github.com/chunkdb/chunkdb/issues/152))
 - Add explicit bounded area pages with exact coordinate cursors and enforce negotiated area reply budgets before decoding. ([chunkdb#136](https://github.com/chunkdb/chunkdb/issues/136)).

@@ -100,23 +100,28 @@ function statementOf(table: string, options: ChunkWatchOptions): string {
   return statement;
 }
 
-export function filterClause(options: Pick<ChunkWatchOptions, "area" | "area3D" | "columns" | "noBefore" | "chunks">): string {
-  let statement = "";
-  if (options.area !== undefined && options.area3D !== undefined) throw requestError("AREA needs either two or three dimensions", "WATCH");
-  if (options.area3D !== undefined) {
-    const area = options.area3D;
+export function filterClause(options: Pick<ChunkWatchOptions, "area" | "area3D" | "areas" | "areas3D" | "columns" | "noBefore" | "chunks">): string {
+  const given = [options.area, options.area3D, options.areas, options.areas3D].filter((value) => value !== undefined).length;
+  if (given > 1) throw requestError("AREA needs either two or three dimensions: pass one of area, area3D, areas or areas3D", "WATCH");
+  const areas = options.areas ?? (options.area === undefined ? undefined : [options.area]);
+  const areas3D = options.areas3D ?? (options.area3D === undefined ? undefined : [options.area3D]);
+  for (const list of [areas, areas3D]) {
+    if (list !== undefined && (list.length === 0 || list.length > 64)) throw requestError("WATCH takes from 1 through 64 areas", "WATCH");
+  }
+  const clauses: string[] = [];
+  for (const area of areas3D ?? []) {
     const values = [area.cx0, area.cy0, area.cz0, area.cx1, area.cy1, area.cz1].map((value) => checkInt64Coordinate(value, "area coordinate"));
     if (values[0] > values[3] || values[1] > values[4] || values[2] > values[5]) throw requestError("WATCH area bounds are reversed", "WATCH");
-    statement += ` AREA ${values.slice(0, 3).join(" ")} TO ${values.slice(3).join(" ")}`;
+    clauses.push(` AREA ${values.slice(0, 3).join(" ")} TO ${values.slice(3).join(" ")}`);
   }
-  if (options.area !== undefined) {
-    const area = options.area;
+  for (const area of areas ?? []) {
     const values = [area.cx0, area.cy0, area.cx1, area.cy1].map((value) => checkCoordinate(value, "area coordinate"));
     if (area.cx0 > area.cx1 || area.cy0 > area.cy1) {
       throw requestError("WATCH area bounds are reversed", "WATCH");
     }
-    statement += ` AREA ${values[0]} ${values[1]} TO ${values[2]} ${values[3]}`;
+    clauses.push(` AREA ${values[0]} ${values[1]} TO ${values[2]} ${values[3]}`);
   }
+  let statement = clauses.join(",");
   if (options.columns !== undefined) {
     if (options.columns.length === 0) throw requestError("COLUMNS requires at least one column", "WATCH");
     statement += " COLUMNS " + options.columns.map((name) => checkName(name, "a column name")).join(", ");
