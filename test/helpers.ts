@@ -255,8 +255,18 @@ export async function startServer(options: {
     tls: tlsEnabled,
     uri,
     async stop() {
+      // Remove the data directory only after the server has exited: a server
+      // still shutting down keeps writing files into it.
+      const exited = child.exitCode !== null || child.signalCode !== null
+        ? Promise.resolve()
+        : once(child, "exit").then(() => undefined);
       child.kill("SIGTERM");
-      await Promise.race([once(child, "exit"), wait(2000)]);
+      const timer = setTimeout(() => child.kill("SIGKILL"), 10000);
+      try {
+        await exited;
+      } finally {
+        clearTimeout(timer);
+      }
       removeServerFiles(dataDir);
     },
   };
