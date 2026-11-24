@@ -156,6 +156,8 @@ export type {
   ChunkValue,
   ChunkVerifierOptions,
   ChunkWriteOptions,
+  ChunkReturningOptions,
+  ChunkWriteResult,
   ChunkArg,
   ChunkCondition,
   ChunkConditionOptions,

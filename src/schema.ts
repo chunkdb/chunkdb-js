@@ -172,6 +172,7 @@ export function parseDescribe(reply: ChunkReply): TableLayout {
       ...(entries.has("revision") ? { revision: field(entries, "revision", command).type === "null" ? null : uint64Of(field(entries, "revision", command), "revision", command) } : {}),
       ...(entries.has("dims") ? { dims } : {}),
       ...(chunkColumnsReply !== undefined ? { chunkColumns: chunkParsed.map(({ column }) => column) } : {}),
+      ...(entries.has("checks") ? { checks: checksOf(field(entries, "checks", command), command) } : {}),
       version,
       columns: parsed.map(({ column }) => column),
       chunk,
@@ -266,4 +267,12 @@ export function parseStatus(reply: ChunkReply): ChunkStatus {
     });
   }
   return status;
+}
+
+function checksOf(reply: ChunkReply, command: string): Array<{ name: string; expression: string }> {
+  if (reply.type !== "array") throw malformed("checks is not an array", command);
+  return reply.items.map((item) => {
+    const values = mapOf(item, command);
+    return { name: textOf(field(values, "name", command), "check name", command), expression: textOf(field(values, "expression", command), "check expression", command) };
+  });
 }

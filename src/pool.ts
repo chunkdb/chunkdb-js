@@ -19,6 +19,8 @@ import type {
   ChunkTableStats,
   ChunkUserLimits,
   ChunkAggregateOptions,
+  ChunkReturningOptions,
+  ChunkWriteResult,
   ChunkTableOption,
   ChunkConnectionInfo,
   ChunkAxis,
@@ -358,6 +360,14 @@ export class ChunkPool {
 
   getBlock3DWithMetadata(x: ChunkAxis, y: ChunkAxis, z: ChunkAxis, options: ChunkReadOptions = {}): Promise<ChunkBlockMetadata> {
     return this.withClient(async (client) => client.getBlock3DWithMetadata(x, y, z, options));
+  }
+
+  setBlockReturning(x: number, y: number, values: Readonly<Record<string, ChunkValue | ChunkExpr>>, options: ChunkReturningOptions = {}): Promise<ChunkWriteResult> {
+    return this.withClient(async (client) => await client.setBlockReturning(x, y, values, options));
+  }
+
+  deleteBlockReturning(x: number, y: number, options: ChunkReturningOptions = {}): Promise<ChunkWriteResult> {
+    return this.withClient(async (client) => await client.deleteBlockReturning(x, y, options));
   }
 
   setBlock3D(x: ChunkAxis, y: ChunkAxis, z: ChunkAxis, values: Readonly<Record<string, ChunkValue | ChunkExpr>>, options: ChunkWriteOptions = {}): Promise<bigint> {

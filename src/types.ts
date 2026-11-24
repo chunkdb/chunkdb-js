@@ -379,6 +379,8 @@ export interface ChunkTableSchema {
   revision?: bigint | null;
   dims?: number;
   chunkColumns?: ChunkColumn[];
+  /** CHECK constraints: a name and a condition no present block may make false; absent without any. */
+  checks?: Array<{ name: string; expression: string }>;
 }
 
 export interface ChunkColumnDefinition {
@@ -424,6 +426,17 @@ export type ChunkTableChange =
       /** How values the new type cannot hold convert; without it they are refused. */
       using?: ChunkTypeConversion;
     }
+  | { kind: "setDefault"; column: string; value: ChunkValue }
+  | { kind: "dropDefault"; column: string }
+  /** `SET NULL` when `nullable`, else `DROP NULL`. */
+  | { kind: "setNullable"; column: string; nullable: boolean }
+  /** `SET REQUIRED` when `required`, else `DROP REQUIRED`. */
+  | { kind: "setRequired"; column: string; required: boolean }
+  /** `ADD CHECK [name] (condition)`; a write that breaks it rejects with `ChunkCheckFailedError`. */
+  | { kind: "addCheck"; name?: string; condition: string }
+  | { kind: "dropCheck"; name: string; ifExists?: boolean }
+  /** `RENAME TO`: the table's specific grants move to the new name. */
+  | { kind: "renameTable"; to: string }
   | ChunkSetOption;
 
 /**
@@ -572,6 +585,28 @@ export interface ChunkWriteOptions extends ChunkConditionOptions {
   ifAbsent?: boolean;
 }
 
+/** A block write with RETURNING. */
+export interface ChunkReturningOptions extends ChunkWriteOptions {
+  /**
+   * `old` returns the block before the write (DELETE requires it), else the
+   * block after it; `columns` returns those columns in order, every column
+   * by default.
+   */
+  returning?: { old?: boolean; columns?: readonly string[] };
+}
+
+/**
+ * The reply of a write with RETURNING. `applied` is false when `ifVersion` or
+ * `condition` refused the write, which changed nothing and returned no rows;
+ * `version` is the chunk version after the write or, when refused, now; null
+ * for a never-written chunk.
+ */
+export interface ChunkWriteResult {
+  applied: boolean;
+  version: bigint | null;
+  rows: Array<{ x: bigint; y: bigint; z?: bigint; values: ChunkRow }>;
+}
+
 export interface ChunkScanOptions extends ChunkTableOption {
   /** Start after this chunk: the last one of the previous page. */
   after?: ChunkCoord;
@@ -629,6 +664,8 @@ export interface ChunkAggregateOptions extends ChunkTableOption {
 export interface ChunkTransactionOptions {
   /** How many times a transaction that ends with `CONFLICT` runs again; 5 by default. */
   retries?: number;
+  /** `BEGIN READ ONLY`: one snapshot without a read set, which cannot conflict; the server refuses writes. */
+  readOnly?: boolean;
 }
 
 /**
