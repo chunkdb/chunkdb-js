@@ -11,7 +11,7 @@ The server limits column names to 63 bytes and table names to 64 bytes.
 
 Table names start with a lowercase letter.
 
-Reserved Windows device names are forbidden: `con`, `prn`, `aux`, `nul`, `com0`–`com9` and `lpt0`–`lpt9`.
+Reserved Windows device names are forbidden: `con`, `prn`, `aux`, `nul`, `com0`–`com9` and `lpt0`–`lpt9`; so is `catalog`, which WATCH CATALOG reserves.
 The `table` option on data methods overrides the default table selected at connection time.
 
 ```ts docs-check

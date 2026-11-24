@@ -47,7 +47,7 @@ A chunk version identifies committed state and orders writes within the same tab
 | `listMigrations()` | `{ name, appliedMs, user, statement }[]` in applied order |
 | `watch(table, watchOptions?)` | `ChunkWatch` async iterator |
 | `createSlot(table, name, slotOptions?)`, `dropSlot(table, name)`, `listSlots(table?, prefix?)` | slot administration / `ChunkSlot[]` |
-| `enableFeature(name)`, `showStatus()` | explicit feature activation / protected feature masks; requires ADMIN on `*` |
+| `enableFeature(name)`, `showStatus()` | explicit feature activation, with ADMIN on `*` / protected feature masks, with MONITOR or ADMIN on `*` |
 | `execute(statement, parameters?)` | `ChunkReply` |
 | `ping()`, `flushWal()`, `metrics()` | `"PONG"` / durable prior WAL writes / Prometheus text |
 | `backup(destination)`, `restoreTable(table, backup, { as? }?)` | backup summary / restored table identity; see [backup](BACKUP.md) |

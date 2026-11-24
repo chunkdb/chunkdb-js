@@ -35,7 +35,7 @@ Revoking a right also removes the higher rights that imply it.
 
 A table with no right is hidden as `NO_TABLE`.
 Insufficient rights on a visible table raise `ChunkPermissionError`, naming the required right and table.
-`SHOW MIGRATIONS` requires `MANAGES USERS`.
+`listMigrations()` lists the records within your rights; `user` is null without `MANAGES USERS`.
 Migrations require their inner statement's rights, even when an identical step would skip.
 
 `setUserLimits(name, { maxConnections?, statementsPerSec? })` sets connection and statement-rate limits; zero disables a limit.
@@ -52,7 +52,7 @@ See the [server users guide](https://github.com/chunkdb/chunkdb/blob/main/docs/U
 ## Server rights and prefixes
 
 `grant("READ", "tenant1_*", user)` covers every table whose name starts with `tenant1_`, future tables included; prefix and `"*"` grants stay when a table is dropped.
-MONITOR, BACKUP and REPLICATION are server rights, granted on `"*"` only: MONITOR reads metrics, status, every connection and every table's stats and slots, BACKUP takes backups, and REPLICATION follows every table's feed.
+MONITOR, BACKUP and REPLICATION are server rights, granted on `"*"` only: MONITOR reads metrics, status, every connection, every table's stats and slots, and the catalog watch; BACKUP takes backups and restores a table under a name it has ADMIN on; REPLICATION is stored and listed, and no statement requires it.
 `listUsers()` reports them in `serverRights`.
 `ChunkPermissionError` reports `rights`, the rights of which any one would do, such as `["MONITOR", "ADMIN"]`, and `rightsOn`, the table, prefix or `"*"` they are needed on.
 

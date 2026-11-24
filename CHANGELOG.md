@@ -26,6 +26,7 @@ This client uses CQL protocol 3 with chunkdb 2.x; see the server's [compatibilit
 - Generic `BACKUP TO` integration coverage checks summaries and copied data over plain TCP and TLS
 
 ### Fixed
+- The guides follow the server: `statement_timeout_ms` is applied, `showStatus()` needs MONITOR or ADMIN on `*`, backups take `BACKUP` or `MANAGES USERS` and `restoreTable` its own rights, `SHOW MIGRATIONS` lists the records within your rights, MONITOR lists every connection and REPLICATION gates no statement, `RATE_LIMITED` also names `auth_ban`, and tables cannot be named `catalog`. ([chunkdb#151](https://github.com/chunkdb/chunkdb/issues/151))
 - A request whose connection is lost or times out after it was written fails with an unknown outcome: the `ChunkConnectionError`, `ChunkTlsError` or `ChunkTimeoutError` has `retryClass` `"unknown_outcome"` and says the outcome is unknown, since the write may have applied. Inside a transaction only `COMMIT` does; the statements before it roll back. `ChunkError` gains the optional `retryClass`. (#47)
 - Older-server detection reads the error code and keys only: `PROTOCOL` without a `reason` key, or `UNKNOWN_COMMAND`, to HELLO names an older server; a `PROTOCOL` reply of a protocol 3 server is a `ChunkServerProtocolError`, whatever its text. (#47)
 - CONNECTIONS.md: a bound login through a proxy that forwards plain TCP fails with `ChunkInvalidArgumentError`, and through one that opens its own TLS connection with `AUTH_FAILED` reason `channel_binding`. (#47)
