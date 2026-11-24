@@ -16,6 +16,16 @@ import {
   ChunkStatementTimeoutError,
   ChunkKilledError,
   ChunkUnknownCommandError,
+  ChunkServerProtocolError,
+  ChunkBadRequestError,
+  ChunkSyntaxError,
+  ChunkInvalidArgumentError,
+  ChunkOutOfRangeError,
+  ChunkNoTableError,
+  ChunkTableExistsError,
+  ChunkSlotLostError,
+  ChunkResyncRequiredError,
+  ChunkInternalError,
   parseErrorFields,
   ChunkConflictError,
   ChunkConnectionError,
@@ -2135,6 +2145,10 @@ export class ChunkClient {
       MIGRATION_MISMATCH: ChunkMigrationMismatchError, SLOT_BUSY: ChunkSlotBusyError,
       CHECK_FAILED: ChunkCheckFailedError, CANCELLED: ChunkCancelledError,
       TIMEOUT: ChunkStatementTimeoutError, KILLED: ChunkKilledError, UNKNOWN_COMMAND: ChunkUnknownCommandError,
+      PROTOCOL: ChunkServerProtocolError, BAD_REQUEST: ChunkBadRequestError, SYNTAX: ChunkSyntaxError,
+      INVALID_ARGUMENT: ChunkInvalidArgumentError, OUT_OF_RANGE: ChunkOutOfRangeError, NO_TABLE: ChunkNoTableError,
+      TABLE_EXISTS: ChunkTableExistsError, SLOT_LOST: ChunkSlotLostError, RESYNC_REQUIRED: ChunkResyncRequiredError,
+      INTERNAL: ChunkInternalError,
     };
     const ErrorClass = Object.hasOwn(classes, reply.code) ? classes[reply.code] : undefined;
     if (ErrorClass !== undefined) return new ErrorClass(reply.code, reply.message, { phase: "response", command });

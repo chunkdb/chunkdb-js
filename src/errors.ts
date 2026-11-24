@@ -142,6 +142,16 @@ export class ChunkCancelledError extends ChunkServerError {}
 export class ChunkStatementTimeoutError extends ChunkServerError {}
 export class ChunkKilledError extends ChunkServerError {}
 export class ChunkUnknownCommandError extends ChunkServerError {}
+export class ChunkServerProtocolError extends ChunkServerError {}
+export class ChunkBadRequestError extends ChunkServerError {}
+export class ChunkSyntaxError extends ChunkServerError {}
+export class ChunkInvalidArgumentError extends ChunkServerError {}
+export class ChunkOutOfRangeError extends ChunkServerError {}
+export class ChunkNoTableError extends ChunkServerError {}
+export class ChunkTableExistsError extends ChunkServerError {}
+export class ChunkSlotLostError extends ChunkServerError {}
+export class ChunkResyncRequiredError extends ChunkServerError {}
+export class ChunkInternalError extends ChunkServerError {}
 /** A legacy packed form cannot locate a column with an unknown width. */
 export class ChunkUnknownColumnTypeError extends ChunkProtocolError {}
 
