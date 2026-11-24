@@ -43,7 +43,7 @@ Schema events contain `version`, `dims`, projected `columns` and `chunkColumns`.
 Change events also include nullable bytes `tag`, nullable uint64 `txn`, and typed `chunkChanges`.
 Progress events report the completed frontier, including quiet or filtered streams.
 CHUNKS events carry versioned raw forms, with null forms for deletion.
-The decoder recognizes reserved catalog events without exposing a WATCH CATALOG command.
+The decoder recognizes the catalog events of WATCH CATALOG, which a table watch does not receive; the client has no method that sends WATCH CATALOG.
 Resync events identify the position from which you must rebuild state, with nullable `parentEpoch` and `forkRevision` lineage.
 Unknown push kinds are fully decoded and ignored without consuming an ordinary reply or advancing ACK eligibility.
 Use `area` for inclusive chunk coordinates, `columns` for projection, `noBefore` to omit before rows, or `chunks` for raw forms.

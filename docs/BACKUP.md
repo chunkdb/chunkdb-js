@@ -2,7 +2,7 @@
 
 `backup` copies every table on the server, and `restoreTable` restores one table from a copy.
 The copy stays on the server's machine.
-The server must have `--backup-dir` configured, and the login needs `MANAGES USERS` when authentication is enabled.
+The server must have `--backup-dir` configured, and the login needs `BACKUP` or `MANAGES USERS` when authentication is enabled.
 
 Run this inside the [first write and read](../README.md#first-write-and-read) example's `try` block, with an administrator login:
 
@@ -35,9 +35,8 @@ After a lost reply, check the destination before deciding whether the copy succe
 
 `restoreTable(table, backup, { as? })` creates a new table from a completed copy and returns its `table`, `epoch`, `parentEpoch`, `forkRevision`, `files` and `bytes`.
 It never replaces a table; use `swapTables` to put the restored table under the live name.
-It needs ADMIN on `*` and `MANAGES USERS`.
+It needs `MANAGES USERS`, ADMIN on `*`, or `BACKUP` and ADMIN on the new name.
 
-Restore and verify run on the server host using `chunkdb_restore <backup> <destination>` and `chunkdb_verify --data-dir <backup>`.
-There is no client-side restore helper.
+Offline restore of a whole copy and verify run on the server host using `chunkdb_restore <backup> <destination>` and `chunkdb_verify --data-dir <backup>`.
 A restored slot keeps its name but starts at the restored cut in the new epoch, so consumers must resynchronize.
 See the [server backup guide](https://github.com/chunkdb/chunkdb/blob/main/docs/BACKUP.md) for completeness guards, supported sources and restore steps.

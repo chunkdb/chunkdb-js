@@ -16,7 +16,7 @@ A client has one connection, with replies in request order.
 `helloOptions` sends HELLO WITH options such as `{ client_name: "renderer", statement_timeout_ms: 500 }`.
 `serverInfo()` exposes `connectionId`, `features`, applied `options`, `notApplied`, `idleTimeoutMs` and `limits` when the server provides them.
 
-`client_name` is applied; timeout and default-tag options currently return `implementation_pending` rather than changing runtime behavior.
+`client_name` and `statement_timeout_ms` are applied; `default_tag` returns `implementation_pending` rather than changing runtime behavior.
 Inspect `notApplied` before relying on an option, including an unknown option's `unknown_option` reason.
 `commandTimeoutMs` remains the client's independent reply timeout.
 
@@ -77,12 +77,12 @@ The server advertises `statement_timeout` and reports effective milliseconds in 
 `cancel(id)` returns false for an idle target or a statement past its decision boundary.
 `killConnection(id)` closes the target safely; a self-kill is acknowledged before the connection closes.
 IDs are exact uint64 bigint values and are not reused during a server run.
-The current user can control the same live user identity; ADMIN on `*` also permits other connections.
+The current user can control the same live user identity; ADMIN on `*` also permits other connections, and MONITOR lists every connection.
 Check `serverInfo().features` for `connection_controls` before using these methods against a server without the capability.
 The pool exposes the same methods; use `withClient` when actions must originate from one specific connection.
 Control an in-flight request from a separate client connection; pooled controls require an available lease and follow the leased client's request ordering.
 `CANCELLED` and `TIMEOUT` with `applied=false` report that the statement did not apply.
-`RATE_LIMITED` identifies `max_connections` or `statements_per_sec` in `reason` and can include `retryAfterMs`.
+`RATE_LIMITED` names `max_connections`, `statements_per_sec` or `auth_ban` (repeated failed logins from the address) in `reason` and includes `retryAfterMs`.
 
 Use `chunks://` or `tls: true` for TLS.
 `ca`, `cert` and `key` accept PEM strings or Buffers.
