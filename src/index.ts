@@ -72,6 +72,8 @@ export type {
   ChunkCoordExact,
   ChunkPage,
   ChunkAreaPageOptions,
+  ChunkAreaScaleOptions,
+  ChunkReduction,
   ChunkAreaPageOptions3D,
   ChunkAreaPageEntry,
   ChunkAreaRawPageEntry,
