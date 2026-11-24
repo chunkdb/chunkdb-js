@@ -241,9 +241,9 @@ export function encodeSectionedChunk(layout: TableLayout, state: ChunkStateInput
   const { schema } = layout;
   const blocks = sectionedBlockCount(layout);
   const fail = (reason: string): never => { throw requestError(`chunk form: ${reason}`, "SET CHUNK"); };
+  if ((state as Partial<ChunkState>).scale !== undefined) fail("a downsampled chunk cannot be written");
   if (state.present.length !== blocks || state.present.some((value) => typeof value !== "boolean")) fail("presence differs from geometry");
   if ((state.unknownSections?.size ?? 0) !== 0) fail("unknown_form_section");
-  if ((state as Partial<ChunkState>).scale !== undefined) fail("a downsampled chunk cannot be written");
   for (const name of Object.keys(state.columns)) if (!schema.columns.some((column) => column.name === name)) fail(`unknown block column ${name}`);
   const seenIds = new Set<number>(), seenNames = new Set<string>();
   let fixedBytes = 0, fixedCount = 0;
