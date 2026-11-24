@@ -284,8 +284,8 @@ export class ChunkPool {
     return this.withClient((client) => client.dropSlot(table, name));
   }
 
-  listSlots(table?: string): Promise<ChunkSlot[]> {
-    return this.withClient((client) => client.listSlots(table));
+  listSlots(table?: string, prefix?: string): Promise<ChunkSlot[]> {
+    return this.withClient((client) => client.listSlots(table, prefix));
   }
 
   createTable(name: string, definition: ChunkTableDefinition): Promise<void> {
@@ -553,6 +553,14 @@ export class ChunkPool {
 
   dropUser(name: string): Promise<void> {
     return this.withClient(async (client) => await client.dropUser(name));
+  }
+
+  addVerifier(name: string, verifier: string): Promise<void> {
+    return this.withClient(async (client) => await client.addVerifier(name, verifier));
+  }
+
+  dropOldVerifier(name: string): Promise<void> {
+    return this.withClient(async (client) => await client.dropOldVerifier(name));
   }
 
   grant(right: ChunkRight, table: string, user: string): Promise<void> {

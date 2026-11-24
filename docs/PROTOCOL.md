@@ -7,6 +7,7 @@ See [API methods](API.md) and [error handling](CONNECTIONS.md#errors) first.
 Known array prefixes accept trailing fields, including nested entries and rows.
 Known map fields decode independently of unknown keys.
 Unknown push kinds are fully consumed and ignored; they cannot take an ordinary request's reply or change ACK eligibility.
+An error reply only answers a whole statement; one nested inside an array, map or push fails with `ChunkProtocolError`.
 
 An unknown column type returns raw bytes for that row column while known neighbors stay typed.
 Raw chunk and area reads retain unknown-width forms, because their neighboring columns cannot be located safely.
@@ -34,7 +35,7 @@ Framing errors close it.
 
 ## Explicit features
 
-`showStatus()` returns protected directory and table feature snapshots and `activationPending`.
+`showStatus()` returns protected directory and table feature snapshots, `activationPending`, the server `version`, `uptimeMs` and `readOnly`, each table's `state` (`"ok"` or `"fenced"`) and fence `reason`, and `fenced`, the fenced tables whose features cannot be read.
 Each snapshot includes `enabled` feature names and exact bigint `compat`, `roCompat` and `incompat` masks.
 Unknown feature names and mask bits remain visible.
 `enableFeature(name)` explicitly activates a feature and requires ADMIN on `*`.

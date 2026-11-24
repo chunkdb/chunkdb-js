@@ -108,7 +108,8 @@ export interface ChunkServerInfo {
 }
 
 /** A right on a table: `ADMIN` includes `WRITE`, which includes `READ`. */
-export type ChunkRight = "READ" | "WRITE" | "ADMIN";
+/** READ, WRITE and ADMIN are table rights; MONITOR, BACKUP and REPLICATION are server rights, granted on `"*"` only. */
+export type ChunkRight = "READ" | "WRITE" | "ADMIN" | "MONITOR" | "BACKUP" | "REPLICATION";
 
 /** One named schema or permissions statement, applied once by the server. */
 export interface ChunkMigration {
@@ -129,8 +130,12 @@ export interface ChunkUser {
   managesUsers: boolean;
   /** The user logs in only with a login bound to its TLS connection. */
   requiresChannelBinding: boolean;
-  /** Rights by table name; `"*"` stands for every table. */
+  /** Rights by table name, prefix such as `"tenant1_*"`, or `"*"` for every table. */
   grants: Record<string, ChunkRight>;
+  /** MONITOR, BACKUP and REPLICATION the user holds; empty from a server that does not show them. */
+  serverRights: ChunkRight[];
+  /** 2 between `addVerifier` and `dropOldVerifier`, else 1; undefined from a server that does not show it. */
+  verifiers?: number;
 }
 
 export interface ChunkCreateUserOptions {
@@ -173,7 +178,19 @@ export interface ChunkBlockMetadata {
 }
 export interface ChunkAreaMetadata<T> { schemaVersion: bigint; entries: T[] }
 export interface ChunkFeatureStatus { enabled: string[]; compat: bigint; roCompat: bigint; incompat: bigint }
-export interface ChunkStatus { directory: ChunkFeatureStatus; tables: Array<ChunkFeatureStatus & { name: string }>; activationPending: boolean }
+/** A table in SHOW STATUS; `state` is "ok" or "fenced" with the fence `reason`, absent on servers that do not report them. */
+export interface ChunkTableStatus extends ChunkFeatureStatus { name: string; state?: "ok" | "fenced"; reason?: string | null }
+export interface ChunkStatus {
+  directory: ChunkFeatureStatus;
+  tables: ChunkTableStatus[];
+  activationPending: boolean;
+  /** The server version, the time since it started and whether it runs with --read-only; absent on servers that do not report them. */
+  version?: string;
+  uptimeMs?: bigint;
+  readOnly?: boolean;
+  /** Fenced tables whose features cannot be read. */
+  fenced?: Array<{ name: string; reason: string }>;
+}
 
 export interface ChunkPosition {
   epoch: string;
@@ -225,6 +242,12 @@ export interface ChunkSlot {
   lostReason?: string | null;
   /** Shown to the owner and to users with MANAGES USERS; null otherwise or when no owner is recorded. */
   owner?: string | null;
+  /** The durable revision recorded for the table's slots; absent on servers that do not report it. */
+  revision?: bigint;
+  /** How far `acked` is below `revision`, in revision numbers. */
+  lagRevisions?: bigint;
+  /** True while a watch holds the slot. */
+  attached?: boolean;
 }
 
 export interface ChunkChangeEvent {
@@ -692,6 +715,13 @@ export interface ChunkTableStats {
   dims: 2 | 3;
   tombstones: bigint;
   retainedDeletionFloor: bigint;
+  /** Populated chunks, cached chunks, files and bytes under the table directory, durable slots and open watches; absent on servers that do not report them. */
+  chunks?: bigint;
+  loadedChunks?: bigint;
+  files?: bigint;
+  diskBytes?: bigint;
+  slots?: bigint;
+  watches?: bigint;
 }
 
 /** One applied migration as `SHOW MIGRATIONS` lists it. */
