@@ -117,6 +117,7 @@ light is already at the maximum
 - `expr` values and `condition` are evaluated by the server against the block as it is when the write applies; see the [server expressions reference](https://github.com/chunkdb/chunkdb/blob/main/docs/reference/EXPRESSIONS.md).
 - `args` are the `$n` parameters: `args[0]` is `$1`, and plain values are numbered after them; each `$n` appears once.
 - Each argument is encoded with the type of its `column`, the column it meets on the server; name a chunk column as `chunk.name`.
+- An argument met only by a position or `NOW()`, as in `POS_X > $1`, has no column to take its type from; compare a column instead, or write the value into the condition.
 - A false or NULL condition writes nothing and rejects with `ChunkConditionFailedError`, whose `current` is the chunk version.
 - A computed value outside its column rejects with `ChunkOutOfRangeError`; `condition` excludes `ifVersion`.
 - `deleteBlock`, the 3D block writes and transaction block writes take `condition` and `args` too.
@@ -136,6 +137,9 @@ Area boxes use inclusive chunk coordinates and return populated chunks only.
 `serverInfo()` reports the server's area and response limits.
 `getAreaPage` and `getAreaRawPage` accept the same box or radius selector, exact int64 axes, and `{ limit?, after?, columns?, table? }`.
 Use `getAreaPage3D` or `getAreaRawPage3D` for three-axis selectors and cursors.
+`scale` and `reduction` (`"MAX"`, `"MIN"`, `"MODE"`, `"FIRST"` or `"ANY"`) read each chunk downsampled, as `GET AREA ... SCALE k USING`: every `scale` blocks on each axis become one sample whose values the reduction picks from the group's present blocks.
+A downsampled chunk has `scale` and `reduction` set and `width`, `height` and `depth` counted in samples; `scale` must divide every chunk side, the server must offer `area_scale`, and `setChunk` refuses such a chunk.
+See the server's [downsampled areas](https://github.com/chunkdb/chunkdb/blob/main/docs/reference/CHUNKS.md#downsampled-areas) for the column types each reduction takes.
 These methods require the advertised `area_paging` feature and return `{ schemaVersion, chunks, more, after }` with bigint cursor axes.
 Pass a returned cursor back with the same selector and projection; each call retains only that page.
 The cursor advances over requested empty cells too, so an unfinished page can have no populated chunks.

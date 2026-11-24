@@ -1,12 +1,13 @@
 import { ChunkProtocolError, ChunkUnknownColumnTypeError } from "./errors.js";
 import type { TableLayout } from "./schema.js";
-import type { ChunkColumn, ChunkState, ChunkStateInput, ChunkValue } from "./types.js";
+import type { ChunkColumn, ChunkReduction, ChunkState, ChunkStateInput, ChunkValue } from "./types.js";
 import { ChunkBits, decodeFixedValue, encodeFixedValue, encodeVarValue, fixedWidth, requestError, StaleSchemaError } from "./values.js";
 import { FormFlag, FormSection, parseFormBlockSpans, parseFormChunkColumns, parseSectionedForm, serializeSectionedForm, validFormPadding } from "./chunk-sections.js";
 import type { SectionedForm } from "./chunk-sections.js";
 
 const MAX_VARIABLE_BYTES = 64 * 1024 * 1024;
 const MAX_DECODED_CELLS = 4 * 1024 * 1024;
+const SCALE_SECTION = 7;
 
 /** A local materialization refusal after a completely framed response. */
 export class AreaDecodeLimitError extends ChunkProtocolError {}
@@ -85,10 +86,32 @@ function variableValue(column: ChunkColumn, data: Buffer): ChunkValue {
 }
 
 /** Decode the section contract; public dispatch changes with the server format. */
-export function decodeSectionedChunk(layout: TableLayout, input: Uint8Array, indexes: readonly number[]): ChunkState {
+const REDUCTIONS: readonly ChunkReduction[] = ["MAX", "MIN", "MODE", "FIRST", "ANY"];
+
+/** The scale and reduction a downsampled area read requested. */
+export interface FormScale { scale: number; reduction: ChunkReduction }
+
+/**
+ * Decodes a form. Section 7 marks a downsampled form; only a read that
+ * requested `scale` accepts it, with the same factor and reduction.
+ */
+export function decodeSectionedChunk(layout: TableLayout, input: Uint8Array, indexes: readonly number[], scale?: FormScale): ChunkState {
   const { schema } = layout;
-  const blocks = sectionedBlockCount(layout);
+  let blocks = sectionedBlockCount(layout);
   const form = parseSectionedForm(input);
+  const scaleBody = form.sections.get(SCALE_SECTION);
+  if ((scaleBody === undefined) !== (scale === undefined)) bad("scale section differs from the request");
+  let width = schema.chunk.width, height = schema.chunk.height, depth = schema.dims === 3 ? schema.chunk.depth ?? 1 : 1;
+  if (scaleBody !== undefined && scale !== undefined) {
+    if (scaleBody.length !== 8 || Buffer.from(scaleBody).readUInt16LE(6) !== 0) bad("invalid scale section");
+    const body = Buffer.from(scaleBody), factor = body.readUInt32LE(0), reduction = REDUCTIONS[body.readUInt16LE(4) - 1];
+    if (factor !== scale.scale || reduction !== scale.reduction) bad("scale section differs from the request");
+    if (width % factor !== 0 || height % factor !== 0 || (schema.dims === 3 && depth % factor !== 0)) bad("scale does not divide the chunk");
+    width /= factor;
+    height /= factor;
+    if (schema.dims === 3) depth /= factor;
+    blocks = width * height * depth;
+  }
   if (form.schemaVersion !== BigInt(schema.version)) throw new StaleSchemaError("chunk form schema version mismatch", { phase: "protocol" });
   if ((form.flags & FormFlag.projected) === 0 && (indexes.length !== schema.columns.length || indexes.some((index, i) => index !== i))) bad("full form read as a partial projection");
   if ((form.flags & FormFlag.projected) !== 0 && indexes.length === 0) bad("empty projection");
@@ -181,10 +204,11 @@ export function decodeSectionedChunk(layout: TableLayout, input: Uint8Array, ind
   // Lowering a write quota does not invalidate previously stored data.
   if (variableBytes > MAX_VARIABLE_BYTES) bad("combined variable storage exceeds its hard byte limit");
   const unknownSections = new Map<number, Uint8Array>();
-  for (const [kind, bytes] of form.sections) if (kind < 1 || kind > 6) unknownSections.set(kind, Buffer.from(bytes));
+  for (const [kind, bytes] of form.sections) if ((kind < 1 || kind > 6) && kind !== SCALE_SECTION) unknownSections.set(kind, Buffer.from(bytes));
   return { version: form.version, schemaVersion: schema.version, commitTimeMs: form.commitTimeMs,
     projected: (form.flags & FormFlag.projected) !== 0, private: (form.flags & FormFlag.private) !== 0,
-    width: schema.chunk.width, height: schema.chunk.height, depth: schema.dims === 3 ? schema.chunk.depth : 1,
+    width, height, depth: schema.dims === 3 ? depth : 1,
+    ...(scale === undefined ? {} : { scale: scale.scale, reduction: scale.reduction }),
     present, columns, metadata: row, unknownSections };
 }
 
@@ -219,6 +243,7 @@ export function encodeSectionedChunk(layout: TableLayout, state: ChunkStateInput
   const fail = (reason: string): never => { throw requestError(`chunk form: ${reason}`, "SET CHUNK"); };
   if (state.present.length !== blocks || state.present.some((value) => typeof value !== "boolean")) fail("presence differs from geometry");
   if ((state.unknownSections?.size ?? 0) !== 0) fail("unknown_form_section");
+  if ((state as Partial<ChunkState>).scale !== undefined) fail("a downsampled chunk cannot be written");
   for (const name of Object.keys(state.columns)) if (!schema.columns.some((column) => column.name === name)) fail(`unknown block column ${name}`);
   const seenIds = new Set<number>(), seenNames = new Set<string>();
   let fixedBytes = 0, fixedCount = 0;

@@ -428,9 +428,22 @@ export interface ChunkState extends ChunkStateInput {
   commitTimeMs?: bigint;
   projected?: boolean;
   private?: boolean;
+  /**
+   * A downsampled form from an area page read with `scale`: each block is a
+   * sample of `scale` blocks on each axis, so `width`, `height` and `depth`
+   * count samples. `setChunk` refuses such a state.
+   */
+  scale?: number;
+  reduction?: ChunkReduction;
   present: boolean[];
   columns: Record<string, ChunkValue[]>;
 }
+
+/** How `GET AREA ... SCALE k USING` picks a sample's values from its group of blocks. */
+export type ChunkReduction = "MAX" | "MIN" | "MODE" | "FIRST" | "ANY";
+
+/** Read each chunk downsampled: every `scale` blocks on each axis become one sample (needs the `area_scale` feature). */
+export interface ChunkAreaScaleOptions { scale?: number; reduction?: ChunkReduction }
 
 export interface ChunkCoord {
   cx: number;
@@ -457,8 +470,8 @@ export interface ChunkCoordExact { cx: bigint; cy: bigint }
 export type ChunkArea2D =
   | { cx0: ChunkAxis; cy0: ChunkAxis; cx1: ChunkAxis; cy1: ChunkAxis }
   | { cx: ChunkAxis; cy: ChunkAxis; radius: ChunkAxis };
-export interface ChunkAreaPageOptions extends ChunkReadOptions { limit?: number; after?: { cx: ChunkAxis; cy: ChunkAxis } }
-export interface ChunkAreaPageOptions3D extends ChunkReadOptions { limit?: number; after?: ChunkPoint3D }
+export interface ChunkAreaPageOptions extends ChunkReadOptions, ChunkAreaScaleOptions { limit?: number; after?: { cx: ChunkAxis; cy: ChunkAxis } }
+export interface ChunkAreaPageOptions3D extends ChunkReadOptions, ChunkAreaScaleOptions { limit?: number; after?: ChunkPoint3D }
 export interface ChunkAreaPageEntry extends ChunkCoordExact { chunk: ChunkState }
 export interface ChunkAreaRawPageEntry extends ChunkCoordExact { chunk: Buffer }
 export interface ChunkPage<T, C> { chunks: T[]; more: boolean; after: C | null; schemaVersion: bigint }
