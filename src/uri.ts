@@ -39,10 +39,13 @@ export function parseChunkUri(uri: string): ParsedChunkUri {
     throw new ChunkConnectionError("chunk URI has a password without a user; use the form chunk://user:password@host:4242/table", { phase: "connect" });
   }
 
+  // URL keeps the brackets of an IPv6 host; the socket and the TLS server
+  // name take the address without them.
+  const host = parsed.hostname.startsWith("[") && parsed.hostname.endsWith("]") ? parsed.hostname.slice(1, -1) : parsed.hostname;
   return {
     scheme,
     secure: scheme === "chunks",
-    host: parsed.hostname,
+    host,
     port,
     user,
     password,

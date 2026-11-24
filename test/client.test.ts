@@ -127,6 +127,113 @@ test("a server-first message that does not continue the login is refused", async
   }
 });
 
+test("a server-first iteration count outside 4096 to 1000000 is refused", async () => {
+  for (const iterations of ["4095", "1000001", "4294967295"]) {
+    const server = await startFakeServer((request) => {
+      if (!request.line.startsWith("HELLO")) return null;
+      const nonce = /r=(.+)$/.exec(request.frames[0]?.toString("utf8") ?? "")?.[1] ?? "";
+      return `+SCRAM r=${nonce}server,s=QUJDREVGR0hJSktMTU5PUA==,i=${iterations}\r\n`;
+    });
+    try {
+      await assert.rejects(connect({ port: server.port, user: "bot", password: "secret" }), (error: unknown) => {
+        assert.ok(error instanceof ChunkProtocolError);
+        assert.match(error.message, new RegExp(`asked for ${iterations} SCRAM iterations; a chunkdb server issues 4096 to 1000000`));
+        return true;
+      });
+      assert.deepEqual(server.requests.map((request) => request.line), ["HELLO 3 USER bot $1"]);
+    } finally {
+      await server.close();
+    }
+  }
+});
+
+test("a connection closed between +SCRAM and AUTH fails the login instead of waiting", { timeout: 10000 }, async () => {
+  const scram = scramResponder("bot", "secret");
+  const server = await startFakeServer((request, socket) => {
+    const reply = scram(request);
+    if (request.line.startsWith("HELLO") && reply !== null) socket.end(reply);
+    return null;
+  });
+  const client = new ChunkClient({ port: server.port, user: "bot", password: "secret", connectTimeoutMs: 60000, commandTimeoutMs: 60000 });
+  try {
+    // A call waiting for the connection fails with the login.
+    const results = await Promise.allSettled([client.connect(), client.ping()]);
+    for (const result of results) {
+      assert.equal(result.status, "rejected");
+      assert.ok(result.reason instanceof ChunkConnectionError, String(result.reason));
+    }
+    assert.ok(!server.requests.some((request) => request.line === "PING"));
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test("no statement is written between HELLO and AUTH", async () => {
+  const scram = scramResponder("bot", "secret");
+  let helloSeen!: () => void;
+  const seen = new Promise<void>((resolve) => { helloSeen = resolve; });
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => { release = resolve; });
+  const server = await startFakeServer(async (request) => {
+    if (request.line.startsWith("HELLO")) {
+      helloSeen();
+      await released;
+    }
+    return request.line === "PING" ? "+PONG\r\n" : scram(request);
+  });
+  const client = new ChunkClient({ port: server.port, user: "bot", password: "secret" });
+  try {
+    const connecting = client.connect();
+    await seen;
+    // Started while the login runs: it waits for the login to finish.
+    const ping = client.ping();
+    release();
+    await connecting;
+    assert.equal(await ping, "PONG");
+    assert.deepEqual(server.requests.map((request) => request.line), ["HELLO 3 USER bot $1", "AUTH $1", "PING"]);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test("the connect timeout covers the login", async () => {
+  for (const answered of [false, true]) {
+    const scram = scramResponder("bot", "secret");
+    // HELLO gets no reply, or AUTH gets none.
+    const server = await startFakeServer((request) => (answered && request.line.startsWith("HELLO") ? scram(request) : null));
+    const client = new ChunkClient({ port: server.port, user: "bot", password: "secret", connectTimeoutMs: 300, commandTimeoutMs: 60000 });
+    try {
+      const started = performance.now();
+      await assert.rejects(client.connect(), (error: unknown) => {
+        assert.ok(error instanceof ChunkTimeoutError);
+        assert.equal(error.command, "CONNECT");
+        assert.match(error.message, /connection timeout after 300ms .* during the login; .*connectTimeoutMs/);
+        return true;
+      });
+      assert.ok(performance.now() - started < 10000);
+      assert.equal(server.requests[0]?.line, "HELLO 3 USER bot $1");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  }
+});
+
+test("close leaves no timer running", async () => {
+  const server = await startFakeServer(hello);
+  try {
+    const timers = () => process.getActiveResourcesInfo().filter((resource) => resource === "Timeout").length;
+    const before = timers();
+    const client = await connect({ port: server.port });
+    await client.close();
+    assert.equal(timers(), before);
+  } finally {
+    await server.close();
+  }
+});
+
 test("credentials are checked before connecting", () => {
   assert.throws(() => new ChunkClient({ user: "Bot", password: "x" }), /a user name must match/);
   assert.throws(() => new ChunkClient({ user: "bot two" }), /a user name must match/);

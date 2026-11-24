@@ -2,6 +2,7 @@
 
 Connect with a user and password using `connectUri` or `connect({ user, password, ... })`.
 Login uses SCRAM-SHA-256 and verifies the server's signature.
+A login whose server asks for fewer than 4096 or more than 1000000 PBKDF2 iterations fails with `ChunkProtocolError`; a chunkdb server issues counts in that range.
 Use TLS when you need encryption.
 Without a user, the client sends an anonymous login.
 

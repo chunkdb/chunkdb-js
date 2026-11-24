@@ -91,3 +91,12 @@ test("the client's table comes from the option, then the URI path", () => {
 test("reject invalid URI scheme", () => {
   assert.throws(() => parseChunkUri("http://localhost:4242/"));
 });
+
+test("an IPv6 URI host is the address without brackets", () => {
+  const uri = parseChunkUri("chunks://bot:secret@[::1]:4243/world");
+  assert.equal(uri.host, "::1");
+  assert.equal(uri.port, 4243);
+  assert.equal(formatChunkUri(uri), "chunks://bot:secret@[::1]:4243/world");
+  assert.equal(parseChunkUri("chunk://[2001:db8::7]/").host, "2001:db8::7");
+  assert.equal(new ChunkClient({ uri: "chunk://[::1]:4242/" }).uri(), "chunk://[::1]:4242/");
+});

@@ -219,7 +219,8 @@ interface OperationWaiter {
 }
 
 interface PendingRequest {
-  timer: NodeJS.Timeout;
+  // None for HELLO and AUTH: the login's own timer bounds them.
+  timer?: NodeJS.Timeout;
   resolve: (reply: ChunkReply) => void;
   reject: (error: Error) => void;
   replyLimits?: ReplyLimits;
@@ -681,15 +682,19 @@ export class ChunkClient {
           return;
         }
         finished = true;
+        clearTimeout(timer);
+        socket.off("close", finish);
+        socket.off("error", finish);
         resolve();
       };
-      socket.once("close", finish);
-      socket.once("error", finish);
-      socket.end();
-      setTimeout(() => {
+      // A peer that does not finish the close within 200 ms is cut off.
+      const timer = setTimeout(() => {
         socket.destroy();
         finish();
       }, 200);
+      socket.once("close", finish);
+      socket.once("error", finish);
+      socket.end();
     });
   }
 
@@ -2136,13 +2141,15 @@ export class ChunkClient {
     // Calls queued behind the one that started this connect wait for it.
     this.clearConnectionState(undefined, true);
     this.info = null;
+    const started = performance.now();
     const socket = await this.openSocket();
     if (this.disposed) {
       socket.destroy();
       throw new ChunkConnectionError("client is closed", { phase: "connect" });
     }
+    // The client counts as connected only after the login: until then
+    // other calls wait for this connect instead of writing on the socket.
     this.socket = socket;
-    this.connected = true;
 
     socket.on("data", (chunk: Buffer) => {
       if (this.socket !== socket) {
@@ -2167,34 +2174,64 @@ export class ChunkClient {
       }
     });
 
-    // A failed handshake (failed login, older server) must not leave the
-    // socket open behind a client the caller never received.
+    // A failed handshake (failed login, older server, timeout) must not
+    // leave the socket open behind a client the caller never received.
+    let info: ChunkServerInfo;
     try {
-      await this.hello(socket);
+      info = await this.login(socket, this.options.connectTimeoutMs - (performance.now() - started));
     } catch (error) {
       if (this.socket === socket) {
         this.clearConnectionState();
       }
+      // A login that timed out or was closed may still wait for a reply.
+      this.failAllPending(error instanceof Error ? error : new Error(String(error)));
       socket.destroy();
       throw error;
     }
+    this.info = info;
+    this.connected = true;
     return this;
   }
 
+  // The connect timeout covers the login too: HELLO, the SCRAM proof and
+  // AUTH end within what is left of it, and close() ends the login.
+  private login(socket: TransportSocket, timeoutMs: number): Promise<ChunkServerInfo> {
+    return new Promise<ChunkServerInfo>((resolve, reject) => {
+      let settled = false;
+      const finish = (error: unknown, info?: ChunkServerInfo) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (this.connectAbort === abort) this.connectAbort = null;
+        if (info !== undefined) resolve(info); else reject(error);
+      };
+      const timer = setTimeout(() => {
+        finish(new ChunkTimeoutError(
+          `connection timeout after ${this.options.connectTimeoutMs}ms to ${this.options.host}:${this.options.port} during the login; check the server log and network, then adjust connectTimeoutMs if needed`,
+          { phase: "timeout", command: "CONNECT" },
+        ));
+      }, Math.max(0, timeoutMs));
+      const abort = () => finish(new ChunkConnectionError("connection closed while connecting", { phase: "connect" }));
+      this.connectAbort = abort;
+      this.hello(socket).then((info) => finish(undefined, info), (error: unknown) => finish(error));
+    });
+  }
+
   // HELLO is the first statement on every connection; with a user it starts
-  // the SCRAM-SHA-256 login, which AUTH finishes. Both are sent outside the
-  // pipeline queue: operations waiting for the connection hold its slots.
-  private async hello(socket: TransportSocket): Promise<void> {
+  // the SCRAM-SHA-256 login, which AUTH finishes. Both are written on the
+  // login's own socket, outside the pipeline queue: no other statement is
+  // written before the login ends.
+  private async hello(socket: TransportSocket): Promise<ChunkServerInfo> {
     const user = this.options.user;
     let login: ScramLogin | null = null;
     let reply: ChunkReply;
     const options = Object.entries(this.options.helloOptions ?? {});
     const withClause = options.length === 0 ? "" : " WITH " + options.map(([name, value]) => `${checkName(name.toLowerCase(), "a HELLO option")} = ${formatLiteral(value)}`).join(", ");
     if (user === "") {
-      reply = await this.send(`HELLO ${PROTOCOL_VERSION}${withClause}`, [], "HELLO");
+      reply = await this.handshake(socket, `HELLO ${PROTOCOL_VERSION}${withClause}`, [], "HELLO");
     } else {
       login = startScramLogin(user, undefined, this.channelBindingOf(socket));
-      reply = await this.send(`HELLO ${PROTOCOL_VERSION} USER ${user} $1${withClause}`, [Buffer.from(login.first, "utf8")], "HELLO");
+      reply = await this.handshake(socket, `HELLO ${PROTOCOL_VERSION} USER ${user} $1${withClause}`, [Buffer.from(login.first, "utf8")], "HELLO");
     }
     if (reply.type === "error") {
       // An older chunkdb answers `-ERR PROTOCOL expected HELLO 2`; a 1.x
@@ -2226,7 +2263,7 @@ export class ChunkClient {
           cause: error,
         });
       }
-      reply = await this.send("AUTH $1", [Buffer.from(expected.message, "utf8")], "AUTH");
+      reply = await this.handshake(socket, "AUTH $1", [Buffer.from(expected.message, "utf8")], "AUTH");
       if (reply.type === "error") {
         throw this.serverError(reply, "AUTH");
       }
@@ -2246,7 +2283,25 @@ export class ChunkClient {
         { phase: "auth", command: "AUTH" },
       );
     }
-    this.info = info;
+    return info;
+  }
+
+  // One login statement on the login's socket. A socket that closed after
+  // the previous reply fails the login instead of reconnecting.
+  private handshake(socket: TransportSocket, statement: string, parameters: readonly ChunkParameter[], command: string): Promise<ChunkReply> {
+    if (this.socket !== socket) {
+      return Promise.reject(new ChunkConnectionError(
+        "connection closed; check the server log and that chunk:// uses plaintext and chunks:// uses TLS",
+        { phase: "connect", command },
+      ));
+    }
+    let wire: Buffer;
+    try {
+      wire = encodeStatement(statement, parameters);
+    } catch (error) {
+      return Promise.reject(error instanceof ChunkProtocolError ? new ChunkProtocolError(error.message, { phase: "request", command }) : error);
+    }
+    return this.writeRequest(socket, wire, command);
   }
 
   // The data that binds the login to this connection, read after the TLS
@@ -2348,8 +2403,7 @@ export class ChunkClient {
       }
       throw error;
     }
-    // HELLO and AUTH are sent while connecting, outside the operations' order.
-    const turn = HANDSHAKE.has(command) ? undefined : this.sendTurns.getStore();
+    const turn = this.sendTurns.getStore();
     if (turn !== undefined) {
       await turn.previous;
     }
@@ -2388,34 +2442,7 @@ export class ChunkClient {
     }
     const expiresAt = performance.now() + this.options.commandTimeoutMs;
     onConnection?.(socket, expiresAt);
-    const replyPromise = new Promise<ChunkReply>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        const index = this.pendingQueue.findIndex((pending) => pending.timer === timer);
-        if (index !== -1) {
-          this.pendingQueue.splice(index, 1);
-        }
-        // The reply may still come: the connection cannot be used further.
-        if (this.socket === socket) {
-          this.clearConnectionState(
-            new ChunkConnectionError(`connection closed after a ${command} timeout`, { phase: "timeout", command }),
-          );
-        }
-        socket.destroy();
-        reject(
-          new ChunkTimeoutError(`${command} command timeout after ${this.options.commandTimeoutMs}ms; check the server and network, then adjust commandTimeoutMs if needed`, {
-            phase: "timeout",
-            command,
-          }),
-        );
-      }, this.options.commandTimeoutMs);
-      this.pendingQueue.push({ timer, resolve, reject, replyLimits });
-    });
-
-    socket.write(wire, (error) => {
-      if (error) {
-        this.failAllPending(this.wrapTransportError(error, "request", command));
-      }
-    });
+    const replyPromise = this.writeRequest(socket, wire, command, this.options.commandTimeoutMs, replyLimits);
     if (turn !== undefined && main) {
       turn.release();
     }
@@ -2432,6 +2459,40 @@ export class ChunkClient {
       socket.destroy();
     }
     return reply;
+  }
+
+  // Writes one framed statement on `socket` and waits for its reply, for at
+  // most `timeoutMs` when given.
+  private writeRequest(socket: TransportSocket, wire: Buffer, command: string, timeoutMs?: number, replyLimits?: ReplyLimits): Promise<ChunkReply> {
+    const replyPromise = new Promise<ChunkReply>((resolve, reject) => {
+      const timer: NodeJS.Timeout | undefined = timeoutMs === undefined ? undefined : setTimeout(() => {
+        const index = this.pendingQueue.findIndex((pending) => pending.timer === timer);
+        if (index !== -1) {
+          this.pendingQueue.splice(index, 1);
+        }
+        // The reply may still come: the connection cannot be used further.
+        if (this.socket === socket) {
+          this.clearConnectionState(
+            new ChunkConnectionError(`connection closed after a ${command} timeout`, { phase: "timeout", command }),
+          );
+        }
+        socket.destroy();
+        reject(
+          new ChunkTimeoutError(`${command} command timeout after ${timeoutMs}ms; check the server and network, then adjust commandTimeoutMs if needed`, {
+            phase: "timeout",
+            command,
+          }),
+        );
+      }, timeoutMs);
+      this.pendingQueue.push({ timer, resolve, reject, replyLimits });
+    });
+
+    socket.write(wire, (error) => {
+      if (error) {
+        this.failAllPending(this.wrapTransportError(error, "request", command));
+      }
+    });
+    return replyPromise;
   }
 
   private drainReplies(): void {
