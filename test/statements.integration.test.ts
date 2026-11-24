@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { ChunkConditionFailedError, ChunkOutOfRangeError, connectPool, connectUri, expr, type ChunkChangeEvent, type ChunkWatch } from "../src/index";
+import { ChunkCheckFailedError, ChunkConditionFailedError, ChunkInvalidArgumentError, ChunkNoTableError, ChunkOutOfRangeError, connectPool, connectUri, expr, type ChunkChangeEvent, type ChunkWatch } from "../src/index";
 import { startServer } from "./helpers";
 
 async function changed(watch: ChunkWatch): Promise<ChunkChangeEvent> {
@@ -203,5 +203,41 @@ test("statements: SHOW STATUS, TABLE STATS and SLOTS fields", { timeout: 15000 }
     }
     assert.equal((await client.tableStats("fields")).slots, 3n);
     await assert.rejects(client.listSlots("fields", "bad'name"), /slot name/);
+  } finally { await client.close(); await server.stop(); }
+});
+
+test("statements: RETURNING, read-only transactions, checks, column attributes and rename", { timeout: 20000 }, async () => {
+  const server = await startServer();
+  const client = await connectUri(`${server.uri}wallet`);
+  try {
+    await client.createTable("wallet", { columns: [{ name: "coins", type: "u16" }, { name: "note", type: "text(8)", nullable: true }], chunk: { width: 2, height: 2 } });
+    await client.setBlock(0, 0, { coins: 5 });
+    const old = await client.setBlockReturning(0, 0, { coins: expr("coins + $1") }, { args: [{ column: "coins", value: 2 }], returning: { old: true, columns: ["coins"] } });
+    assert.deepEqual([old.applied, old.rows], [true, [{ x: 0n, y: 0n, values: { coins: 5 } }]]);
+    const refused = await client.setBlockReturning(0, 0, { coins: 0 }, { condition: "coins > $1", args: [{ column: "coins", value: 100 }] });
+    assert.deepEqual([refused.applied, refused.rows, refused.version], [false, [], old.version]);
+    const fresh = await client.setBlockReturning(3, 3, { coins: 1 });
+    assert.deepEqual(fresh.rows, [{ x: 3n, y: 3n, values: { coins: 1, note: null } }]);
+    const deleted = await client.deleteBlockReturning(3, 3, { returning: { old: true, columns: ["coins"] } });
+    assert.deepEqual(deleted.rows[0].values, { coins: 1 });
+    await assert.rejects(client.deleteBlockReturning(3, 3), /returning\.old/);
+
+    await client.transaction(async (tx) => { assert.deepEqual(await tx.getBlock(0, 0, { columns: ["coins"] }), { coins: 7 }); }, { readOnly: true });
+    await assert.rejects(client.transaction(async (tx) => { await tx.setBlock(0, 0, { coins: 1 }); }, { readOnly: true }), ChunkInvalidArgumentError);
+
+    await client.alterTable("wallet", { kind: "addCheck", name: "coins_cap", condition: "coins <= 100" });
+    await assert.rejects(client.setBlock(0, 0, { coins: 101 }), ChunkCheckFailedError);
+    await client.alterTable("wallet", { kind: "setDefault", column: "note", value: "none" });
+    await client.alterTable("wallet", { kind: "setRequired", column: "coins", required: true });
+    const schema = await client.describe("wallet");
+    assert.deepEqual([schema.checks?.map(({ name }) => name), schema.columns[1].default, schema.columns[0].required], [["coins_cap"], "none", true]);
+    await client.alterTable("wallet", { kind: "dropDefault", column: "note" });
+    await client.alterTable("wallet", { kind: "setRequired", column: "coins", required: false });
+    await client.alterTable("wallet", { kind: "setNullable", column: "coins", nullable: true });
+    await client.alterTable("wallet", { kind: "dropCheck", name: "coins_cap" });
+    await client.alterTable("wallet", { kind: "dropCheck", name: "coins_cap", ifExists: true });
+    await client.alterTable("wallet", { kind: "renameTable", to: "purse" });
+    assert.deepEqual(await client.getBlock(0, 0, { table: "purse", columns: ["coins"] }), { coins: 7 });
+    await assert.rejects(client.getBlock(0, 0, { table: "wallet" }), ChunkNoTableError);
   } finally { await client.close(); await server.stop(); }
 });

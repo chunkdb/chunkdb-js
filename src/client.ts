@@ -132,6 +132,8 @@ import type {
   ChunkAggregateOptions,
   ChunkAreaScaleOptions,
   ChunkReduction,
+  ChunkReturningOptions,
+  ChunkWriteResult,
   ChunkTableOption,
   ChunkTableOptions,
   ChunkTableSchema,
@@ -199,6 +201,8 @@ interface SendTurn {
 // at a time on that connection and never reconnect.
 interface TransactionAttempt {
   readonly owner: ChunkClient;
+  // BEGIN READ ONLY instead of BEGIN.
+  readonly readOnly: boolean;
   // False once the callback settled: the handle then refuses calls.
   open: boolean;
   // The connection BEGIN went out on; the attempt uses no other one.
@@ -970,6 +974,30 @@ export class ChunkClient {
         case "setOption":
           clause = `SET ${optionAssignment(change.option, change.value)}`;
           break;
+        case "setDefault":
+          if (change.value === null) throw requestError("a default needs a value; dropDefault removes it", "ALTER TABLE");
+          clause = `ALTER COLUMN ${checkName(change.column, "a column name")} SET DEFAULT ${formatLiteral(change.value)}`;
+          break;
+        case "dropDefault":
+          clause = `ALTER COLUMN ${checkName(change.column, "a column name")} DROP DEFAULT`;
+          break;
+        case "setNullable":
+          clause = `ALTER COLUMN ${checkName(change.column, "a column name")} ${change.nullable ? "SET" : "DROP"} NULL`;
+          break;
+        case "setRequired":
+          clause = `ALTER COLUMN ${checkName(change.column, "a column name")} ${change.required ? "SET" : "DROP"} REQUIRED`;
+          break;
+        case "addCheck":
+          if (typeof change.condition !== "string" || change.condition.trim() === "") throw requestError("a CHECK needs a condition", "ALTER TABLE");
+          clause = `ADD CHECK ${change.name === undefined ? "" : `${checkName(change.name, "a check name")} `}(${change.condition})`;
+          break;
+        case "dropCheck":
+          clause = `DROP CHECK ${change.ifExists === true ? "IF EXISTS " : ""}${checkName(change.name, "a check name")}`;
+          break;
+        case "renameTable":
+          clause = `RENAME TO ${checkName(change.to, "a table name")}`;
+          this.forget(change.to);
+          break;
         default:
           throw requestError("unknown table change", "ALTER TABLE");
       }
@@ -1086,6 +1114,24 @@ export class ChunkClient {
 
   getBlock3DWithMetadata(x: ChunkAxis, y: ChunkAxis, z: ChunkAxis, options: ChunkReadOptions = {}): Promise<ChunkBlockMetadata> {
     return this.enqueue(() => this.getBlockWithMetadataOp([x, y, z], options));
+  }
+
+  /** `SET BLOCK ... RETURNING`: the write and the block, before or after it; a refused condition or version resolves with `applied` false. */
+  setBlockReturning(x: number, y: number, values: Readonly<Record<string, ChunkValue | ChunkExpr>>, options: ChunkReturningOptions = {}): Promise<ChunkWriteResult> {
+    return this.enqueue(() => this.returningOp([x, y], values, options));
+  }
+
+  /** `DELETE BLOCK ... RETURNING OLD`: the deleted block; set `returning.old`. */
+  deleteBlockReturning(x: number, y: number, options: ChunkReturningOptions = {}): Promise<ChunkWriteResult> {
+    return this.enqueue(() => this.returningOp([x, y], null, options));
+  }
+
+  setBlock3DReturning(x: ChunkAxis, y: ChunkAxis, z: ChunkAxis, values: Readonly<Record<string, ChunkValue | ChunkExpr>>, options: ChunkReturningOptions = {}): Promise<ChunkWriteResult> {
+    return this.enqueue(() => this.returningOp([x, y, z], values, options));
+  }
+
+  deleteBlock3DReturning(x: ChunkAxis, y: ChunkAxis, z: ChunkAxis, options: ChunkReturningOptions = {}): Promise<ChunkWriteResult> {
+    return this.enqueue(() => this.returningOp([x, y, z], null, options));
   }
 
   setBlock3D(x: ChunkAxis, y: ChunkAxis, z: ChunkAxis, values: Readonly<Record<string, ChunkValue | ChunkExpr>>, options: ChunkWriteOptions = {}): Promise<bigint> {
@@ -1235,6 +1281,7 @@ export class ChunkClient {
       await this.connect();
       const tx: TransactionAttempt = {
         owner: this,
+        readOnly: options.readOnly === true,
         open: true,
         socket: null,
         began: false,
@@ -1584,10 +1631,11 @@ export class ChunkClient {
     point: GridPoint,
     values: Readonly<Record<string, ChunkValue | ChunkExpr>>,
     options: ChunkWriteOptions,
+    suffix = "",
   ): Promise<ChunkReply> {
     const table = this.tableOf(options);
     const at = pointClause(point);
-    const condition = writeClause(options, "SET BLOCK");
+    const condition = writeClause(options, "SET BLOCK") + suffix;
     const names = Object.keys(values);
     if (names.length === 0) {
       throw requestError("setBlock needs at least one column", "SET BLOCK");
@@ -1605,10 +1653,22 @@ export class ChunkClient {
     });
   }
 
-  private async deleteBlockOp(point: GridPoint, options: ChunkWriteOptions): Promise<ChunkReply> {
+  // A write with RETURNING: the reply {applied, version, rows} decoded with
+  // the table's columns.
+  private async returningOp(point: GridPoint, values: Readonly<Record<string, ChunkValue | ChunkExpr>> | null, options: ChunkReturningOptions): Promise<ChunkWriteResult> {
+    const command = values === null ? "DELETE BLOCK" : "SET BLOCK";
+    const returning = options.returning ?? {};
+    if (values === null && returning.old !== true) throw requestError("DELETE BLOCK returns the old block; set returning.old", command);
+    const names = returning.columns === undefined || returning.columns.length === 0 ? undefined : returning.columns.map((name) => checkName(name, "a column name"));
+    const suffix = ` RETURNING ${returning.old === true ? "OLD " : ""}${names === undefined ? "*" : names.join(", ")}`;
+    const reply = values === null ? await this.deleteBlockOp(point, options, suffix) : await this.setBlockOp(point, values, options, suffix);
+    return await this.withLayout(this.tableOf(options), false, async (layout) => parseWriteResult(layout, names, reply, command));
+  }
+
+  private async deleteBlockOp(point: GridPoint, options: ChunkWriteOptions, suffix = ""): Promise<ChunkReply> {
     const table = this.tableOf(options);
     const statement =
-      `DELETE BLOCK ${pointClause(point)} FROM ${table}` + writeClause(options, "DELETE BLOCK");
+      `DELETE BLOCK ${pointClause(point)} FROM ${table}` + writeClause(options, "DELETE BLOCK") + suffix;
     if (options.args === undefined) return await this.run(statement, [], "DELETE BLOCK");
     return await this.withLayout(table, true, async (layout) => await this.run(statement, encodeArgs(layout, options.args, "DELETE BLOCK"), "DELETE BLOCK"));
   }
@@ -1861,7 +1921,7 @@ export class ChunkClient {
   // BEGIN, the callback of one attempt, then COMMIT; ROLLBACK when it
   // throws or a statement met CONFLICT.
   private async runAttempt(tx: TransactionAttempt, fn: (tx: ChunkTransaction) => unknown): Promise<bigint | null> {
-    expectOk(await this.transactionStatement(tx, "BEGIN"), "BEGIN");
+    expectOk(await this.transactionStatement(tx, tx.readOnly ? "BEGIN READ ONLY" : "BEGIN", "BEGIN"), "BEGIN");
     tx.began = true;
     const handle = this.transactionHandle(tx);
     try {
@@ -1919,9 +1979,9 @@ export class ChunkClient {
 
   // BEGIN, COMMIT or ROLLBACK, sent while none of the attempt's statements
   // is in flight.
-  private transactionStatement(tx: TransactionAttempt, statement: string): Promise<ChunkReply> {
+  private transactionStatement(tx: TransactionAttempt, statement: string, command = statement): Promise<ChunkReply> {
     const turn: SendTurn = { previous: Promise.resolve(), release: () => {}, tx };
-    return this.sendTurns.run(turn, () => this.run(statement, [], statement));
+    return this.sendTurns.run(turn, () => this.run(statement, [], command));
   }
 
   private transactionHandle(tx: TransactionAttempt): ChunkTransaction {
@@ -2737,4 +2797,27 @@ function checkScale(scale: number | undefined, reduction: ChunkReduction | undef
     throw requestError("scale needs a positive integer and a reduction of MAX, MIN, MODE, FIRST or ANY", "GET AREA");
   }
   return { scale, reduction: reduction as ChunkReduction };
+}
+
+function parseWriteResult(layout: TableLayout, names: readonly string[] | undefined, reply: ChunkReply, command: string): ChunkWriteResult {
+  const bad = (why: string): never => { throw new ChunkProtocolError(`malformed ${command} RETURNING reply: ${why}`, { phase: "protocol", command }); };
+  const entries = mapOf(reply, command);
+  const applied = entries.get("applied"), version = entries.get("version"), rows = entries.get("rows");
+  if (applied?.type !== "boolean" || version === undefined || rows?.type !== "array") return bad("expected applied, version and rows");
+  if (!applied.value && rows.items.length !== 0) return bad("a refused write returned rows");
+  const columns = names === undefined ? layout.schema.columns : names.map((name) => layout.schema.columns.find((column) => column.name === name) ?? bad(`unknown column ${name}`));
+  const dims = layout.schema.dims ?? 2;
+  return {
+    applied: applied.value,
+    version: version.type === "null" ? null : uint64Of(version, "version", command),
+    rows: rows.items.map((row) => {
+      const items = itemsOf(row, command);
+      if (items.length !== dims + columns.length) return bad("a row does not match the columns");
+      const axis = (i: number) => axisReply(items[i], ["x", "y", "z"][i], command);
+      return {
+        x: axis(0), y: axis(1), ...(dims === 3 ? { z: axis(2) } : {}),
+        values: Object.fromEntries(columns.map((column, i) => [column.name, valueFromReply(column, items[dims + i])])),
+      };
+    }),
+  };
 }

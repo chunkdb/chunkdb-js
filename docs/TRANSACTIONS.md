@@ -47,5 +47,6 @@ Inside the callback, use `tx`; calls on the originating client are refused.
 | Disconnect | The attempt rolls back unless commit already reached the server. | Check application state before repeating a possibly committed write. |
 
 `retries` allows 5 additional attempts by default.
+`{ readOnly: true }` sends `BEGIN READ ONLY`: the transaction reads one snapshot without a read set, so it cannot conflict, and the server refuses its writes.
 A failure after sending `COMMIT` reports an unknown outcome.
 See [server transactions](https://github.com/chunkdb/chunkdb/blob/main/docs/TRANSACTIONS.md) for server limits and conflict reasons.

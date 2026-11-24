@@ -121,6 +121,7 @@ light is already at the maximum
 - A false or NULL condition writes nothing and rejects with `ChunkConditionFailedError`, whose `current` is the chunk version.
 - A computed value outside its column rejects with `ChunkOutOfRangeError`; `condition` excludes `ifVersion`.
 - `deleteBlock`, the 3D block writes and transaction block writes take `condition` and `args` too.
+- `setBlockReturning` and `deleteBlockReturning` add RETURNING and resolve `{ applied, version, rows }`; a refused condition or version resolves with `applied: false` instead of rejecting. `returning: { old: true }` returns the block before the write, which a delete requires; `columns` picks the returned columns.
 
 ## Three dimensions
 
