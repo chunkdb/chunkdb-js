@@ -8,6 +8,7 @@ import {
   ChunkPermissionError,
   ChunkProtocolError,
   ChunkServerError,
+  ChunkServerProtocolError,
   ChunkTimeoutError,
   ChunkVersionMismatchError,
   connect,
@@ -25,7 +26,7 @@ function hello(request: FakeRequest): string | null {
 
 test("an older chunkdb is reported as speaking an older protocol", async () => {
   for (const [reply, pattern] of [
-    ["-ERR PROTOCOL expected HELLO 2\r\n", /older protocol 2/],
+    ["-ERR PROTOCOL expected HELLO 2\r\n", /speaks an older protocol;/],
     ["-ERR UNKNOWN_COMMAND unknown command 'HELLO'\r\n", /chunkdb 1\.x/],
   ] as const) {
     const server = await startFakeServer((_, socket) => {
@@ -42,6 +43,23 @@ test("an older chunkdb is reported as speaking an older protocol", async () => {
     } finally {
       await server.close();
     }
+  }
+});
+
+test("a PROTOCOL reply with keys comes from a protocol 3 server, whatever its text", async () => {
+  const server = await startFakeServer((_, socket) => {
+    socket.end("-ERR PROTOCOL reason=protocol expected HELLO 2\r\n");
+    return null;
+  });
+  try {
+    await assert.rejects(connect({ port: server.port }), (error: unknown) => {
+      assert.ok(error instanceof ChunkServerProtocolError, String(error));
+      assert.equal(error.reason, "protocol");
+      assert.doesNotMatch(error.message, /older protocol/);
+      return true;
+    });
+  } finally {
+    await server.close();
   }
 });
 

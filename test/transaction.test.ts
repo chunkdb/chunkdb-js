@@ -522,3 +522,40 @@ test("an explicit scalar schema refresh stays inside the transaction connection"
     await server.close();
   }
 });
+
+test("a lost connection leaves COMMIT's outcome unknown, but not a statement before it", async () => {
+  for (const lost of ["SET", "COMMIT"]) {
+    // The fake server closes the connection when the statement arrives.
+    const closing = await startFakeServer((request, socket) => {
+      if (request.line.startsWith(lost)) {
+        socket.destroy();
+        return null;
+      }
+      const word = request.line.split(" ", 1)[0];
+      if (word === "HELLO") return FAKE_HELLO;
+      if (word === "DESCRIBE") return describeReply("f32");
+      return word === "SET" ? "_\r\n" : "+OK\r\n";
+    });
+    try {
+      const client = await connect({ port: closing.port, table: "t" });
+      await assert.rejects(
+        client.transaction(async (tx) => {
+          await tx.setBlock(0, 0, { id: 1 });
+        }),
+        (error: unknown) => {
+          assert.ok(error instanceof ChunkConnectionError, String(error));
+          if (lost === "COMMIT") {
+            assert.equal(error.retryClass, "unknown_outcome");
+            assert.match(error.message, /^the outcome of COMMIT is unknown: /);
+          } else {
+            assert.equal(error.retryClass, undefined);
+          }
+          return true;
+        },
+      );
+      await client.close();
+    } finally {
+      await closing.close();
+    }
+  }
+});

@@ -30,6 +30,7 @@ export interface ChunkErrorOptions {
   code?: string;
   command?: string;
   cause?: unknown;
+  retryClass?: ChunkRetryClass;
 }
 
 export class ChunkError extends Error {
@@ -37,6 +38,12 @@ export class ChunkError extends Error {
   readonly code?: string;
   /** The statement's verb, for example `"SET BLOCK"`. */
   readonly command?: string;
+  /**
+   * `"unknown_outcome"` on a connection, TLS or timeout error of a request
+   * that was written before its reply was lost: it may have applied. Never
+   * retry it automatically. Undefined on other client errors.
+   */
+  readonly retryClass?: ChunkRetryClass;
 
   constructor(message: string, options: ChunkErrorOptions) {
     super(message);
@@ -44,6 +51,7 @@ export class ChunkError extends Error {
     this.phase = options.phase;
     this.code = options.code;
     this.command = options.command;
+    this.retryClass = options.retryClass;
     if (options.cause !== undefined) {
       Object.defineProperty(this, "cause", {
         value: options.cause,
@@ -73,6 +81,7 @@ export class ChunkMigrationError extends ChunkError {
       phase: cause instanceof ChunkError ? cause.phase : "request",
       code: cause instanceof ChunkError ? cause.code : undefined,
       command: "MIGRATE",
+      retryClass: cause instanceof ChunkError ? cause.retryClass : undefined,
       cause,
     });
     this.migration = Object.freeze({ ...migration });
