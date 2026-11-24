@@ -58,7 +58,7 @@ Omitted options use the server's configured defaults.
 
 `listTables()` lists tables visible to you.
 `swapTables(first, second)` exchanges two table names; `recoverTable(name)` serves a fenced table again.
-`tableStats(name)` returns the epoch, completed revision, dimensions, retained tombstones and retained-deletion floor.
+`tableStats(name)` returns the epoch, completed revision, dimensions, retained tombstones and retained-deletion floor, and the counts `chunks`, `loadedChunks`, `files`, `diskBytes`, `slots` and `watches`; `files` and `diskBytes` list the table directory, so their cost grows with its file count.
 `compactTombstones(name, before)` forgets retained deletions below a revision and returns the new floor.
 `describe(table?)` returns their schema, geometry and options.
 Schema changes require `ADMIN`; [users](USERS.md) explains table rights.

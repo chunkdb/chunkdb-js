@@ -284,8 +284,8 @@ export class ChunkPool {
     return this.withClient((client) => client.dropSlot(table, name));
   }
 
-  listSlots(table?: string): Promise<ChunkSlot[]> {
-    return this.withClient((client) => client.listSlots(table));
+  listSlots(table?: string, prefix?: string): Promise<ChunkSlot[]> {
+    return this.withClient((client) => client.listSlots(table, prefix));
   }
 
   createTable(name: string, definition: ChunkTableDefinition): Promise<void> {

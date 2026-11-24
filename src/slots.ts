@@ -73,6 +73,13 @@ export function parseSlots(reply: ChunkReply): ChunkSlot[] {
       if (owner !== null && !/^[a-z_][a-z0-9_]*$/.test(owner)) return malformed("invalid owner");
       slot.owner = owner;
     }
+    if (fields.has("revision")) {
+      const attached = field("attached");
+      if (attached.type !== "boolean") return malformed("attached is not a boolean");
+      slot.revision = uint64("revision");
+      slot.lagRevisions = uint64("lag_revisions");
+      slot.attached = attached.value;
+    }
     return slot;
   });
 }

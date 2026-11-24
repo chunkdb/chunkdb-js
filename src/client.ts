@@ -857,11 +857,16 @@ export class ChunkClient {
     });
   }
 
-  /** Lists visible slots, including lost slots; acked is the written position. */
-  listSlots(table?: string): Promise<ChunkSlot[]> {
+  /** Lists visible slots, including lost slots; acked is the written position. `prefix` lists only slots whose names start with it. */
+  listSlots(table?: string, prefix?: string): Promise<ChunkSlot[]> {
     return this.enqueue(async () => {
-      const statement = `SHOW SLOTS${table === undefined ? "" : ` ON ${checkName(table, "a table name")}`}`;
-      return parseSlots(await this.run(statement, [], "SHOW SLOTS"));
+      let statement = `SHOW SLOTS${table === undefined ? "" : ` ON ${checkName(table, "a table name")}`}`;
+      if (prefix !== undefined) statement += ` PREFIX ${slotName(prefix)}`;
+      const slots = parseSlots(await this.run(statement, [], "SHOW SLOTS"));
+      if (prefix !== undefined && slots.some((slot) => !slot.name.startsWith(prefix))) {
+        throw new ChunkProtocolError("malformed SHOW SLOTS reply: a slot does not start with the prefix", { phase: "protocol", command: "SHOW SLOTS" });
+      }
+      return slots;
     });
   }
 

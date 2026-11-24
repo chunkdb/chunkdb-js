@@ -34,7 +34,7 @@ Framing errors close it.
 
 ## Explicit features
 
-`showStatus()` returns protected directory and table feature snapshots and `activationPending`.
+`showStatus()` returns protected directory and table feature snapshots, `activationPending`, the server `version`, `uptimeMs` and `readOnly`, each table's `state` (`"ok"` or `"fenced"`) and fence `reason`, and `fenced`, the fenced tables whose features cannot be read.
 Each snapshot includes `enabled` feature names and exact bigint `compat`, `roCompat` and `incompat` masks.
 Unknown feature names and mask bits remain visible.
 `enableFeature(name)` explicitly activates a feature and requires ADMIN on `*`.

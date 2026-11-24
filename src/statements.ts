@@ -112,6 +112,8 @@ export function parseTableStats(reply: ChunkReply): ChunkTableStats {
     dims: dims === 2n ? 2 : 3,
     tombstones: uint64Of(fieldOf(fields, "tombstones", command), "tombstones", command),
     retainedDeletionFloor: uint64Of(fieldOf(fields, "retained_deletion_floor", command), "retained_deletion_floor", command),
+    ...Object.fromEntries(([["chunks", "chunks"], ["loaded_chunks", "loadedChunks"], ["files", "files"], ["disk_bytes", "diskBytes"], ["slots", "slots"], ["watches", "watches"]] as const)
+      .filter(([key]) => fields.has(key)).map(([key, name]) => [name, uint64Of(fieldOf(fields, key, command), key, command)])),
   };
 }
 

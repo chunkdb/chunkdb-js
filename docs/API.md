@@ -34,7 +34,7 @@ A chunk version identifies committed state and orders writes within the same tab
 | `alterTable(name, change)`, `dropTable(name)` | change schema/options or drop table |
 | `listTables()`, `describe(table?)` | visible names / `ChunkTableSchema` |
 | `swapTables(first, second)`, `recoverTable(name)` | exchange two table names / serve a fenced table again |
-| `tableStats(name)` | `{ epoch, revision, dims, tombstones, retainedDeletionFloor }` |
+| `tableStats(name)` | `{ epoch, revision, dims, tombstones, retainedDeletionFloor, chunks, loadedChunks, files, diskBytes, slots, watches }` |
 | `compactTombstones(name, before)` | retained-deletion floor (`bigint`) |
 | `clearSchemaCache(table?)` | synchronous cache invalidation |
 | `createUser(name, password, { managesUsers?, requiresChannelBinding? }?)` | create user |
@@ -46,7 +46,7 @@ A chunk version identifies committed state and orders writes within the same tab
 | `migrate(steps)` | ordered `ChunkMigrationResult[]` |
 | `listMigrations()` | `{ name, appliedMs, user, statement }[]` in applied order |
 | `watch(table, watchOptions?)` | `ChunkWatch` async iterator |
-| `createSlot(table, name, slotOptions?)`, `dropSlot(table, name)`, `listSlots(table?)` | slot administration / `ChunkSlot[]` |
+| `createSlot(table, name, slotOptions?)`, `dropSlot(table, name)`, `listSlots(table?, prefix?)` | slot administration / `ChunkSlot[]` |
 | `enableFeature(name)`, `showStatus()` | explicit feature activation / protected feature masks; requires ADMIN on `*` |
 | `execute(statement, parameters?)` | `ChunkReply` |
 | `ping()`, `flushWal()`, `metrics()` | `"PONG"` / durable prior WAL writes / Prometheus text |

@@ -7,6 +7,7 @@ This client uses CQL protocol 3 with chunkdb 2.x; see the server's [compatibilit
 ## Unreleased
 
 ### Added
+- `showStatus()` reports `version`, `uptimeMs`, `readOnly`, table `state` and `reason`, and `fenced`; `tableStats` reports `chunks`, `loadedChunks`, `files`, `diskBytes`, `slots` and `watches`; slots report `revision`, `lagRevisions` and `attached`, and `listSlots(table, prefix)` runs SHOW SLOTS ... PREFIX. ([chunkdb#151](https://github.com/chunkdb/chunkdb/issues/151))
 - Downsampled area pages: `getAreaPage` and `getAreaPage3D` take `scale` and `reduction` (`GET AREA ... SCALE k USING`), and a chunk read from chunk form section 7 has `scale` and `reduction` set; `setChunk` refuses it. ([chunkdb#151](https://github.com/chunkdb/chunkdb/issues/151))
 - Conditional block writes and WHERE filters: `setBlock` and `deleteBlock` take `condition` and `args`, `expr()` values compute a column from the block, and `aggregate`, `aggregateByChunk` and `scanChunksWithOptions` take `where`; filtered scan pages report `after`. ([chunkdb#151](https://github.com/chunkdb/chunkdb/issues/151))
 - Typed helpers for the statements that had none: `aggregate` and `aggregateByChunk` (AGGREGATE maps and BY CHUNK rows, exact bigint sums), `tableStats`, `compactTombstones`, `swapTables`, `recoverTable`, `backup`, `restoreTable`, `reloadTls`, `setUserLimits` and `listMigrations`, on the client and the pool; transactions get `aggregate` and `aggregateByChunk`; `watch` takes several areas through `areas` and `areas3D`. ([chunkdb#151](https://github.com/chunkdb/chunkdb/issues/151))

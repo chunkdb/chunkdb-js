@@ -35,7 +35,8 @@ false
 
 ## Acknowledgments
 
-`listSlots(table?)` returns `{ table, name, epoch, acked, retainedBytes, lost, filters, lostReason, owner }`.
+`listSlots(table?, prefix?)` returns `{ table, name, epoch, acked, revision, lagRevisions, retainedBytes, attached, lost, filters, lostReason, owner }`; `prefix` lists only slots whose names start with it.
+`revision` is the durable revision recorded for the table's slots, `lagRevisions` how far `acked` is below it, and `attached` is true while a watch holds the slot.
 `filters` contains `area`, `columns`, aligned stable `columnIds`, `noBefore` and `chunks`.
 Area coordinates and column IDs are bigint; a dropped column keeps its ID with a null display name.
 `lostReason` is null for live slots; known loss reasons are `retention_limit` and `schema_filter`.
