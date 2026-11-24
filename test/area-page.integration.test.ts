@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { connectUri } from "../src/index";
+import { ChunkInvalidArgumentError, connectUri } from "../src/index";
 import { startServer } from "./helpers";
 
 for (const tls of [false, true]) for (const dims of [2, 3] as const) test(`configured area pages ${dims}D over ${tls ? "TLS" : "plain"}`, async () => {
@@ -48,5 +48,25 @@ for (const tls of [false, true]) for (const dims of [2, 3] as const) test(`confi
       assert.deepEqual((await client.getAreaPage3D(area, { limit: 2, after: short.after! })).after, { cx: 2n, cy: 0n, cz: 0n });
       await assert.rejects(client.getArea3D(area), /area|chunk/i);
     }
+  } finally { await client.close(); await server.stop(); }
+});
+
+test("downsampled area pages read section 7 forms", async () => {
+  const server = await startServer();
+  const client = await connectUri(`${server.uri}terrain`);
+  try {
+    await client.createTable("terrain", { columns: [{ name: "h", type: "u8" }, { name: "kind", type: "u8", nullable: true }], chunk: { width: 4, height: 4 } });
+    for (const [x, y, h] of [[0, 0, 3], [1, 1, 7], [2, 0, 5], [5, 0, 1]]) await client.setBlock(x, y, { h });
+    const page = await client.getAreaPage({ cx0: 0, cy0: 0, cx1: 1, cy1: 0 }, { scale: 2, reduction: "MAX", columns: ["h"] });
+    assert.equal(page.chunks.length, 2);
+    const first = page.chunks[0].chunk;
+    assert.deepEqual([first.scale, first.reduction, first.width, first.height], [2, "MAX", 2, 2]);
+    assert.deepEqual([first.present, first.columns.h], [[true, true, false, false], [7, 5, null, null]]);
+    assert.deepEqual(page.chunks[1].chunk.columns.h, [1, null, null, null]);
+    const minimum = await client.getAreaPage({ cx0: 0, cy0: 0, cx1: 0, cy1: 0 }, { scale: 4, reduction: "MIN" });
+    assert.deepEqual([minimum.chunks[0].chunk.width, minimum.chunks[0].chunk.columns.h], [1, [3]]);
+    await assert.rejects(client.getAreaPage({ cx0: 0, cy0: 0, cx1: 0, cy1: 0 }, { scale: 3, reduction: "MAX" }), ChunkInvalidArgumentError);
+    await assert.rejects(client.getAreaPage({ cx0: 0, cy0: 0, cx1: 0, cy1: 0 }, { scale: 0, reduction: "MAX" }), /positive integer/);
+    await assert.rejects(client.setChunk(0, 0, first), /downsampled/);
   } finally { await client.close(); await server.stop(); }
 });

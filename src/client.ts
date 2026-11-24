@@ -42,7 +42,7 @@ import {
 import { tlsChannelBinding, type ScramChannelBinding } from "./channel-binding.js";
 import { chunkFormLimit, decodeChunkForm, encodeChunkForm } from "./chunk-form.js";
 import { connectionId, controlAcknowledgment, parseConnections } from "./connection-controls.js";
-import { AreaDecodeLimitError, checkAreaDecodedCells, decodeSectionedChunk, encodeSectionedChunk } from "./sectioned-chunk.js";
+import { AreaDecodeLimitError, checkAreaDecodedCells, decodeSectionedChunk, encodeSectionedChunk, type FormScale } from "./sectioned-chunk.js";
 import { captureAreaPage, decodeAreaPage, rawAreaReplyOptions, type AreaPageRequest } from "./area-page.js";
 import { parseSectionedForm } from "./chunk-sections.js";
 import { decodeChunkScanPage } from "./chunk-scan.js";
@@ -130,6 +130,8 @@ import type {
   ChunkTableChange,
   ChunkTableDefinition,
   ChunkAggregateOptions,
+  ChunkAreaScaleOptions,
+  ChunkReduction,
   ChunkTableOption,
   ChunkTableOptions,
   ChunkTableSchema,
@@ -1680,6 +1682,9 @@ export class ChunkClient {
     if (tx?.socket != null && tx.socket !== this.socket) throw transactionLost("GET AREA");
     await this.ensureConnected();
     if (!this.info?.features?.includes("area_paging")) throw requestError("the server does not support area_paging", "GET AREA");
+    const { scale, reduction } = request.options as ChunkAreaScaleOptions;
+    const scaled = scale === undefined && reduction === undefined ? undefined : checkScale(scale, reduction);
+    if (scaled !== undefined && this.info?.features?.includes("area_scale") !== true) throw requestError("the server does not support area_scale", "GET AREA");
     const areaLimits = this.areaReplyLimits();
     if (request.limit !== undefined && request.limit > areaLimits.maxAreaChunks) throw requestError("GET AREA limit exceeds maxAreaChunks", "GET AREA");
     const table = this.tableOf(request.options);
@@ -1687,7 +1692,7 @@ export class ChunkClient {
       if (layout.schema.dims !== request.dims) throw requestError("GET AREA selector has the wrong table dimensionality", "GET AREA");
       const indexes = columnIndexes(layout, request.options.columns), names = indexes.map((index) => layout.schema.columns[index].name);
       const limit = request.limit ?? areaLimits.maxAreaChunks;
-      const statement = `GET AREA ${request.clause} FROM ${table}${columnsClause(names)} LIMIT ${limit}${request.after === undefined ? "" : ` AFTER ${request.after.join(" ")}`} WITH SCHEMA`;
+      const statement = `GET AREA ${request.clause} FROM ${table}${columnsClause(names)} LIMIT ${limit}${request.after === undefined ? "" : ` AFTER ${request.after.join(" ")}`} WITH SCHEMA${scaled === undefined ? "" : ` SCALE ${scaled.scale} USING ${scaled.reduction}`}`;
       const response = await this.runArea(statement, "schemaPage", limit);
       return this.decodeAreaResponse(response, (value, checkpoint) => {
         const reply = itemsOf(value, "GET AREA");
@@ -1700,7 +1705,7 @@ export class ChunkClient {
           checkpoint();
           const fields = itemsOf(row, "GET AREA"), form = bulkOf(fields[request.dims], "GET AREA");
           return { cx: axisReply(fields[0], "cx", "GET AREA"), cy: axisReply(fields[1], "cy", "GET AREA"),
-            ...(request.dims === 3 ? { cz: axisReply(fields[2], "cz", "GET AREA") } : {}), chunk: raw ? form : decodeSectionedChunk(layout, form, indexes) };
+            ...(request.dims === 3 ? { cz: axisReply(fields[2], "cz", "GET AREA") } : {}), chunk: raw ? form : decodeSectionedChunk(layout, form, indexes, scaled) };
         });
         const after = page.after === null ? null : { cx: page.after[0], cy: page.after[1], ...(request.dims === 3 ? { cz: page.after[2] } : {}) };
         return { chunks, more: page.more, after, schemaVersion } as ChunkAreaPage | ChunkAreaRawPage | ChunkAreaPage3D | ChunkAreaRawPage3D;
@@ -2677,4 +2682,11 @@ export async function connectUri(uri: string, overrides: Partial<ChunkClientOpti
     );
   }
   return await connect({ ...overrides, uri });
+}
+
+function checkScale(scale: number | undefined, reduction: ChunkReduction | undefined): FormScale {
+  if (scale === undefined || !Number.isSafeInteger(scale) || scale < 1 || scale > 0xffff_ffff || !["MAX", "MIN", "MODE", "FIRST", "ANY"].includes(reduction as string)) {
+    throw requestError("scale needs a positive integer and a reduction of MAX, MIN, MODE, FIRST or ANY", "GET AREA");
+  }
+  return { scale, reduction: reduction as ChunkReduction };
 }
