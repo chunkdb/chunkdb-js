@@ -94,6 +94,7 @@ export type {
   ChunkSchemaVersion,
   ChunkFeatureStatus,
   ChunkStatus,
+  ChunkTableStatus,
   ChunkArea,
   ChunkAreaEntry,
   ChunkAreaRawEntry,

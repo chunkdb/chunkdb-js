@@ -175,3 +175,33 @@ test("statements: IF conditions, computed values and WHERE filters", { timeout: 
     assert.equal(await client.getBlock(6, 0), null);
   } finally { await pool.close(); await client.close(); await server.stop(); }
 });
+
+test("statements: SHOW STATUS, TABLE STATS and SLOTS fields", { timeout: 15000 }, async () => {
+  const server = await startServer();
+  const client = await connectUri(`${server.uri}fields`);
+  try {
+    await client.createTable("fields", { columns: [{ name: "n", type: "u8" }], chunk: { width: 2, height: 2 } });
+    await client.setBlock(0, 0, { n: 1 });
+    await client.setBlock(4, 0, { n: 1 });
+    const status = await client.showStatus();
+    assert.equal(status.version, client.serverInfo()?.serverVersion);
+    assert.equal(status.readOnly, false);
+    assert.equal(typeof status.uptimeMs, "bigint");
+    assert.deepEqual(status.fenced, []);
+    const table = status.tables.find(({ name }) => name === "fields");
+    assert.deepEqual([table?.state, table?.reason], ["ok", null]);
+    const stats = await client.tableStats("fields");
+    assert.deepEqual([stats.chunks, stats.slots, stats.watches], [2n, 0n, 0n]);
+    assert.ok((stats.files ?? 0n) > 0n && (stats.diskBytes ?? 0n) > 0n);
+    for (const name of ["app_one", "app_two", "other"]) await client.createSlot("fields", name);
+    const slots = await client.listSlots("fields", "app_");
+    assert.deepEqual(slots.map(({ name }) => name).sort(), ["app_one", "app_two"]);
+    for (const slot of slots) {
+      assert.equal(slot.attached, false);
+      assert.equal(typeof slot.revision, "bigint");
+      assert.equal(typeof slot.lagRevisions, "bigint");
+    }
+    assert.equal((await client.tableStats("fields")).slots, 3n);
+    await assert.rejects(client.listSlots("fields", "bad'name"), /slot name/);
+  } finally { await client.close(); await server.stop(); }
+});

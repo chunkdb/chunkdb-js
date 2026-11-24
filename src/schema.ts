@@ -1,6 +1,6 @@
 import { ChunkProtocolError } from "./errors.js";
 import type { ChunkReply } from "./protocol.js";
-import type { ChunkColumn, ChunkServerInfo, ChunkSize, ChunkTableSchema, ChunkValue, ChunkSchemaVersion, ChunkFeatureStatus, ChunkStatus } from "./types.js";
+import type { ChunkColumn, ChunkServerInfo, ChunkSize, ChunkTableSchema, ChunkValue, ChunkSchemaVersion, ChunkFeatureStatus, ChunkStatus, ChunkTableStatus } from "./types.js";
 import { formatColumnType, parseColumnType, valueFromReply } from "./values.js";
 
 /** A table schema and what the chunk form needs beyond `DESCRIBE`'s public fields. */
@@ -242,7 +242,28 @@ export function parseStatus(reply: ChunkReply): ChunkStatus {
   };
   const tables = field(entries, "tables", command);
   if (tables.type !== "array") throw malformed("tables is not an array", command);
-  return { directory: feature(field(entries, "directory", command)), tables: tables.items.map((item) => ({
-    name: textOf(field(mapOf(item, command), "name", command), "name", command), ...feature(item),
-  })), activationPending: booleanOf(field(entries, "activation_pending", command), "activation_pending", command) };
+  const status: ChunkStatus = { directory: feature(field(entries, "directory", command)), tables: tables.items.map((item) => {
+    const values = mapOf(item, command);
+    const table: ChunkTableStatus = { name: textOf(field(values, "name", command), "name", command), ...feature(item) };
+    if (values.has("state")) {
+      const state = textOf(field(values, "state", command), "state", command), reason = field(values, "reason", command);
+      if (state !== "ok" && state !== "fenced") throw malformed("invalid table state", command);
+      table.state = state;
+      table.reason = reason.type === "null" ? null : textOf(reason, "reason", command);
+      if ((state === "fenced") !== (table.reason !== null)) throw malformed("table state and reason disagree", command);
+    }
+    return table;
+  }), activationPending: booleanOf(field(entries, "activation_pending", command), "activation_pending", command) };
+  if (entries.has("version")) status.version = textOf(field(entries, "version", command), "version", command);
+  if (entries.has("uptime_ms")) status.uptimeMs = uint64Of(field(entries, "uptime_ms", command), "uptime_ms", command);
+  if (entries.has("read_only")) status.readOnly = booleanOf(field(entries, "read_only", command), "read_only", command);
+  if (entries.has("fenced")) {
+    const fenced = field(entries, "fenced", command);
+    if (fenced.type !== "array") throw malformed("fenced is not an array", command);
+    status.fenced = fenced.items.map((item) => {
+      const values = mapOf(item, command);
+      return { name: textOf(field(values, "name", command), "name", command), reason: textOf(field(values, "reason", command), "reason", command) };
+    });
+  }
+  return status;
 }
