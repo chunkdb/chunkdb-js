@@ -7,6 +7,7 @@ See [API methods](API.md) and [error handling](CONNECTIONS.md#errors) first.
 Known array prefixes accept trailing fields, including nested entries and rows.
 Known map fields decode independently of unknown keys.
 Unknown push kinds are fully consumed and ignored; they cannot take an ordinary request's reply or change ACK eligibility.
+An error reply only answers a whole statement; one nested inside an array, map or push fails with `ChunkProtocolError`.
 
 An unknown column type returns raw bytes for that row column while known neighbors stay typed.
 Raw chunk and area reads retain unknown-width forms, because their neighboring columns cannot be located safely.

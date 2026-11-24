@@ -26,6 +26,10 @@ This client uses CQL protocol 3 with chunkdb 2.x; see the server's [compatibilit
 - Generic `BACKUP TO` integration coverage checks summaries and copied data over plain TCP and TLS
 
 ### Fixed
+- A request whose connection is lost or times out after it was written fails with an unknown outcome: the `ChunkConnectionError`, `ChunkTlsError` or `ChunkTimeoutError` has `retryClass` `"unknown_outcome"` and says the outcome is unknown, since the write may have applied. Inside a transaction only `COMMIT` does; the statements before it roll back. `ChunkError` gains the optional `retryClass`. (#47)
+- Older-server detection reads the error code and keys only: `PROTOCOL` without a `reason` key, or `UNKNOWN_COMMAND`, to HELLO names an older server; a `PROTOCOL` reply of a protocol 3 server is a `ChunkServerProtocolError`, whatever its text. (#47)
+- CONNECTIONS.md: a bound login through a proxy that forwards plain TCP fails with `ChunkInvalidArgumentError`, and through one that opens its own TLS connection with `AUTH_FAILED` reason `channel_binding`. (#47)
+- An error reply nested inside an array, map or push is refused with `ChunkProtocolError` instead of being returned as data, as the Go client and the CLI do. (#47)
 - A login no longer waits forever when the connection closes between `+SCRAM` and AUTH: the login fails, and calls waiting for the connection fail with it. HELLO and AUTH go on the login's own socket, no other statement is written before the login ends, and `connectTimeoutMs` covers the whole login. (#47)
 - A login refuses a server-first message whose iteration count is outside 4096 to 1000000, the range a chunkdb server issues. (#47)
 - An IPv6 URI host such as `chunk://[::1]:4242/` connects to the address without brackets and sends no TLS server name for it. (#47)

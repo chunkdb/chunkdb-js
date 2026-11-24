@@ -48,5 +48,5 @@ Inside the callback, use `tx`; calls on the originating client are refused.
 
 `retries` allows 5 additional attempts by default.
 `{ readOnly: true }` sends `BEGIN READ ONLY`: the transaction reads one snapshot without a read set, so it cannot conflict, and the server refuses its writes.
-A failure after sending `COMMIT` reports an unknown outcome.
+A failure after sending `COMMIT` reports an unknown outcome: the error's `retryClass` is `"unknown_outcome"`.
 See [server transactions](https://github.com/chunkdb/chunkdb/blob/main/docs/TRANSACTIONS.md) for server limits and conflict reasons.

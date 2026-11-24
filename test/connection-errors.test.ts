@@ -93,6 +93,8 @@ test("command timeout identifies the command and its timeout setting", async () 
       assert.ok(error instanceof ChunkTimeoutError);
       assert.equal(error.command, "PING");
       assert.match(error.message, /PING command timeout after 100ms.*server and network.*commandTimeoutMs/);
+      // The PING was written: its outcome is unknown.
+      assert.equal(error.retryClass, "unknown_outcome");
       return true;
     });
   } finally { await client.close(); await server.close(); }
@@ -120,7 +122,8 @@ test("a close names the scheme check only before the login completes", async () 
     // A connection closed after login, as by KILL CONNECTION, is not a scheme mismatch.
     await assert.rejects(late.ping(), (error: unknown) => {
       assert.ok(error instanceof ChunkConnectionError);
-      assert.match(error.message, /^connection closed; check the server log$/);
+      assert.match(error.message, /^the outcome of PING is unknown: connection closed; check the server log$/);
+      assert.equal(error.retryClass, "unknown_outcome");
       return true;
     });
   } finally {
@@ -183,4 +186,33 @@ test("connectUri refuses a missing URI instead of using the defaults", async () 
     return true;
   });
   await assert.rejects(connectUri(""), /got an empty string/);
+});
+
+test("a connection lost after a request was written reports an unknown outcome", async () => {
+  let pings = 0;
+  const server = await startFakeServer(({ line }, socket) => {
+    if (line.startsWith("HELLO 3")) return FAKE_HELLO;
+    // The second PING closes the connection; neither PING gets a reply.
+    pings += 1;
+    if (pings === 2) socket.destroy();
+    return null;
+  });
+  const client = new ChunkClient({ port: server.port, pipelineDepth: 2 });
+  try {
+    await client.connect();
+    // Two requests are written; the third waits for room and is never sent.
+    const results = await Promise.allSettled([client.ping(), client.ping(), client.ping()]);
+    const errors = results.map((result) => {
+      assert.equal(result.status, "rejected");
+      assert.ok(result.reason instanceof ChunkConnectionError, String(result.reason));
+      return result.reason;
+    });
+    for (const error of errors.slice(0, 2)) {
+      assert.equal(error.retryClass, "unknown_outcome");
+      assert.equal(error.command, "PING");
+      assert.match(error.message, /^the outcome of PING is unknown: /);
+    }
+    assert.equal(errors[2].retryClass, undefined);
+    assert.equal(pings, 2);
+  } finally { await client.close(); await server.close(); }
 });
