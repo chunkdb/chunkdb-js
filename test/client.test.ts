@@ -165,8 +165,8 @@ test("users statements send verifiers and map their errors", async () => {
     await client.revoke("WRITE", "*", "bot");
     await client.dropUser("bot");
     assert.deepEqual(await client.listUsers(), [
-      { name: "admin", managesUsers: true, requiresChannelBinding: false, grants: { "*": "ADMIN" } },
-      { name: "bot", managesUsers: false, requiresChannelBinding: true, grants: Object.fromEntries([["__proto__", "READ"], ["world", "WRITE"]]) },
+      { name: "admin", managesUsers: true, requiresChannelBinding: false, grants: { "*": "ADMIN" }, serverRights: [] },
+      { name: "bot", managesUsers: false, requiresChannelBinding: true, grants: Object.fromEntries([["__proto__", "READ"], ["world", "WRITE"]]), serverRights: [] },
     ]);
     await client.createUser("eve", "x", { requiresChannelBinding: true });
     await client.createUser("ann", "x", { managesUsers: true, requiresChannelBinding: true });
