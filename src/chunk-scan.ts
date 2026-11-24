@@ -13,6 +13,8 @@ export interface ScanDecodeOptions {
   withData: boolean;
   epoch?: string;
   indexes: readonly number[];
+  /** The scan has WHERE: the reply carries `after` and a page may be empty. */
+  filtered?: boolean;
 }
 
 function bad(message: string): never { throw new ChunkProtocolError(message, { phase: "protocol", command: "SCAN CHUNKS" }); }
@@ -61,6 +63,19 @@ export function decodeChunkScanPage(layout: TableLayout, reply: ChunkReply, opti
     }
     chunks.push(entry);
   }
+  const page: ChunkScanPage3D = { chunks, more: more.value, epoch: lifetime, position: frontier, retainedDeletionFloor };
+  if (options.filtered === true) {
+    const next = fields.get("after");
+    if (next === undefined) bad("missing after in a filtered scan");
+    if (next.type !== "null") {
+      if (next.type !== "array" || next.items.length !== options.dims) bad("invalid after coordinate");
+      const point = next.items.map(axis);
+      if ((options.after !== undefined && !less(options.after, point)) || (previous !== undefined && less(point, previous))) bad("invalid after coordinate");
+      page.after = { cx: point[0], cy: point[1], cz: options.dims === 3 ? point[2] : 0n };
+    }
+    if (more.value !== (page.after !== undefined)) bad("after and more disagree");
+    return page;
+  }
   if (more.value && chunks.length === 0) bad("empty scan page reports more");
-  return { chunks, more: more.value, epoch: lifetime, position: frontier, retainedDeletionFloor };
+  return page;
 }

@@ -278,3 +278,20 @@ test("typed chunk requests defer growth-aware lowered quotas to the server", asy
     assert.equal((await client.describe("space")).options.varMaxChunkBytes, 13);
   } finally { await client.close(); await server.close(); }
 });
+
+test("filtered scan decoder reads after and allows empty pages", () => {
+  const { layout } = fixture();
+  const page = (more: boolean, after: Buffer, rows = array()) => parseReply(map({ chunks: rows, more: bool(more), after, epoch: bulk(epoch), position: integer(5), retained_deletion_floor: integer(2) }))!.reply;
+  const options = { dims: 3 as const, withData: false, indexes: [0], filtered: true };
+  const empty = decodeChunkScanPage(layout, page(true, array(integer(1), integer(2), integer(0))), options);
+  assert.deepEqual([empty.chunks, empty.more, empty.after], [[], true, { cx: 1n, cy: 2n, cz: 0n }]);
+  const last = decodeChunkScanPage(layout, page(false, nil, array(array(integer(3), integer(0), integer(0), integer(4)))), { ...options, after: [1n, 2n, 0n] });
+  assert.deepEqual([last.chunks.length, last.more, last.after], [1, false, undefined]);
+  assert.throws(() => decodeChunkScanPage(layout, page(true, nil), options), /disagree/);
+  assert.throws(() => decodeChunkScanPage(layout, page(false, array(integer(2), integer(0), integer(0))), options), /disagree/);
+  assert.throws(() => decodeChunkScanPage(layout, page(true, array(integer(1), integer(2), integer(0))), { ...options, after: [1n, 2n, 0n] }), /invalid after/);
+  assert.throws(() => decodeChunkScanPage(layout, page(true, array(integer(2), integer(0), integer(0)), array(array(integer(3), integer(0), integer(0), integer(4)))), options), /invalid after/);
+  assert.throws(() => decodeChunkScanPage(layout, page(true, array(integer(2), integer(0))), options), /invalid after/);
+  const missing = parseReply(map({ chunks: array(), more: bool(false), epoch: bulk(epoch), position: integer(5), retained_deletion_floor: integer(2) }))!.reply;
+  assert.throws(() => decodeChunkScanPage(layout, missing, options), /missing after/);
+});

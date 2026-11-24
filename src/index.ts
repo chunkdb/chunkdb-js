@@ -1,6 +1,7 @@
 export { ChunkClient, connect, connectUri } from "./client.js";
 export { ChunkPool, connectPool } from "./pool.js";
 export { ChunkWatch } from "./watch.js";
+export { ChunkExpr, expr } from "./conditions.js";
 export { emptyChunk } from "./chunk-form.js";
 export {
   ChunkAuthError,
@@ -152,5 +153,9 @@ export type {
   ChunkValue,
   ChunkVerifierOptions,
   ChunkWriteOptions,
+  ChunkArg,
+  ChunkCondition,
+  ChunkConditionOptions,
+  ChunkAggregateOptions,
   ParsedChunkUri,
 } from "./types.js";

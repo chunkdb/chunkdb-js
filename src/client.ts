@@ -46,6 +46,7 @@ import { AreaDecodeLimitError, checkAreaDecodedCells, decodeSectionedChunk, enco
 import { captureAreaPage, decodeAreaPage, rawAreaReplyOptions, type AreaPageRequest } from "./area-page.js";
 import { parseSectionedForm } from "./chunk-sections.js";
 import { decodeChunkScanPage } from "./chunk-scan.js";
+import { ChunkExpr, encodeArgs, whereClause } from "./conditions.js";
 import { encodeStatement, ReplyReader, type ChunkParameter, type ChunkReply, type ErrorReply, type PushReply, type ReplyLimits } from "./protocol.js";
 import { filterClause, ChunkWatch, kWatchAck, kWatchPause, kWatchStream } from "./watch.js";
 import { parseSlots, slotName, slotOwner } from "./slots.js";
@@ -128,6 +129,7 @@ import type {
   ChunkStateInput,
   ChunkTableChange,
   ChunkTableDefinition,
+  ChunkAggregateOptions,
   ChunkTableOption,
   ChunkTableOptions,
   ChunkTableSchema,
@@ -441,6 +443,13 @@ function writeClause(options: ChunkWriteOptions, command: string, chunk = false)
     if (!chunk || options.ifVersion !== undefined) throw requestError("ifAbsent needs a chunk write without ifVersion", command);
     return " IF ABSENT";
   }
+  if (options.condition !== undefined) {
+    if (chunk) throw requestError("condition needs a block write", command);
+    if (typeof options.condition !== "string" || options.condition.trim() === "") throw requestError("condition must be a nonempty string", command);
+    if (options.ifVersion !== undefined) throw requestError("ifVersion and condition exclude each other", command);
+    return ` IF ${options.condition}`;
+  }
+  if (chunk && options.args !== undefined) throw requestError("args need a block write", command);
   return options.ifVersion === undefined ? "" : ` IF VERSION ${checkVersion(options.ifVersion)}`;
 }
 
@@ -997,7 +1006,7 @@ export class ChunkClient {
    * Sets columns of a block; a new block takes defaults for the others.
    * Values travel as parameters. Resolves the chunk version after the write.
    */
-  setBlock(x: number, y: number, values: Readonly<Record<string, ChunkValue>>, options: ChunkWriteOptions = {}): Promise<bigint> {
+  setBlock(x: number, y: number, values: Readonly<Record<string, ChunkValue | ChunkExpr>>, options: ChunkWriteOptions = {}): Promise<bigint> {
     return this.enqueue(async () => versionOf(await this.setBlockOp([x, y], values, options), "SET BLOCK"));
   }
 
@@ -1048,7 +1057,7 @@ export class ChunkClient {
     return this.enqueue(() => this.getBlockWithMetadataOp([x, y, z], options));
   }
 
-  setBlock3D(x: ChunkAxis, y: ChunkAxis, z: ChunkAxis, values: Readonly<Record<string, ChunkValue>>, options: ChunkWriteOptions = {}): Promise<bigint> {
+  setBlock3D(x: ChunkAxis, y: ChunkAxis, z: ChunkAxis, values: Readonly<Record<string, ChunkValue | ChunkExpr>>, options: ChunkWriteOptions = {}): Promise<bigint> {
     return this.enqueue(async () => versionOf(await this.setBlockOp([x, y, z], values, options), "SET BLOCK"));
   }
 
@@ -1150,12 +1159,12 @@ export class ChunkClient {
    * box or ball, keyed by the function's lowercase name such as `sum(height)`.
    * Integer results are exact bigints, also beyond the int64 range.
    */
-  aggregate(selector: ChunkAggregateSelector, functions: readonly ChunkAggregateFunction[], options: ChunkTableOption = {}): Promise<ChunkAggregateResult> {
+  aggregate(selector: ChunkAggregateSelector, functions: readonly ChunkAggregateFunction[], options: ChunkAggregateOptions = {}): Promise<ChunkAggregateResult> {
     return this.enqueue(() => this.aggregateOp(selector, functions, options, false) as Promise<ChunkAggregateResult>);
   }
 
   /** `AGGREGATE ... BY CHUNK`: one row per chunk with a present block, in coordinate order. */
-  aggregateByChunk(selector: ChunkAggregateSelector, functions: readonly ChunkAggregateFunction[], options: ChunkTableOption = {}): Promise<ChunkAggregateRow[]> {
+  aggregateByChunk(selector: ChunkAggregateSelector, functions: readonly ChunkAggregateFunction[], options: ChunkAggregateOptions = {}): Promise<ChunkAggregateRow[]> {
     return this.enqueue(() => this.aggregateOp(selector, functions, options, true) as Promise<ChunkAggregateRow[]>);
   }
 
@@ -1250,7 +1259,8 @@ export class ChunkClient {
     return this.enqueue(async () => {
       const after = options.after === undefined ? undefined : [BigInt(checkCoordinate(options.after.cx, "after.cx")), BigInt(checkCoordinate(options.after.cy, "after.cy"))];
       const page = await this.scanChunksDataOp(options, 2, after);
-      return { ...page, chunks: page.chunks.map(({ cx, cy, cz: _cz, ...chunk }): ChunkScanEntry => ({ ...chunk,
+      const { after: next, ...rest } = page;
+      return { ...rest, ...(next === undefined ? {} : { after: { cx: integerOf({ type: "integer", value: next.cx }, "cx", "SCAN CHUNKS"), cy: integerOf({ type: "integer", value: next.cy }, "cy", "SCAN CHUNKS") } }), chunks: page.chunks.map(({ cx, cy, cz: _cz, ...chunk }): ChunkScanEntry => ({ ...chunk,
         cx: integerOf({ type: "integer", value: cx }, "cx", "SCAN CHUNKS"), cy: integerOf({ type: "integer", value: cy }, "cy", "SCAN CHUNKS") })) };
     });
   }
@@ -1263,7 +1273,7 @@ export class ChunkClient {
     });
   }
 
-  async *scanAllChunks3D(options: Omit<ChunkScanOptions3D, "after" | "since" | "withData" | "columns"> = {}): AsyncGenerator<ChunkCoord3D, void, undefined> {
+  async *scanAllChunks3D(options: Omit<ChunkScanOptions3D, "after" | "since" | "withData" | "columns" | "where"> = {}): AsyncGenerator<ChunkCoord3D, void, undefined> {
     let after: ChunkCoord3D | undefined;
     let epoch = options.epoch;
     while (true) {
@@ -1281,6 +1291,8 @@ export class ChunkClient {
     if (options.withData !== undefined && typeof options.withData !== "boolean") throw requestError("withData must be a boolean", command);
     if (options.columns !== undefined && options.withData !== true) throw requestError("column projections need WITH DATA", command);
     if (options.epoch !== undefined && (typeof options.epoch !== "string" || !/^[0-9a-f]{32}$/i.test(options.epoch))) throw requestError("epoch must be 32 hex digits", command);
+    const filter = whereClause(options.where, command);
+    if (options.where !== undefined && options.since !== undefined && options.withData !== true) throw requestError("where with since needs withData", command);
     const epoch = options.epoch?.toLowerCase();
     return this.withLayout(table, false, async (layout) => {
       if ((layout.schema.dims ?? 2) !== dims) throw requestError(`table ${table} needs ${layout.schema.dims ?? 2} coordinates`, command);
@@ -1290,9 +1302,10 @@ export class ChunkClient {
       if (after !== undefined) statement += ` AFTER ${after.join(" ")}`;
       if (options.since !== undefined) statement += ` SINCE ${options.since}`;
       if (options.limit !== undefined) statement += ` LIMIT ${options.limit}`;
+      statement += filter;
       if (options.withData) statement += ` WITH DATA${columnsClause(options.columns ?? [])}`;
-      const reply = await this.run(statement, [], command);
-      return decodeChunkScanPage(layout, reply, { dims, after, since: options.since, limit: options.limit, withData: options.withData === true, epoch, indexes });
+      const reply = await this.run(statement, encodeArgs(layout, options.where?.args, command), command);
+      return decodeChunkScanPage(layout, reply, { dims, after, since: options.since, limit: options.limit, withData: options.withData === true, epoch, indexes, filtered: options.where !== undefined });
     });
   }
 
@@ -1514,7 +1527,7 @@ export class ChunkClient {
 
   private async setBlockOp(
     point: GridPoint,
-    values: Readonly<Record<string, ChunkValue>>,
+    values: Readonly<Record<string, ChunkValue | ChunkExpr>>,
     options: ChunkWriteOptions,
   ): Promise<ChunkReply> {
     const table = this.tableOf(options);
@@ -1526,8 +1539,13 @@ export class ChunkClient {
     }
     return await this.withLayout(table, true, async (layout) => {
       const indexes = columnIndexes(layout, names);
-      const parameters = indexes.map((index, i) => encodeParameter(layout.schema.columns[index], values[names[i]]));
-      const assignments = names.map((name, i) => `${name} = $${i + 1}`).join(", ");
+      const parameters = encodeArgs(layout, options.args, "SET BLOCK");
+      const assignments = names.map((name, i) => {
+        const value = values[name];
+        if (value instanceof ChunkExpr) return `${name} = ${value.text}`;
+        parameters.push(encodeParameter(layout.schema.columns[indexes[i]], value));
+        return `${name} = $${parameters.length}`;
+      }).join(", ");
       return await this.run(`SET BLOCK ${at} IN ${table} ${assignments}${condition}`, parameters, "SET BLOCK");
     });
   }
@@ -1536,7 +1554,8 @@ export class ChunkClient {
     const table = this.tableOf(options);
     const statement =
       `DELETE BLOCK ${pointClause(point)} FROM ${table}` + writeClause(options, "DELETE BLOCK");
-    return await this.run(statement, [], "DELETE BLOCK");
+    if (options.args === undefined) return await this.run(statement, [], "DELETE BLOCK");
+    return await this.withLayout(table, true, async (layout) => await this.run(statement, encodeArgs(layout, options.args, "DELETE BLOCK"), "DELETE BLOCK"));
   }
 
   private async getChunkOp(point: GridPoint, options: ChunkReadOptions): Promise<ChunkState | null> {
@@ -1722,11 +1741,15 @@ export class ChunkClient {
   private async aggregateOp(
     selector: ChunkAggregateSelector,
     functions: readonly ChunkAggregateFunction[],
-    options: ChunkTableOption,
+    options: ChunkAggregateOptions,
     byChunk: boolean,
   ): Promise<ChunkAggregateResult | ChunkAggregateRow[]> {
-    const statement = `AGGREGATE ${aggregateSelector(selector)} FROM ${this.tableOf(options)} ${aggregateFunctions(functions)}${byChunk ? " BY CHUNK" : ""}`;
-    const reply = await this.run(statement, [], "AGGREGATE");
+    const table = this.tableOf(options);
+    const statement = `AGGREGATE ${aggregateSelector(selector)} FROM ${table} ${aggregateFunctions(functions)}${whereClause(options.where, "AGGREGATE")}${byChunk ? " BY CHUNK" : ""}`;
+    const args = options.where?.args;
+    const reply = args === undefined || args.length === 0
+      ? await this.run(statement, [], "AGGREGATE")
+      : await this.withLayout(table, false, async (layout) => await this.run(statement, encodeArgs(layout, args, "AGGREGATE"), "AGGREGATE"));
     return byChunk ? parseAggregateRows(reply, functions.length) : parseAggregate(reply, functions.length);
   }
 

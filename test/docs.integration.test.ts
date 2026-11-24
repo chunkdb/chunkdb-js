@@ -40,7 +40,7 @@ for (const page of pages) {
       const programs = groups.map((group, number) => {
         const snippets = group.map((block) => `${block[1]}\nprocess.stdout.write(${JSON.stringify(boundary)});`).join("\n");
         const code = (page === "README.md" || page === "docs/CONNECTIONS.md") ? snippets : `
-import { connectUri, connectPool, emptyChunk, ChunkMigrationError } from "@chunkdb/client";
+import { connectUri, connectPool, emptyChunk, expr, ChunkConditionFailedError, ChunkMigrationError } from "@chunkdb/client";
 const client = await connectUri(process.env.CHUNKDB_URI!);
 try {
   await client.migrate([{

@@ -11,8 +11,8 @@ A chunk version identifies committed state and orders writes within the same tab
 |---|---|
 | `getBlock(x, y, { table?, columns? }?)` | `ChunkRow | null` |
 | `getBlockWithMetadata(x, y, readOptions?)` | `{ version: bigint | null, schemaVersion: bigint, row }` |
-| `setBlock(x, y, values, { table?, ifVersion? }?)` | written chunk version (`bigint`) |
-| `deleteBlock(x, y, { table?, ifVersion? }?)` | written chunk version |
+| `setBlock(x, y, values, { table?, ifVersion?, condition?, args? }?)` | written chunk version (`bigint`) |
+| `deleteBlock(x, y, { table?, ifVersion?, condition?, args? }?)` | written chunk version |
 | `getChunk(cx, cy, readOptions?)` | `ChunkState` or `null` |
 | `setChunk(cx, cy, state, writeOptions?)` | written chunk version |
 | `setChunkColumns(cx, cy, columns, state, writeOptions?)` | replace selected block columns, preserve metadata |
@@ -24,8 +24,8 @@ A chunk version identifies committed state and orders writes within the same tab
 | `getAreaWithSchema(area, readOptions?)`, `getAreaRawWithSchema(area, readOptions?)` | `{ schemaVersion: bigint, entries }` |
 | `getAreaPage(area, pageOptions?)`, `getAreaRawPage(area, pageOptions?)` | `{ schemaVersion: bigint, chunks, more, after }` with exact bigint coordinates |
 | `getAreaPage3D(area, pageOptions?)`, `getAreaRawPage3D(area, pageOptions?)` | The same page with a three-axis cursor |
-| `aggregate(selector, functions, { table? }?)` | results keyed by function name; see [aggregates](AGGREGATES.md) |
-| `aggregateByChunk(selector, functions, { table? }?)` | `ChunkAggregateRow[]`: `{ cx, cy, cz?, values }` per chunk |
+| `aggregate(selector, functions, { table?, where? }?)` | results keyed by function name; see [aggregates](AGGREGATES.md) |
+| `aggregateByChunk(selector, functions, { table?, where? }?)` | `ChunkAggregateRow[]`: `{ cx, cy, cz?, values }` per chunk |
 | `scanChunks({ table?, after?, limit? }?)` | `ChunkScanPage`: `{ chunks, more }` |
 | `scanAllChunks({ table?, limit? }?)` | async generator of `{ cx, cy }` |
 | `scanChunksWithOptions(scanOptions?)` | retained versions, optional data and snapshot frontier |
@@ -58,7 +58,8 @@ A chunk version identifies committed state and orders writes within the same tab
 | `serverInfo()`, `defaultTable()`, `uri()` | synchronous connection information |
 
 `readOptions` is `{ table?, columns? }`.
-`writeOptions` is `{ table?, ifVersion?: bigint, ifAbsent?: boolean }`; the two conditions are mutually exclusive and `ifAbsent` applies only to chunk writes.
+`writeOptions` is `{ table?, ifVersion?: bigint, ifAbsent?: boolean, condition?: string, args?: ChunkArg[] }`; `ifVersion`, `ifAbsent` and `condition` exclude each other, `ifAbsent` applies only to chunk writes, and `condition` and `args` only to block writes.
+A block value may be `expr(text)`, a value the server computes from the block; see [conditional writes](VALUES.md#conditions-and-computed-values).
 `watchOptions` accepts `slot`, `area`, `area3D`, `areas`, `areas3D`, `after`, `columns`, `noBefore`, `chunks`, `ackTimeoutMs` and `takeover`.
 `slotOptions` accepts `area`, `area3D`, `columns`, `noBefore`, `chunks`, `ifNotExists` and `owner`.
 
@@ -80,7 +81,7 @@ See [values](VALUES.md#three-dimensions) for dimensional methods and scan metada
 
 [Tables](TABLES.md) lists changes and options.
 
-`ChunkTransaction` exposes block, chunk, area and aggregate operations (including raw forms), with no `ifVersion`.
+`ChunkTransaction` exposes block, chunk, area and aggregate operations (including raw forms), with no `ifVersion`; block writes take `condition`, `args` and `expr` values.
 A position identifies a committed change in a table.
 `ChunkPosition` is `{ epoch: string, revision: bigint }`.
 The [change feed](CHANGE_FEED.md) describes events.
