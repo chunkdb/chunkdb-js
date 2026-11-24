@@ -180,7 +180,7 @@ test("users statements send verifiers and map their errors", async () => {
       return true;
     });
     await assert.rejects(client.dropUser("ghost"), (error: unknown) => !(error instanceof ChunkPermissionError) && error instanceof ChunkServerError);
-    await assert.rejects(client.grant("OWNER" as "READ", "world", "bot"), /a right is READ, WRITE or ADMIN/);
+    await assert.rejects(client.grant("OWNER" as "READ", "world", "bot"), /a right is READ, WRITE, ADMIN, MONITOR, BACKUP or REPLICATION/);
     await assert.rejects(client.grant("READ", "a b", "bot"), /a table name/);
     await assert.rejects(client.createUser("Bot", "x"), /a user name must match/);
     await client.close();
