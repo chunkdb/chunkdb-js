@@ -6,6 +6,9 @@ This client uses CQL protocol 3 with chunkdb 2.x; see the server's [compatibilit
 
 ## Unreleased
 
+### Changed
+- Ordinary calls pipeline by default, with up to eight requests and 256 MiB of framed requests awaiting replies per connection. Set `pipelineDepth: 1` for sequential operation or use `pipelineBytes` to change the wire-size limit. Transactions and WATCH transitions remain sequential. ([chunkdb#151](https://github.com/chunkdb/chunkdb/issues/151))
+
 ### Added
 - `rotatePassword(newPassword)` adds a second password for the logged-in user with the salt of its current verifier and logs in with it from then on. ([chunkdb#151](https://github.com/chunkdb/chunkdb/issues/151))
 - `setBlockReturning` and `deleteBlockReturning` (and 3D forms) send RETURNING and decode `{ applied, version, rows }`; `transaction(fn, { readOnly: true })` runs BEGIN READ ONLY; `alterTable` takes `setDefault`, `dropDefault`, `setNullable`, `setRequired`, `addCheck`, `dropCheck` and `renameTable`, and `describe()` lists `checks`. ([chunkdb#151](https://github.com/chunkdb/chunkdb/issues/151))
@@ -27,6 +30,7 @@ This client uses CQL protocol 3 with chunkdb 2.x; see the server's [compatibilit
 - Generic `BACKUP TO` integration coverage checks summaries and copied data over plain TCP and TLS
 
 ### Fixed
+- A closing error reaches its matching request and fails the rest of the pipeline. Waiting calls stay off the failed connection and are never replayed. ([chunkdb#151](https://github.com/chunkdb/chunkdb/issues/151))
 - The guides follow the server: `statement_timeout_ms` is applied, `showStatus()` needs MONITOR or ADMIN on `*`, backups take `BACKUP` or `MANAGES USERS` and `restoreTable` its own rights, `SHOW MIGRATIONS` lists the records within your rights, MONITOR lists every connection and REPLICATION gates no statement, `RATE_LIMITED` also names `auth_ban`, and tables cannot be named `catalog`. ([chunkdb#151](https://github.com/chunkdb/chunkdb/issues/151))
 - A request whose connection is lost or times out after it was written fails with an unknown outcome: the `ChunkConnectionError`, `ChunkTlsError` or `ChunkTimeoutError` has `retryClass` `"unknown_outcome"` and says the outcome is unknown, since the write may have applied. Inside a transaction only `COMMIT` does; the statements before it roll back. `ChunkError` gains the optional `retryClass`. (#47)
 - Older-server detection reads the error code and keys only: `PROTOCOL` without a `reason` key, or `UNKNOWN_COMMAND`, to HELLO names an older server; a `PROTOCOL` reply of a protocol 3 server is a `ChunkServerProtocolError`, whatever its text. (#47)

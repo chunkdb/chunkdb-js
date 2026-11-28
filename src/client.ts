@@ -178,6 +178,7 @@ interface ResolvedOptions {
   channelBinding: ChunkChannelBinding;
   uri: ParsedChunkUri;
   pipelineDepth: number;
+  pipelineBytes: number;
   table: string;
   helloOptions?: Readonly<Record<string, ChunkValue>>;
 }
@@ -187,7 +188,8 @@ interface ResolvedOptions {
 // ended).
 interface SendTurn {
   previous: Promise<void>;
-  release: () => void;
+  release?: () => void;
+  connection?: { failure?: Error };
   // The transaction attempt the operation belongs to.
   tx?: TransactionAttempt;
 }
@@ -220,7 +222,7 @@ interface TransactionAttempt {
 interface OperationWaiter {
   run: () => void;
   reject: (err: Error) => void;
-  // A transaction, which waits until no operation is in flight.
+  // A barrier that waits until no operation is in flight.
   exclusive?: boolean;
 }
 
@@ -228,6 +230,9 @@ interface PendingRequest {
   // None for HELLO and AUTH: the login's own timer bounds them.
   timer?: NodeJS.Timeout;
   command: string;
+  bytes: number;
+  endsRawTransaction: boolean;
+  killsSelf: boolean;
   // Whether the request may apply when its reply is lost: false for the
   // login and for a transaction's statements before COMMIT, which the
   // server rolls back when the connection closes.
@@ -245,10 +250,15 @@ const DEFAULT_PORT = 4242;
 const DEFAULT_TIMEOUT_MS = 5000;
 const DEFAULT_TABLE = "";
 const DEFAULT_TRANSACTION_RETRIES = 5;
+const DEFAULT_PIPELINE_DEPTH = 8;
+const DEFAULT_PIPELINE_BYTES = 256 * 1024 * 1024;
 
 // The name follows the guard in `CREATE TABLE IF NOT EXISTS` and `DROP TABLE IF EXISTS`.
 const TABLE_STATEMENT =
   /^\s*(?:migrate\s+'[a-z_][a-z0-9_]{0,62}'\s+)?(?:create\s+table\s+(?:if\s+not\s+exists\s+)?|alter\s+table\s+|drop\s+table\s+(?:if\s+exists\s+)?)([a-z_][a-z0-9_]*)/i;
+const RAW_SCHEMA_STATEMENT = /^[ \t]*(?:(?:CREATE|ALTER|DROP|RECOVER|RESTORE)[ \t]+TABLE|SWAP[ \t]+TABLES|MIGRATE)\b/i;
+const RAW_SESSION_STATEMENT = /^[ \t]*(?:BEGIN|COMMIT|ROLLBACK|WATCH|UNWATCH|ACK|HELLO|AUTH|KILL)\b/i;
+const RAW_TRANSACTION_END = /^[ \t]*(?:COMMIT|ROLLBACK)[ \t]*$/i;
 const RIGHTS: readonly ChunkRight[] = ["READ", "WRITE", "ADMIN", "MONITOR", "BACKUP", "REPLICATION"];
 const SERVER_RIGHTS: readonly ChunkRight[] = ["MONITOR", "BACKUP", "REPLICATION"];
 const CHANNEL_BINDINGS: readonly ChunkChannelBinding[] = ["auto", "off", "require"];
@@ -267,9 +277,26 @@ const TABLE_OPTION_NAMES: Record<keyof ChunkTableOptions, string> = {
   slotMaxBytes: "slot_max_bytes",
 };
 
-// Framing failures close the connection; semantic failures have drained their frames.
-function closesConnection(reply: ErrorReply, _withParameters: boolean): boolean {
-  return reply.code === "BAD_REQUEST" || reply.code === "PROTOCOL";
+// These replies can precede EOF with unread requests still in the pipeline.
+function closesConnection(reply: ErrorReply): boolean {
+  switch (reply.code) {
+    case "BAD_REQUEST":
+    case "PROTOCOL":
+    case "KILLED":
+      return true;
+    case "AUTH_REQUIRED":
+      return parseErrorFields(reply.message).keys.reason === "user_dropped";
+    case "BUSY": {
+      const { keys, message } = parseErrorFields(reply.message);
+      return keys.reason === "input_budget" || message === "aggregate request line byte bound reached";
+    }
+    case "INVALID_ARGUMENT":
+      return /^the parameters of one statement take at most [0-9]+ bytes together$/.test(parseErrorFields(reply.message).message);
+    case "CANCELLED":
+      return parseErrorFields(reply.message).message === "connection killed before the statement commit decision";
+    default:
+      return false;
+  }
 }
 
 /** The table a `CREATE` / `ALTER` / `DROP TABLE` statement names, or null. */
@@ -289,7 +316,7 @@ export function trimSpacesAndTabs(text: string): string {
 // The verb of a statement, for errors: "SET BLOCK", "PING", ...
 function commandOf(statement: string): string {
   const words = statement.trim().split(/\s+/, 2).map((word) => word.toUpperCase());
-  return ["GET", "SET", "DELETE", "CREATE", "ALTER", "DROP", "SHOW", "SCAN", "FLUSH"].includes(words[0])
+  return ["GET", "SET", "DELETE", "CREATE", "ALTER", "DROP", "SHOW", "SCAN", "FLUSH", "KILL"].includes(words[0])
     ? words.join(" ")
     : words[0];
 }
@@ -342,6 +369,10 @@ function resolveOptions(options: ChunkClientOptions = {}): ResolvedOptions {
     }
     helloOptions[name] = value;
   }
+  const pipelineDepth = options.pipelineDepth ?? DEFAULT_PIPELINE_DEPTH;
+  const pipelineBytes = options.pipelineBytes ?? DEFAULT_PIPELINE_BYTES;
+  if (!Number.isSafeInteger(pipelineDepth) || pipelineDepth < 1) throw new TypeError("pipelineDepth must be a positive safe integer");
+  if (!Number.isSafeInteger(pipelineBytes) || pipelineBytes < 1) throw new TypeError("pipelineBytes must be a positive safe integer");
   return {
     host,
     port,
@@ -357,7 +388,8 @@ function resolveOptions(options: ChunkClientOptions = {}): ResolvedOptions {
     cert: options.cert,
     key: options.key,
     channelBinding,
-    pipelineDepth: Math.max(1, options.pipelineDepth ?? 1),
+    pipelineDepth,
+    pipelineBytes,
     table: named ?? DEFAULT_TABLE,
     helloOptions,
     uri: {
@@ -524,6 +556,9 @@ function outcomeUnknown(error: ChunkError, command: string): ChunkError {
   if (error instanceof ChunkTimeoutError) {
     return new ChunkTimeoutError(message, options);
   }
+  if (error instanceof ChunkProtocolError) {
+    return new ChunkProtocolError(message, options);
+  }
   return error instanceof ChunkTlsError ? new ChunkTlsError(message, options) : new ChunkConnectionError(message, options);
 }
 
@@ -635,7 +670,12 @@ export class ChunkClient {
   // The salt and iterations of the verifier the last login matched.
   private loginVerifier: { salt: Buffer; iterations: number } | null = null;
   private socket: TransportSocket | null = null;
-  private pendingQueue: PendingRequest[] = [];
+  private readonly pendingQueue: PendingRequest[] = [];
+  private pendingBytes = 0;
+  private capacityWait: { ready: Promise<void>; wake: () => void } | null = null;
+  // An operation that started on a failed connection must not send on its replacement.
+  private connection: { failure?: Error } = {};
+  private rawTransaction: "open" | "lost" | null = null;
   private connectPromise: Promise<this> | null = null;
   private connectAbort: (() => void) | null = null;
   private readonly reader = new ReplyReader();
@@ -652,9 +692,10 @@ export class ChunkClient {
   // DESCRIBE statements in flight, which concurrent operations share.
   private readonly schemaFetches = new Map<string, Promise<TableLayout>>();
 
-  // Pipeline concurrency tracking
+  // Bounds the operations preparing or waiting for a request, in addition to
+  // the wire-byte bound for requests already sent.
   private activeOps = 0;
-  private readonly maxPipeline: number;
+  private exclusiveOperation = false;
   // Statements reach the wire in the order their operations started,
   // whatever each awaits first (such as a DESCRIBE for its schema).
   private readonly sendTurns = new AsyncLocalStorage<SendTurn>();
@@ -668,7 +709,6 @@ export class ChunkClient {
 
   constructor(options: ChunkClientOptions = {}) {
     this.options = resolveOptions(options);
-    this.maxPipeline = this.options.pipelineDepth;
   }
 
   uri(): string {
@@ -702,7 +742,13 @@ export class ChunkClient {
     if (this.connectPromise !== null) {
       return this.connectPromise;
     }
-    this.connectPromise = this.connectInternal().finally(() => {
+    const connection = this.connection;
+    this.connectPromise = this.connectInternal().catch((error: unknown) => {
+      if (this.connection === connection) {
+        this.clearConnectionState(error instanceof Error ? error : new Error(String(error)));
+      }
+      throw error;
+    }).finally(() => {
       this.connectPromise = null;
     });
     return this.connectPromise;
@@ -746,16 +792,22 @@ export class ChunkClient {
    * drops a table clears that table's cached schema.
    */
   execute(statement: string, parameters: readonly ChunkParameter[] = []): Promise<ChunkReply> {
+    const changesSchema = RAW_SCHEMA_STATEMENT.test(statement);
     return this.enqueue(async () => {
-      const table = tableOfStatement(statement);
       try {
         return await this.run(statement, parameters, commandOf(statement));
       } finally {
-        if (table !== null) {
-          this.forget(table.toLowerCase());
+        if (changesSchema) {
+          const table = tableOfStatement(statement);
+          // Raw RENAME TO also changes the destination name.
+          if (table === null || /^[ \t]*ALTER[ \t]+TABLE[ \t]+\w+[ \t]+RENAME[ \t]+TO\b/i.test(statement)) {
+            this.clearSchemaCache();
+          } else {
+            this.forget(table.toLowerCase());
+          }
         }
       }
-    });
+    }, changesSchema || RAW_SESSION_STATEMENT.test(statement));
   }
 
   /**
@@ -841,7 +893,7 @@ export class ChunkClient {
           } else finish();
         });
       });
-    });
+    }, true);
   }
 
   /** @internal */
@@ -951,7 +1003,7 @@ export class ChunkClient {
           options.map(([key, value]) => optionAssignment(key as keyof ChunkTableOptions, value as string | number)).join(", ");
       }
       await this.tableStatement(name, statement, "CREATE TABLE");
-    });
+    }, true);
   }
 
   /** `ALTER TABLE`: one column change or option. */
@@ -1018,7 +1070,7 @@ export class ChunkClient {
           throw requestError("unknown table change", "ALTER TABLE");
       }
       await this.tableStatement(name, `ALTER TABLE ${name} ${clause}`, "ALTER TABLE");
-    });
+    }, true);
   }
 
   /** `DROP TABLE`: deletes the table and its data. Irreversible. */
@@ -1026,7 +1078,7 @@ export class ChunkClient {
     return this.enqueue(async () => {
       checkName(name, "a table name");
       await this.tableStatement(name, `DROP TABLE ${name}`, "DROP TABLE");
-    });
+    }, true);
   }
 
   /** `RECOVER TABLE`: serves a fenced table again once its state is checked. */
@@ -1034,7 +1086,7 @@ export class ChunkClient {
     return this.enqueue(async () => {
       checkName(name, "a table name");
       await this.tableStatement(name, `RECOVER TABLE ${name}`, "RECOVER TABLE");
-    });
+    }, true);
   }
 
   /** `SWAP TABLES`: each name serves the other table from then on. */
@@ -1047,7 +1099,7 @@ export class ChunkClient {
       } finally {
         this.forget(second);
       }
-    });
+    }, true);
   }
 
   /** `SHOW TABLE STATS`: the table's epoch, completed revision, retained tombstones and deletion floor. */
@@ -1292,9 +1344,6 @@ export class ChunkClient {
     }
     let conflicts = 0;
     while (true) {
-      // Connecting rejects the operations waiting for the connection, so
-      // the attempt connects before it waits for it.
-      await this.connect();
       const tx: TransactionAttempt = {
         owner: this,
         readOnly: options.readOnly === true,
@@ -1307,6 +1356,7 @@ export class ChunkClient {
       await this.hold(tx);
       let error: unknown;
       try {
+        if (this.rawTransaction !== null) throw requestError("finish the raw transaction before starting another", "BEGIN");
         return await this.runAttempt(tx, fn);
       } catch (caught) {
         error = caught;
@@ -1432,7 +1482,7 @@ export class ChunkClient {
 
   /** A self-kill is acknowledged before the server closes the connection. */
   killConnection(id: bigint): Promise<boolean> {
-    return this.enqueue(async () => controlAcknowledgment(await this.run(`KILL CONNECTION ${connectionId(id)}`, [], "KILL CONNECTION"), "killed", "KILL CONNECTION"));
+    return this.enqueue(async () => controlAcknowledgment(await this.run(`KILL CONNECTION ${connectionId(id)}`, [], "KILL CONNECTION"), "killed", "KILL CONNECTION"), true);
   }
 
   /** Resolves once every write acknowledged before it is durable (`FLUSH WAL`). */
@@ -1453,10 +1503,12 @@ export class ChunkClient {
       const command = "RESTORE TABLE";
       const as = options.as === undefined ? "" : ` AS ${checkName(options.as, "a table name")}`;
       const statement = `${command} ${checkName(table, "a table name")} FROM ${backupPath(backup, command)}${as}`;
-      const result = parseRestore(await this.run(statement, [], command));
-      this.forget(result.table);
-      return result;
-    });
+      try {
+        return parseRestore(await this.run(statement, [], command));
+      } finally {
+        this.forget(options.as ?? table);
+      }
+    }, true);
   }
 
   /** `RELOAD TLS`: new connections use the certificate and key read again from the server's files. */
@@ -1820,9 +1872,7 @@ export class ChunkClient {
   }
 
   private async areaPageOp(request: AreaPageRequest, raw: boolean): Promise<ChunkAreaPage | ChunkAreaRawPage | ChunkAreaPage3D | ChunkAreaRawPage3D> {
-    const tx = this.sendTurns.getStore()?.tx;
-    if (tx?.socket != null && tx.socket !== this.socket) throw transactionLost("GET AREA");
-    await this.ensureConnected();
+    await this.ensureConnected("GET AREA");
     if (!this.info?.features?.includes("area_paging")) throw requestError("the server does not support area_paging", "GET AREA");
     const { scale, reduction } = request.options as ChunkAreaScaleOptions;
     const scaled = scale === undefined && reduction === undefined ? undefined : checkScale(scale, reduction);
@@ -1955,10 +2005,11 @@ export class ChunkClient {
   // BEGIN, the callback of one attempt, then COMMIT; ROLLBACK when it
   // throws or a statement met CONFLICT.
   private async runAttempt(tx: TransactionAttempt, fn: (tx: ChunkTransaction) => unknown): Promise<bigint | null> {
-    expectOk(await this.transactionStatement(tx, tx.readOnly ? "BEGIN READ ONLY" : "BEGIN", "BEGIN"), "BEGIN");
+    const begin = await this.transactionStatement(tx, tx.readOnly ? "BEGIN READ ONLY" : "BEGIN", "BEGIN");
     tx.began = true;
     const handle = this.transactionHandle(tx);
     try {
+      expectOk(begin, "BEGIN");
       await this.callbackScope.run(tx, () => fn(handle));
     } catch (error) {
       await this.closeAttempt(tx);
@@ -1972,14 +2023,17 @@ export class ChunkClient {
       await this.rollback(tx);
       throw tx.failure;
     }
-    tx.began = false;
-    let reply: ChunkReply;
     try {
-      reply = await this.transactionStatement(tx, "COMMIT");
+      const reply = await this.transactionStatement(tx, "COMMIT");
+      const version = reply.type === "null" ? null : versionOf(reply, "COMMIT");
+      tx.began = false;
+      return version;
     } catch (error) {
+      // COMMIT may be refused before execution, leaving the transaction open.
+      // Do not release the connection to the pipeline until it is out of that state.
+      if (!(error instanceof ChunkConflictError || error instanceof ChunkOutcomeUnknownError)) await this.rollback(tx);
       throw commitError(error);
     }
-    return reply.type === "null" ? null : versionOf(reply, "COMMIT");
   }
 
   // Refuses further calls on the attempt's handle and waits for the
@@ -2014,7 +2068,7 @@ export class ChunkClient {
   // BEGIN, COMMIT or ROLLBACK, sent while none of the attempt's statements
   // is in flight.
   private transactionStatement(tx: TransactionAttempt, statement: string, command = statement): Promise<ChunkReply> {
-    const turn: SendTurn = { previous: Promise.resolve(), release: () => {}, tx };
+    const turn: SendTurn = { previous: Promise.resolve(), tx };
     return this.sendTurns.run(turn, () => this.run(statement, [], command));
   }
 
@@ -2082,7 +2136,7 @@ export class ChunkClient {
       if (tx.failure !== null) {
         throw tx.failure;
       }
-      const turn: SendTurn = { previous: Promise.resolve(), release: () => {}, tx };
+      const turn: SendTurn = { previous: Promise.resolve(), tx };
       return this.sendTurns.run(turn, async () => {
         try {
           return await operation();
@@ -2109,6 +2163,7 @@ export class ChunkClient {
   // Waits until no operation is in flight, then holds the connection for
   // the attempt (see TransactionAttempt).
   private hold(tx: TransactionAttempt): Promise<void> {
+    if (this.disposed) return Promise.reject(new ChunkConnectionError("client is closed", { phase: "connect" }));
     return new Promise<void>((resolve, reject) => {
       const run = () => {
         this.holder = tx;
@@ -2161,6 +2216,9 @@ export class ChunkClient {
   }
 
   private async refreshLayout(table: string): Promise<TableLayout> {
+    const turn = this.sendTurns.getStore();
+    await turn?.previous;
+    if (turn?.connection?.failure !== undefined) throw turn.connection.failure;
     const fetch = this.run(`DESCRIBE ${table}`, [], "DESCRIBE", false).then(parseDescribe);
     this.schemaFetches.set(table, fetch);
     // A table statement sent meanwhile drops the fetch: its reply is not cached.
@@ -2185,6 +2243,11 @@ export class ChunkClient {
 
   // The cached schema, the one being fetched, or a new DESCRIBE.
   private async layoutOf(table: string): Promise<TableLayout> {
+    const cached = this.schemas.get(table);
+    if (cached !== undefined) return cached;
+    // A schema fetch owned by a later operation is still waiting for our
+    // send turn. Publish and share only fetches that have reached their turn.
+    await this.sendTurns.getStore()?.previous;
     return this.schemas.get(table) ?? (await (this.schemaFetches.get(table) ?? this.refreshLayout(table)));
   }
 
@@ -2234,24 +2297,28 @@ export class ChunkClient {
     }
   }
 
-  private enqueue<T>(operation: () => Promise<T>): Promise<T> {
+  private enqueue<T>(operation: () => Promise<T>, exclusive = false): Promise<T> {
     if (this.inCallback()) {
       return Promise.reject(
         requestError("this client is running a transaction: inside its callback use tx, or another client"),
       );
     }
+    if (this.disposed) return Promise.reject(new ChunkConnectionError("client is closed", { phase: "connect" }));
     return new Promise<T>((resolve, reject) => {
       const run = () => {
         this.activeOps += 1;
+        this.exclusiveOperation = exclusive;
         let release!: () => void;
         const done = new Promise<void>((resolveTurn) => {
           release = resolveTurn;
         });
-        const turn: SendTurn = { previous: this.lastSendTurn, release };
+        const turn: SendTurn = { previous: this.lastSendTurn, connection: this.connection, release };
         this.lastSendTurn = done;
         const finish = () => {
-          release();
+          // A local validation failure may finish before the preceding turn.
+          if (turn.release !== undefined) void turn.previous.then(release);
           this.activeOps -= 1;
+          if (exclusive) this.exclusiveOperation = false;
           this.releaseEnqueueSlot();
         };
         this.sendTurns.run(turn, operation).then(
@@ -2265,19 +2332,24 @@ export class ChunkClient {
           },
         );
       };
-      if (this.opWaiters.length === 0 && this.holder === null && this.activeOps < this.maxPipeline) {
+      if (this.opWaiters.length === 0 && this.holder === null && !this.exclusiveOperation &&
+          this.activeOps < this.operationLimit(exclusive)) {
         run();
       } else {
-        this.opWaiters.push({ run, reject });
+        this.opWaiters.push({ run, reject, exclusive });
       }
     });
+  }
+
+  private operationLimit(exclusive?: boolean): number {
+    return exclusive || this.rawTransaction !== null ? 1 : this.options.pipelineDepth;
   }
 
   // Starts waiting operations in order while there is room: a transaction
   // once no operation is in flight, then nothing until it ends.
   private releaseEnqueueSlot(): void {
-    while (this.opWaiters.length > 0 && this.holder === null) {
-      if (this.activeOps >= (this.opWaiters[0].exclusive === true ? 1 : this.maxPipeline)) {
+    while (this.opWaiters.length > 0 && this.holder === null && !this.exclusiveOperation) {
+      if (this.activeOps >= this.operationLimit(this.opWaiters[0].exclusive)) {
         return;
       }
       this.opWaiters.shift()!.run();
@@ -2309,17 +2381,21 @@ export class ChunkClient {
     socket.on("error", (error) => {
       if (this.socket === socket) {
         this.clearConnectionState(this.wrapTransportError(error, this.options.secure ? "tls" : "connect"));
+        socket.destroy();
       }
     });
 
-    socket.on("close", () => {
+    const onClose = () => {
       if (this.socket === socket) {
         // After a completed login the scheme matched; KILL CONNECTION, the
         // idle timeout or a shutdown closes the connection instead.
         const hint = this.info === null ? " and that chunk:// uses plaintext and chunks:// uses TLS" : "";
         this.clearConnectionState(new ChunkConnectionError(`connection closed; check the server log${hint}`, { phase: "connect" }));
+        socket.destroy();
       }
-    });
+    };
+    socket.on("end", onClose);
+    socket.on("close", onClose);
 
     // A failed handshake (failed login, older server, timeout) must not
     // leave the socket open behind a client the caller never received.
@@ -2327,14 +2403,12 @@ export class ChunkClient {
     try {
       info = await this.login(socket, this.options.connectTimeoutMs - (performance.now() - started));
     } catch (error) {
-      if (this.socket === socket) {
-        this.clearConnectionState();
-      }
       // A login that timed out or was closed may still wait for a reply.
       this.failAllPending(error instanceof Error ? error : new Error(String(error)));
       socket.destroy();
       throw error;
     }
+    if (this.socket !== socket) throw new ChunkConnectionError("connection closed during login", { phase: "connect" });
     this.info = info;
     this.connected = true;
     return this;
@@ -2549,23 +2623,24 @@ export class ChunkClient {
       }
       throw error;
     }
+    if (wire.length > this.options.pipelineBytes) {
+      throw requestError(`the framed request takes ${wire.length} bytes, pipelineBytes allows ${this.options.pipelineBytes}`, command);
+    }
     const turn = this.sendTurns.getStore();
     if (turn !== undefined) {
       await turn.previous;
     }
-    // After BEGIN a transaction's statements go to its connection only: on
-    // a new one they would run outside the transaction.
     const tx = turn?.tx;
-    if (tx?.socket != null) {
-      if (this.socket !== tx.socket) {
-        throw transactionLost(command);
-      }
-    } else {
-      await this.ensureConnected();
+    const endsRawTransaction = tx === undefined && this.rawTransaction !== null &&
+      (command === "COMMIT" || command === "ROLLBACK") && RAW_TRANSACTION_END.test(statement);
+    const socket = await this.ensureConnected(command, endsRawTransaction);
+    if (this.socket !== socket) {
+      throw turn?.connection?.failure ?? (tx === undefined
+        ? new ChunkConnectionError("connection closed before the request was written", { phase: "request", command })
+        : transactionLost(command));
     }
-    const socket = this.socket;
-    if (socket === null) {
-      throw new ChunkConnectionError("connection is not available", { phase: "connect", command });
+    if (this.watchStarted && command !== "UNWATCH") {
+      throw requestError("a WATCH connection only accepts UNWATCH and slot acknowledgments through ChunkWatch.ack()", command);
     }
     if (tx !== undefined && command === "BEGIN") {
       tx.socket = socket;
@@ -2581,38 +2656,50 @@ export class ChunkClient {
       }
     }
 
+    while (wire.length > this.options.pipelineBytes - this.pendingBytes) {
+      if (this.capacityWait === null) {
+        let wake!: () => void;
+        const ready = new Promise<void>((resolve) => { wake = resolve; });
+        this.capacityWait = { ready, wake };
+      }
+      await this.capacityWait.ready;
+      if (this.socket !== socket) {
+        throw turn?.connection?.failure ?? new ChunkConnectionError("connection closed before the request was written", { phase: "request", command });
+      }
+    }
+
     let replyLimits: ReplyLimits | undefined;
     if (/^\s*GET\s+AREA\b/i.test(statement)) {
       if (areaShape === undefined) { const raw = rawAreaReplyOptions(statement); areaShape = raw.shape; areaLimit = raw.limit; }
       replyLimits = this.areaReplyLimits(areaShape, areaLimit);
     }
-    const expiresAt = performance.now() + this.options.commandTimeoutMs;
-    onConnection?.(socket, expiresAt);
+    onConnection?.(socket, performance.now() + this.options.commandTimeoutMs);
     // Before COMMIT a transaction's statements roll back with the connection.
-    const mayApply = tx === undefined || command === "COMMIT";
-    const replyPromise = this.writeRequest(socket, wire, command, mayApply, this.options.commandTimeoutMs, replyLimits);
-    if (turn !== undefined && main) {
+    const mayApply = command === "COMMIT" || (tx === undefined && this.rawTransaction === null && command !== "BEGIN");
+    const killTarget = command === "KILL CONNECTION"
+      ? /^[ \t]*KILL[ \t]+CONNECTION[ \t]+\+?([0-9]+)[ \t]*$/i.exec(statement)?.[1] : undefined;
+    const killsSelf = killTarget !== undefined && BigInt(killTarget) === this.info?.connectionId;
+    const replyPromise = this.writeRequest(socket, wire, command, mayApply, this.options.commandTimeoutMs,
+      replyLimits, endsRawTransaction, killsSelf);
+    if (main && turn?.release !== undefined) {
       turn.release();
+      turn.release = undefined;
     }
-    const reply = await replyPromise;
-    if (reply.type === "error" && closesConnection(reply, parameters.length > 0) && this.socket === socket) {
-      // The server closes the connection after this reply; nothing more is
-      // sent on it, and statements written after it get no reply.
-      this.clearConnectionState(
-        new ChunkConnectionError(`the server closed the connection after ${reply.code} ${reply.message}`, {
-          phase: "response",
-          command,
-        }),
-      );
-      socket.destroy();
+    if (!endsRawTransaction) return replyPromise;
+    try {
+      return await replyPromise;
+    } finally {
+      // The caller has already attempted to end the transaction. A lost
+      // connection ends its session even when the COMMIT outcome is unknown.
+      if (this.rawTransaction === "lost") this.rawTransaction = null;
     }
-    return reply;
   }
 
   // Writes one framed statement on `socket` and waits for its reply, for at
   // most `timeoutMs` when given. A request that `mayApply` fails with an
   // unknown outcome when its connection is lost before the reply.
-  private writeRequest(socket: TransportSocket, wire: Buffer, command: string, mayApply: boolean, timeoutMs?: number, replyLimits?: ReplyLimits): Promise<ChunkReply> {
+  private writeRequest(socket: TransportSocket, wire: Buffer, command: string, mayApply: boolean, timeoutMs?: number,
+    replyLimits?: ReplyLimits, endsRawTransaction = false, killsSelf = false): Promise<ChunkReply> {
     const replyPromise = new Promise<ChunkReply>((resolve, reject) => {
       const timer: NodeJS.Timeout | undefined = timeoutMs === undefined ? undefined : setTimeout(() => {
         const index = this.pendingQueue.findIndex((pending) => pending.timer === timer);
@@ -2632,12 +2719,14 @@ export class ChunkClient {
         });
         reject(mayApply ? outcomeUnknown(error, command) : error);
       }, timeoutMs);
-      this.pendingQueue.push({ timer, resolve, reject, replyLimits, command, mayApply });
+      this.pendingQueue.push({ timer, resolve, reject, replyLimits, command, mayApply, bytes: wire.length, endsRawTransaction, killsSelf });
+      this.pendingBytes += wire.length;
     });
 
     socket.write(wire, (error) => {
-      if (error) {
-        this.failAllPending(this.wrapTransportError(error, "request", command));
+      if (error && this.socket === socket) {
+        this.clearConnectionState(this.wrapTransportError(error, "request", command));
+        socket.destroy();
       }
     });
     return replyPromise;
@@ -2685,8 +2774,30 @@ export class ChunkClient {
         return;
       }
       const pending = this.pendingQueue.shift()!;
-      if (this.watchReceiver !== null) this.watchStarted = true;
+      this.pendingBytes -= pending.bytes;
       clearTimeout(pending.timer);
+      const ok = reply.type === "simple" && reply.value === "OK";
+      if (pending.command === "WATCH" && reply.type !== "error") this.watchStarted = true;
+      if (pending.command === "UNWATCH" && ok) this.watchStarted = false;
+      if (pending.command === "BEGIN" && ok && this.holder === null) this.rawTransaction = "open";
+      const rawEndFailed = pending.endsRawTransaction && reply.type === "error" &&
+        !(pending.command === "COMMIT" && (reply.code === "CONFLICT" || reply.code === "OUTCOME_UNKNOWN"));
+      if (pending.endsRawTransaction) this.rawTransaction = null;
+      const killedSelf = pending.killsSelf && reply.type === "map" && reply.entries.some(([key, value]) =>
+        (key.type === "bulk" ? key.value.toString("utf8") : key.type === "simple" ? key.value : null) === "killed" &&
+        value.type === "boolean" && value.value);
+      if ((reply.type === "error" && this.connected && closesConnection(reply)) || killedSelf || rawEndFailed) {
+        const socket = this.socket;
+        const detail = reply.type === "error" ? `${reply.code} ${reply.message}` : pending.command;
+        // Retire the stream before waking anyone waiting for send capacity.
+        this.clearConnectionState(new ChunkConnectionError(`connection closed after ${detail}`, {
+          phase: "response", command: pending.command,
+        }));
+        socket?.destroy();
+        pending.resolve(reply);
+        return;
+      }
+      this.notifyCapacity();
       pending.resolve(reply);
     }
   }
@@ -2752,12 +2863,32 @@ export class ChunkClient {
     });
   }
 
-  private async ensureConnected(): Promise<void> {
+  private async ensureConnected(command: string, endsRawTransaction = false): Promise<TransportSocket> {
+    const turn = this.sendTurns.getStore();
+    if (turn?.tx?.socket != null) {
+      if (this.socket !== turn.tx.socket) throw transactionLost(command);
+      return turn.tx.socket;
+    }
+    if (turn?.connection?.failure !== undefined) throw turn.connection.failure;
+    if (this.rawTransaction === "lost") {
+      if (endsRawTransaction) this.rawTransaction = null;
+      throw transactionLost(command);
+    }
     // Connecting (HELLO) is not one of the operations being ordered, and an
     // earlier operation may be waiting for it.
-    await this.sendTurns.exit(() => this.connect());
+    if (!this.connected) await this.sendTurns.exit(() => this.connect());
+    if (turn?.connection?.failure !== undefined) throw turn.connection.failure;
     if (this.socket === null) {
-      throw new ChunkConnectionError("connection is not available", { phase: "connect" });
+      throw new ChunkConnectionError("connection is not available", { phase: "connect", command });
+    }
+    return this.socket;
+  }
+
+  private notifyCapacity(): void {
+    const waiter = this.capacityWait;
+    if (waiter !== null) {
+      this.capacityWait = null;
+      waiter.wake();
     }
   }
 
@@ -2765,10 +2896,13 @@ export class ChunkClient {
   // connection leaves the outcome of each one that may apply unknown.
   private failAllPending(error: Error): void {
     const queue = this.pendingQueue.splice(0);
+    this.pendingBytes = 0;
     for (const pending of queue) {
       clearTimeout(pending.timer);
-      pending.reject(pending.mayApply && isTransportError(error) ? outcomeUnknown(error, pending.command) : error);
+      const unknown = pending.mayApply && (isTransportError(error) || error instanceof ChunkProtocolError);
+      pending.reject(unknown ? outcomeUnknown(error, pending.command) : error);
     }
+    this.notifyCapacity();
   }
 
   // Resets the connection. Operations still waiting to start are rejected
@@ -2785,6 +2919,12 @@ export class ChunkClient {
     this.connected = false;
     this.socket = null;
     const connErr = error ?? new ChunkConnectionError("connection closed", { phase: "connect" });
+    if (error !== undefined) {
+      this.connection.failure = error;
+      this.connection = {};
+      this.schemaFetches.clear();
+      if (this.rawTransaction === "open") this.rawTransaction = "lost";
+    }
     // Reject enqueue waiters that haven't started yet
     if (!keepWaiters) {
       const waiters = this.opWaiters.splice(0);

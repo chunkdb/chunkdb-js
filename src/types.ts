@@ -49,8 +49,10 @@ export interface ChunkClientOptions {
    * `"require"` binds like `"auto"` and refuses a connection without TLS.
    */
   channelBinding?: ChunkChannelBinding;
-  /** Max concurrent in-flight requests per connection. Default 1 (sequential). */
+  /** Max concurrent requests per connection. Default 8. Set to 1 to send one request at a time. */
   pipelineDepth?: number;
+  /** Max total bytes of framed requests awaiting replies per connection. Default 256 MiB. */
+  pipelineBytes?: number;
   /**
    * The table of calls that do not name one. Defaults to the URI path
    * (`chunk://host:4242/terrain`), with no fallback. Selecting a name

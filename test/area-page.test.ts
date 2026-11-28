@@ -350,6 +350,26 @@ test("a legitimate area schema refresh preserves its connection", async () => {
   } finally { await client.close(); await server.close(); }
 });
 
+test("a cold area page gets its layout before a later pipelined block read", { timeout: 5000 }, async () => {
+  const server = await startFakeServer(({ line }) => {
+    if (line === "HELLO 3") return hello();
+    if (line.startsWith("DESCRIBE")) return description();
+    if (line.startsWith("GET AREA")) return array(integer(1), page([], false, null));
+    return array(integer(9));
+  });
+  const client = await connect({ port: server.port, table: "t" });
+  try {
+    const [area, block] = await Promise.all([
+      client.getAreaRawPage({ cx0: 0, cy0: 0, cx1: 0, cy1: 0 }),
+      client.getBlock(0, 0),
+    ]);
+    assert.deepEqual(area.chunks, []);
+    assert.deepEqual(block, { n: 9 });
+    assert.deepEqual(server.requests.map(({ line }) => line.split(" ", 2).join(" ")),
+      ["HELLO 3", "DESCRIBE t", "GET AREA", "GET BLOCK"]);
+  } finally { await client.close(); await server.close(); }
+});
+
 test("pooled area pages copy selector, cursor and projection before waiting for a lease", async () => {
   const describe = description(), layout = parseDescribe(parsed(describe));
   const form = encodeSectionedChunk(layout, { present: [true], columns: { n: [9] } });
