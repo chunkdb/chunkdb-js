@@ -10,8 +10,6 @@ A URI host can be an IPv6 address in brackets, such as `chunk://[::1]:4242/`.
 A table operation needs a URI path, connection `table` option or method `table` option.
 Without one it fails locally; the client does not select an implicit table.
 `serverInfo()` is null until login completes.
-A client has one connection, with replies in request order.
-`pipelineDepth` defaults to 1 and limits requests in flight.
 
 `helloOptions` sends HELLO WITH options such as `{ client_name: "renderer", statement_timeout_ms: 500 }`.
 `serverInfo()` exposes `connectionId`, `features`, applied `options`, `notApplied`, `idleTimeoutMs` and `limits` when the server provides them.
@@ -19,6 +17,23 @@ A client has one connection, with replies in request order.
 `client_name` and `statement_timeout_ms` are applied; `default_tag` returns `implementation_pending` rather than changing runtime behavior.
 Inspect `notApplied` before relying on an option, including an unknown option's `unknown_option` reason.
 `commandTimeoutMs` remains the client's independent reply timeout.
+
+## Pipelining
+
+One client sends concurrent calls on the same connection without a round trip between ordinary requests. Replies match requests in wire order.
+`pipelineDepth` defaults to 8. Set it to 1 to send one request at a time.
+`pipelineBytes` defaults to 256 MiB and caps the combined wire size of ordinary requests awaiting replies, including statement lines and parameter frames.
+Both options take positive safe integers. A request above the byte limit fails locally. A request waiting for space stays in order, and its reply timeout starts when it is written.
+Use `await` between calls when a later call depends on the success or result of an earlier one. A statement error that leaves the connection open affects only that request.
+
+Schema-changing statements drain earlier calls before running and release later calls after invalidating the schema cache.
+`transaction()` reserves the connection for its callback and sends its statements one at a time.
+Raw `BEGIN`, `COMMIT` and `ROLLBACK` also run alone. While a raw transaction is open, its statements wait for each preceding reply.
+If a raw transaction loses its connection before it sends `COMMIT` or `ROLLBACK`, call one of those commands to report the loss and release the client for new operations.
+If a raw transaction-ending statement returns an error that leaves the session state uncertain, the client closes the connection.
+
+`watch()` uses a dedicated connection. WATCH waits for earlier replies. Ordinary statements can resume after UNWATCH succeeds.
+Use `watch()` to consume pushes and `ChunkWatch.ack()` to acknowledge slot changes. A raw WATCH returns the start reply and keeps the connection in watch mode until UNWATCH.
 
 ## Use a pool
 
@@ -53,6 +68,7 @@ try {
 ```
 
 `pool.withClient(fn)` lends one connection for several operations.
+`pipelineDepth` and `pipelineBytes` apply to each leased connection.
 `pool.transaction(fn)` keeps one connection throughout the callback.
 Closing a client or pool is final; create a new instance afterward.
 
@@ -67,6 +83,8 @@ The client does not replay operations after connection loss.
 A request whose connection is lost or times out after it was written fails with `ChunkConnectionError`, `ChunkTlsError` or `ChunkTimeoutError` whose `retryClass` is `"unknown_outcome"`: it may have applied, so check before you repeat it.
 Inside a transaction only `COMMIT` fails that way; the server rolls back the statements before it when the connection closes.
 A request that was not written yet fails without a `retryClass`.
+An error reply that closes the connection is delivered to its matching request. The client fails the rest of that pipeline and discards requests still waiting to be written. A later call can open a new connection.
+A malformed wire reply closes the connection. Sent requests whose outcome is uncertain can also report `retryClass` `"unknown_outcome"` on a `ChunkProtocolError`.
 
 Set `helloOptions.statement_timeout_ms` to an integer from 0 through 86400000 to bound server statement execution.
 Omission inherits the server default; explicit zero disables that deadline.

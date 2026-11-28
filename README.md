@@ -51,6 +51,10 @@ null
 Run it again: the named migration skips the existing table.
 The URI path selects the default table; a method's `table` option overrides it.
 
+Concurrent calls on one client pipeline by default. The client sends up to eight requests before their replies arrive and matches replies in order.
+Set `pipelineDepth: 1` in the connection options to send one request at a time. `pipelineBytes` bounds the framed request bytes awaiting replies and defaults to 256 MiB.
+Transactions run one statement at a time and `watch()` uses a dedicated connection. See [connection options and failure handling](docs/CONNECTIONS.md#pipelining).
+
 ## World in five minutes
 
 This program fills a 4 x 4 area, reads it back and watches one change; save it as `world.mts` and run `npx tsx world.mts`:

@@ -126,6 +126,8 @@ function toClientOptions(options: ChunkPoolOptions): ChunkClientOptions {
     cert: options.cert,
     key: options.key,
     channelBinding: options.channelBinding,
+    pipelineDepth: options.pipelineDepth,
+    pipelineBytes: options.pipelineBytes,
     table: options.table,
     helloOptions: options.helloOptions,
   };

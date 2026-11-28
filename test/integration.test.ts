@@ -194,7 +194,7 @@ test("IF VERSION writes only at the version, else VERSION_MISMATCH", async () =>
 test("pipelined statements keep their order and replies", async () => {
   const server = await startServer();
   try {
-    const client = new ChunkClient({ uri: `${server.uri}kinds`, pipelineDepth: 16 });
+    const client = new ChunkClient({ uri: `${server.uri}kinds` });
     await createKinds(client);
     client.clearSchemaCache();
     // Writes and reads issued without awaiting, from a cold schema cache.

@@ -15,7 +15,7 @@ async function eventOf(watch: ChunkWatch, kind: ChunkWatchEvent["kind"]): Promis
 for (const tls of [false, true]) {
   test(`foundation: ${tls ? "TLS" : "plain"} HELLO, structured errors, read metadata and explicit features`, { timeout: 20000 }, async () => {
     const server = await startServer({ tls });
-    const client = await connectUri(server.uri, { tlsInsecure: tls, table: "foundation", pipelineDepth: 4,
+    const client = await connectUri(server.uri, { tlsInsecure: tls, table: "foundation",
       helloOptions: { client_name: "foundation-client", statement_timeout_ms: 500, default_tag: Buffer.from("pending") } });
     try {
       const info = client.serverInfo()!;
