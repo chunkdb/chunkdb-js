@@ -7,6 +7,7 @@ This client uses CQL protocol 3 with chunkdb 2.x; see the server's [compatibilit
 ## Unreleased
 
 ### Added
+- `rotatePassword(newPassword)` adds a second password for the logged-in user with the salt of its current verifier and logs in with it from then on. ([chunkdb#151](https://github.com/chunkdb/chunkdb/issues/151))
 - `setBlockReturning` and `deleteBlockReturning` (and 3D forms) send RETURNING and decode `{ applied, version, rows }`; `transaction(fn, { readOnly: true })` runs BEGIN READ ONLY; `alterTable` takes `setDefault`, `dropDefault`, `setNullable`, `setRequired`, `addCheck`, `dropCheck` and `renameTable`, and `describe()` lists `checks`. ([chunkdb#151](https://github.com/chunkdb/chunkdb/issues/151))
 - `addVerifier` and `dropOldVerifier` rotate a password with two verifiers; `listUsers()` reports `serverRights` and `verifiers`; MONITOR, BACKUP and REPLICATION are server rights on `"*"`; `grant` and `revoke` take prefixes such as `tenant1_*`; `ChunkPermissionError` reports `rights` and `rightsOn`. ([chunkdb#151](https://github.com/chunkdb/chunkdb/issues/151))
 - `showStatus()` reports `version`, `uptimeMs`, `readOnly`, table `state` and `reason`, and `fenced`; `tableStats` reports `chunks`, `loadedChunks`, `files`, `diskBytes`, `slots` and `watches`; slots report `revision`, `lagRevisions` and `attached`, and `listSlots(table, prefix)` runs SHOW SLOTS ... PREFIX. ([chunkdb#151](https://github.com/chunkdb/chunkdb/issues/151))

@@ -17,6 +17,7 @@ test("the SCRAM-SHA-256 exchange matches RFC 7677", async () => {
     "c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,p=dHzbZapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ=",
   );
   assert.equal(final.serverSignature, "v=6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4=");
+  assert.deepEqual([final.salt, final.iterations], [Buffer.from("W22ZaJ0SNY7soEsUEjb6gQ==", "base64"), 4096]);
   assert.ok(scramSignatureMatches(final.serverSignature, "v=6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4="));
   assert.ok(!scramSignatureMatches(final.serverSignature, "v=6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G5="));
   assert.ok(!scramSignatureMatches(final.serverSignature, "v="));

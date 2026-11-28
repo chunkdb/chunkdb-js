@@ -38,6 +38,9 @@ export interface ScramFinal {
   message: string;
   /** The server-final message the server must answer: `v=<signature>`. */
   serverSignature: string;
+  /** The salt and iteration count of the verifier the password matched. */
+  salt: Buffer;
+  iterations: number;
 }
 
 function hmac(key: Uint8Array, text: string): Buffer {
@@ -142,6 +145,8 @@ export async function finishScramLogin(login: ScramLogin, password: string, serv
   return {
     message: `${withoutProof},p=${proof.toString("base64")}`,
     serverSignature: `v=${hmac(hmac(salted, "Server Key"), authMessage).toString("base64")}`,
+    salt: Buffer.from(saltText, "base64"),
+    iterations,
   };
 }
 

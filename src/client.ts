@@ -632,6 +632,8 @@ function columnIndexes(layout: TableLayout, names: readonly string[] | undefined
 
 export class ChunkClient {
   private readonly options: ResolvedOptions;
+  // The salt and iterations of the verifier the last login matched.
+  private loginVerifier: { salt: Buffer; iterations: number } | null = null;
   private socket: TransportSocket | null = null;
   private pendingQueue: PendingRequest[] = [];
   private connectPromise: Promise<this> | null = null;
@@ -1509,6 +1511,24 @@ export class ChunkClient {
         throw requestError("addVerifier needs a SCRAM-SHA-256 verifier", "ALTER USER");
       }
       expectOk(await this.run(`ALTER USER ${name} ADD VERIFIER $1`, [Buffer.from(verifier)], "ALTER USER"), "ALTER USER");
+    });
+  }
+
+  /**
+   * Adds a second password for the user this client logged in as (`ALTER
+   * USER ... ADD VERIFIER`), with the salt and iterations of the verifier its
+   * login matched, and logs in with it from then on. Both passwords log in
+   * until `dropOldVerifier(user)`: move every other client first. Needs a
+   * client with a user.
+   */
+  rotatePassword(newPassword: string): Promise<void> {
+    return this.enqueue(async () => {
+      const user = this.options.user;
+      if (user === "" || this.loginVerifier === null) throw requestError("rotatePassword needs a client logged in as a user", "ALTER USER");
+      if (typeof newPassword !== "string" || newPassword === "") throw requestError("a password is a non-empty string", "ALTER USER");
+      const verifier = await scramVerifierAsync(newPassword, this.loginVerifier);
+      expectOk(await this.run(`ALTER USER ${user} ADD VERIFIER $1`, [Buffer.from(verifier, "utf8")], "ALTER USER"), "ALTER USER");
+      this.options.password = newPassword;
     });
   }
 
@@ -2408,6 +2428,7 @@ export class ChunkClient {
         { phase: "auth", command: "AUTH" },
       );
     }
+    if (expected !== null) this.loginVerifier = { salt: expected.salt, iterations: expected.iterations };
     return info;
   }
 
